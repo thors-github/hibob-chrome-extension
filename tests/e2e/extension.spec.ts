@@ -1,78 +1,91 @@
 import { chromium, expect, test } from '@playwright/test';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-test('the packaged MV3 extension starts with its declared permissions and CSP', async () => {
+test('the packaged API-first MV3 extension starts with narrow permissions and a schema4 connection', async () => {
   const profile = await mkdtemp(join(tmpdir(), 'hibob-extension-test-'));
   const extension = resolve('dist');
+  expect(await readdir(extension)).not.toContain('content.js');
   const context = await chromium.launchPersistentContext(profile, {
     channel: 'chromium', headless: true,
     args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
   });
   try {
+    const requests: string[] = [];
+    context.on('request', request => { if (new URL(request.url()).origin === 'https://app.hibob.com') requests.push(request.url()); });
     const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
     const id = new URL(worker.url()).host;
     const page = await context.newPage();
     const errors: string[] = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(`chrome-extension://${id}/sidepanel.html`);
-    // Playwright emulates the renderer locale independently of the service worker.
-    // Assert UI strings against the same Chrome language API used by that page.
-    const browserLanguage = await page.evaluate(() => chrome.i18n.getUILanguage());
-    const german = /^de(?:[-_]|$)/i.test(browserLanguage);
+    // The renderer locale can differ from the worker. Use the page's Chrome API,
+    // exactly as the UI does, rather than the Playwright emulation preference.
+    const german = /^de(?:[-_]|$)/i.test(await page.evaluate(() => chrome.i18n.getUILanguage()));
     const labels = german
-      ? { heading: 'Monatsbuchung', start: 'Arbeitsbeginn', unbound: 'HiBob-Tab auswählen', bound: 'HiBob-Tab ausgewählt', read: 'Monat eingelesen', scan: 'Monat einlesen', appName: 'HiBob Monatsbuchung' }
-      : { heading: 'Monthly attendance', start: 'Work starts', unbound: 'Select a HiBob tab', bound: 'HiBob tab selected', read: 'Month read', scan: 'Read month', appName: 'HiBob Monthly Attendance' };
+      ? { heading: 'Monatsbuchung', start: 'Arbeitsbeginn', disconnected: 'Mit HiBob verbinden', connected: 'Mit HiBob verbunden', read: 'Monat eingelesen', login: 'Mit HiBob anmelden' }
+      : { heading: 'Monthly attendance', start: 'Work starts', disconnected: 'Connect to HiBob', connected: 'Connected to HiBob', read: 'Month read', login: 'Sign in to HiBob' };
     await expect(page.getByRole('heading', { name: labels.heading, exact: true })).toBeVisible();
     await expect(page.getByLabel(labels.start, { exact: true })).toHaveValue('08:00');
     await expect(page.locator('html')).toHaveAttribute('lang', german ? 'de' : 'en');
-    // Chrome chooses native manifest/catalog strings when loading the extension;
-    // CDP locale emulation can change getUILanguage later without reloading them.
     const nativeName = await worker.evaluate(() => chrome.i18n.getMessage('appName'));
     expect(['HiBob Monatsbuchung', 'HiBob Monthly Attendance']).toContain(nativeName);
-    expect(await worker.evaluate(() => chrome.runtime.getManifest().name)).toBe(nativeName);
-    expect(await worker.evaluate(() => chrome.runtime.getManifest().icons?.['128'])).toBe('icons/icon-128.png');
+    const manifest = await worker.evaluate(() => chrome.runtime.getManifest());
+    expect(manifest.name).toBe(nativeName);
+    expect(manifest.icons?.['128']).toBe('icons/icon-128.png');
+    expect(manifest.version).toBe('1.3.0');
+    expect(manifest.version_name).toBe('1.3.0-beta.1');
+    expect(manifest.permissions).toEqual(['sidePanel', 'storage', 'activeTab', 'scripting']);
+    expect(manifest.host_permissions).toEqual(['https://app.hibob.com/*']);
+    expect(manifest.optional_host_permissions).toBeUndefined();
+    expect(manifest.content_scripts).toBeUndefined();
+    expect(manifest.content_security_policy).toEqual({ extension_pages: "script-src 'self'; object-src 'none'; connect-src https://app.hibob.com" });
     expect(await page.locator('.app-mark img').evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
-    await expect(page.locator('#apply')).toBeDisabled();
     await expect(page.locator('#demo-banner')).not.toBeVisible();
-    const info = await worker.evaluate(() => ({ permissions: chrome.runtime.getManifest().permissions, csp: chrome.runtime.getManifest().content_security_policy, state: chrome.storage.session.get('sessionState') }));
-    expect(info.permissions).toEqual(['sidePanel', 'storage', 'activeTab', 'scripting']);
-    expect(info.csp).toEqual({ extension_pages: "script-src 'self'; object-src 'none'; connect-src 'none'" });
-    expect(await worker.evaluate(() => chrome.runtime.getManifest().version)).toBe('1.2.3');
-    await expect(page.locator('#connection-title')).toHaveText(labels.unbound);
+    await expect(page.locator('#connection-title')).toHaveText(labels.disconnected);
+    await expect(page.locator('#connect')).toHaveText(labels.login);
     await expect(page.locator('#scan')).toBeDisabled();
-    // A top-level extension tab is not the native side panel. The production
-    // sender guard deliberately rejects its initialization RPC. That failure
-    // must remain visible and must not enable scan/write controls via events.
+    await expect(page.locator('#apply')).toBeDisabled();
+    const readSession = () => worker.evaluate(async () => (await chrome.storage.session.get('sessionState')).sessionState as Record<string, unknown> | undefined);
+    await expect.poll(async () => (await readSession())?.schemaVersion).toBe(4);
+    const initial = await readSession();
+    expect(initial).toBeDefined();
+    expect(initial?.tabId).toBeUndefined();
+    expect(initial?.connection).toBeUndefined();
+    expect(initial?.job).toBeUndefined();
+    expect(requests).toEqual([]);
+
+    // A top-level extension tab is not the native side panel. Its RPC sender
+    // includes a tab and must remain rejected even after synthetic storage events.
+    // These fixture events exercise rendering only, never an authenticated API.
     const onlyPanel = german ? 'Diese Aktion ist nur im Extension-Seitenpanel verfügbar.' : 'This action is only available in the extension’s side panel.';
     await expect(page.locator('#main-error')).toHaveText(onlyPanel);
     await expect(page.locator('#retry-connection')).toBeVisible();
-    await worker.evaluate(async () => { await chrome.storage.session.set({ sessionState: { tabId: 9 } }); });
-    await expect(page.locator('#connection-title')).toHaveText(labels.bound);
-    await expect(page.locator('#connection-detail')).toContainText(labels.scan);
+    await worker.evaluate(async () => { await chrome.storage.session.set({ sessionState: { schemaVersion: 4, revision: 100, planRevision: 100, tabId: 9 } }); });
+    await expect(page.locator('#connection-title')).toHaveText(labels.disconnected);
+    await expect(page.locator('#scan')).toBeDisabled();
+    const month = await page.locator('#month').inputValue();
+    await worker.evaluate(async currentMonth => {
+      await chrome.storage.session.set({ sessionState: {
+        schemaVersion: 4, revision: 101, planRevision: 101,
+        connection: { status: 'connected', generation: 'isolated-fixture-session', employeeId: 'fixture-employee', companyId: 'fixture-company', employeeLabel: 'Local API fixture', companyLabel: 'Local company', transport: 'direct', capabilities: { read: true, write: false, overwrite: false } },
+        snapshot: { month: currentMonth, employeeLabel: 'Local API fixture', periodLabel: currentMonth, scannedAt: '2026-11-02T09:00:00Z', source: 'hibob', context: { mode: 'api-session', connectionId: 'isolated-fixture-session', employeeKey: 'fixture-employee', tenantKey: 'fixture-company' }, days: [] },
+      } });
+    }, month);
+    await expect(page.locator('#connection-title')).toHaveText(labels.read);
+    await expect(page.locator('#connection-detail')).toContainText('Local API fixture');
     await expect(page.locator('#scan')).toBeDisabled();
     await expect(page.locator('#apply')).toBeDisabled();
     await page.locator('#retry-connection').click();
     await expect(page.locator('#main-error')).toHaveText(onlyPanel);
     await expect(page.locator('#scan')).toBeDisabled();
-    // These fixture events exercise the packaged UI, not the controller's action
-    // handler. A selected-tab cold reopen is tested with a consistent backend in
-    // panel-connection.test.ts; directly seeding storage does not bind its writer.
-    await page.locator('#connection').screenshot({ path: '/tmp/hibob-connection-1.2.0.png' });
-    await worker.evaluate(async () => {
-      await chrome.storage.session.set({ sessionState: {
-        tabId: 9,
-        snapshot: { month: '2026-11', employeeLabel: 'Lokales Testkonto', periodLabel: 'November 2026', scannedAt: '2026-11-02T09:00:00Z', source: 'hibob', days: [] },
-      } });
-    });
-    await expect(page.locator('#connection-title')).toHaveText(labels.read);
-    await expect(page.locator('#connection-detail')).toContainText('Lokales Testkonto');
-    await worker.evaluate(async () => { await chrome.storage.session.set({ sessionState: {} }); });
-    await expect(page.locator('#connection-title')).toHaveText(labels.unbound);
-    await expect(page.locator('#scan')).toBeDisabled();
+    await expect(page.locator('#apply')).toBeDisabled();
+    await worker.evaluate(async () => { await chrome.storage.session.set({ sessionState: { schemaVersion: 4, revision: 102, planRevision: 102 } }); });
+    await expect(page.locator('#connection-title')).toHaveText(labels.disconnected);
     await page.reload();
-    await expect(page.locator('#connection-title')).toHaveText(labels.unbound);
+    await expect(page.locator('#connection-title')).toHaveText(labels.disconnected);
+    expect(requests).toEqual([]);
     expect(errors).toEqual([]);
   } finally {
     await context.close();

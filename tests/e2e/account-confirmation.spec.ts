@@ -7,7 +7,7 @@ for (const language of ['de-DE', 'en-GB']) {
     const dates = Array.from({ length: 30 }, (_, index) => `2026-11-${String(index + 1).padStart(2, '0')}`);
     const snapshot: MonthSnapshot = {
       source: 'hibob', month: settings.month, employeeLabel: 'Local attendance fixture', periodLabel: '01/11/2026–30/11/2026', scannedAt: '2026-11-02T08:30:00Z',
-      context: { mode: 'user-confirmed-ui', documentId: 'local-document', pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: 'local-own-attendance-marker' },
+      context: { mode: 'api-session', connectionId: 'local-session', employeeKey: 'local-employee', tenantKey: 'local-company' },
       days: dates.map(date => ({ date, editable: true, entries: [], reportedMinutes: 0, fingerprint: `empty:${date}` })),
     };
     const days: DayPlan[] = snapshot.days.map(day => {
@@ -23,7 +23,7 @@ for (const language of ['de-DE', 'en-GB']) {
         return { week, dates: included.map(day => day.date), targetMinutes: minutes, plannedMinutes: minutes, errors: [] };
       }),
     };
-    const state: SessionState = { schemaVersion: 3, revision: 1, planRevision: 7, tabId: 9, snapshot, plan };
+    const state: SessionState = { schemaVersion: 4, revision: 1, planRevision: 7, connection: { status: 'connected', generation: 'local-session', employeeId: 'local-employee', companyId: 'local-company', employeeLabel: 'Local Employee', companyLabel: 'Local Company', transport: 'direct', capabilities: { read: true, write: true, overwrite: true } }, snapshot, plan };
     const destinations: string[] = [];
     page.on('request', request => destinations.push(request.url()));
     // This isolated page owns a local RPC fixture. No real extension runtime or

@@ -3,9 +3,31 @@ export type ConflictChoice = 'overwrite' | 'skip';
 export type ConflictChoices = Record<LocalDate, ConflictChoice>;
 
 export type AttendanceContext =
+  | { mode: 'api-session'; connectionId: string; employeeKey: string; tenantKey: string }
   | { mode: 'stable-identity'; documentId: string; employeeKey: string; tenantKey: string }
   | { mode: 'user-confirmed-ui'; documentId: string; pageUrl: string; markerFingerprint: string }
   | { mode: 'unavailable'; documentId: string; reason: string };
+
+export interface ApiConnection {
+  status: 'disconnected' | 'connected' | 'expired' | 'unsupported';
+  generation: string;
+  employeeId?: string;
+  companyId?: string;
+  employeeLabel?: string;
+  companyLabel?: string;
+  transport?: 'direct' | 'temporary-tab';
+  capabilities?: { read: boolean; write: boolean; overwrite: boolean };
+  reason?: string;
+}
+
+/** Read-only preflight. It does not claim that a server accepted unsaved entries. */
+export interface PreflightResult {
+  date: LocalDate;
+  checked: true;
+  saved: false;
+  serverValidated: false;
+  netMinutes: number;
+}
 
 /** Explicit consent to one immutable plan, never a preference or reusable identity. */
 export interface AccountConfirmation {
@@ -32,7 +54,9 @@ export interface JobState {
   id: string;
   kind: 'scan' | 'apply';
   status: 'running' | 'cancelling' | 'interrupted';
-  tabId: number;
+  connectionId?: string;
+  /** Legacy migration input only. New jobs bind to connectionId. */
+  tabId?: number;
   month: string;
   startedAt: string;
   updatedAt: string;
@@ -170,7 +194,8 @@ export interface UpdateStatus {
 
 export interface SessionState {
   /** Optional on input only, for migration from older sessions. */
-  schemaVersion?: 2 | 3;
+  schemaVersion?: 2 | 3 | 4;
+  connection?: ApiConnection;
   revision?: number;
   planRevision?: number;
   editLease?: PlanEditLease;

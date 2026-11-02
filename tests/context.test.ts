@@ -58,3 +58,19 @@ describe('account context and per-plan authorization', () => {
     expect(() => assertApplyAuthorization(context, authorization)).toThrow();
   });
 });
+
+describe('API session account context', () => {
+  const api: AttendanceContext = { mode: 'api-session', connectionId: 'session-A', employeeKey: 'employee-A', tenantKey: 'company-A' };
+  const approval = (): ApplyAuthorization => ({ planId: 'plan-A', planRevision: 1, contextFingerprint: contextFingerprint(api), confirmation: { planId: 'plan-A', planRevision: 1, contextFingerprint: contextFingerprint(api), confirmed: true } });
+  it('uses observed account/session identity without requiring or manufacturing a browser document', () => {
+    expect(isReviewableContext(api)).toBe(true);
+    expect(api).not.toHaveProperty('documentId');
+    expect(() => assertApplyAuthorization(api, approval())).not.toThrow();
+    const missing = approval(); delete missing.confirmation;
+    expect(() => assertApplyAuthorization(api, missing)).toThrow('bestätigen');
+  });
+  it.each(['connectionId', 'employeeKey', 'tenantKey'] as const)('rejects missing or changed %s before authorization', key => {
+    expect(isReviewableContext({ ...api, [key]: '' })).toBe(false);
+    expect(() => assertApplyAuthorization({ ...api, [key]: 'changed' }, approval())).toThrow();
+  });
+});

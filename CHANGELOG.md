@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.0-beta.1
+
+- Replace the production form writer with an API-first adapter for HiBob's internal web endpoints. Retain the monthly planner, German calendars, variable times, exclusions and conflict review.
+- Add normal HiBob/SSO sign-in and account/company connection status. Prefer browser-session API requests in the extension background; support an extension-owned temporary background tab for API requests when a page context is required. The fallback never fills forms.
+- Keep authentication in Chrome: no password collection, manually supplied API tokens, Chrome cookies API or persisted authentication cookies/tokens. Disconnect invalidates the local connection without logging out other HiBob sessions.
+- Bind scans and explicit per-plan account consent to the authenticated employee/company and connection generation. Session expiry, account changes and reconnecting invalidate previews and approval.
+- Replace native draft staging with **Check plan — no saving**, a read-only account/day preflight and local plan validation. It does not create/delete test entries or claim server-side save acceptance. Results are temporary and separate from booking history.
+- Require current-day preconditions, ID-preserving full-day replacement and independent saved-data readback. Replacement that would delete existing segments is blocked. Request construction and overwrite checks are covered by source analysis and local server fixtures; live overwriting remains unverified. Ambiguous requests stop without automatic write retries or fallback to the old DOM writer.
+- Add exact host access and connection policy for `https://app.hibob.com/*`. Upgrade adapter protocol to 5 and session format to 4; discard older previews while preserving preferences and booking history.
+- Verify the installed candidate in native Chrome: reuse an existing HiBob session through direct API requests, read a complete month, retain a manual exclusion in the preview, require fresh account consent and finish read-only preflight. The result invalidates the scan and approval and requires a fresh scan. No attendance writes, Save or Submit actions were executed. Interactive SSO and the temporary-tab fallback were not exercised natively.
+- Correct the attendance policy-details lookup to the observed read-only POST with `fields: ['policyDetails']`. Live API saving and future-day acceptance remain unverified; stable publication and Store submission remain blocked.
+
 ## 1.2.3-beta.1
 
 - Verified the actual automated writer in signed-in Chrome through the dedicated draft-only path: three correct segments, Cancel and unchanged readback. No live save was performed; stable and Store release gates remain closed.

@@ -1,6 +1,6 @@
 import './styles.css';
 import { buildMonthPlan, defaultSettings, formatMinutes, GERMAN_STATES, netMinutes } from '../domain/index';
-import type { AccountConfirmation, AttendanceEntry, BookingPlan, ConflictChoices, DayPlan, DraftCheckResult, MonthSnapshot, PlanEditLease, SessionState, Settings } from '../shared/types';
+import type { AccountConfirmation, AttendanceEntry, BookingPlan, ConflictChoices, DayPlan, PreflightResult, MonthSnapshot, PlanEditLease, SessionState, Settings } from '../shared/types';
 import { sameJsonValue } from '../shared/json';
 import { contextFingerprint } from '../shared/context';
 import { createDemoSnapshot, demoFingerprint } from './demo';
@@ -21,9 +21,10 @@ let choices: ConflictChoices = {};
 let seed = freshSeed();
 let busy = false;
 let applying = false;
-let checkingDraft = false;
-let draftCheckResult: DraftCheckResult | undefined;
-let draftCheckNeedsScan = false;
+let connecting = false;
+let checkingPreflight = false;
+let preflightResult: PreflightResult | undefined;
+let preflightNeedsScan = false;
 let rebuilding = false;
 let demoCancelled = false;
 let localError = '';
@@ -35,7 +36,7 @@ let initializationFailed = false;
 let preferencesLoaded = !hasExtension;
 let connectionRetryAvailable = false;
 let approvedPlanRevision: number | undefined;
-let confirmed: { plan: BookingPlan; planRevision: number; contextFingerprint: string; draftCheckDate: string } | undefined;
+let confirmed: { plan: BookingPlan; planRevision: number; contextFingerprint: string; preflightDate: string } | undefined;
 let pendingDraft: Draft | undefined;
 let invalidations: Promise<void> = Promise.resolve();
 let preferenceWrites: Promise<void> = Promise.resolve();
@@ -55,7 +56,7 @@ interface Draft {
 }
 
 type PanelMessage = { type: string; month?: string; date?: string; plan?: BookingPlan; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation };
-type PanelResponse = { ok: boolean; state?: SessionState; error?: string; draftCheck?: DraftCheckResult };
+type PanelResponse = { ok: boolean; state?: SessionState; error?: string; preflight?: PreflightResult };
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
@@ -67,8 +68,10 @@ app.innerHTML = `
     <div class="version-bar"><span id="installed-version"></span><button id="activate-update" class="button subtle" hidden>${t('Jetzt aktualisieren')}</button></div>
     <div id="update-notice" class="notice" role="status" hidden></div>
     <div id="demo-banner" class="demo-banner" hidden><strong>${t("Lokaler Testmodus")}</strong>${t("Diese Vorschau verwendet Beispieldaten. Es werden keine Daten an HiBob gesendet.")}</div>
-    <div id="connection" class="connection"><span class="connection-dot" aria-hidden="true"></span><div><p id="connection-title">${t("HiBob-Tab auswählen")}</p><p id="connection-detail" class="muted">${t("HiBob öffnen und dort auf das Extension-Symbol klicken.")}</p></div></div>
-    <div id="account-context-notice" class="notice" role="status" hidden>${t('Prüfe vor dem Speichern links dein HiBob-Konto. Die Zuordnung bestätigst du für diesen Plan im nächsten Schritt.')}</div>
+    <div id="connection" class="connection"><span class="connection-dot" aria-hidden="true"></span><div><p id="connection-title">${t("Mit HiBob verbinden")}</p><p id="connection-detail" class="muted">${t("Melde dich über HiBob an, um deine Anwesenheiten einzulesen.")}</p></div></div>
+    <div class="connection-actions"><button id="connect" class="button wide">${t("Mit HiBob anmelden")}</button><button id="disconnect" class="button subtle" hidden>${t("Verbindung trennen")}</button></div>
+    <div id="api-capability-notice" class="notice" role="status" hidden></div>
+    <div id="account-context-notice" class="notice" role="status" hidden>${t('Prüfe vor dem Speichern das angezeigte HiBob-Konto und die Firma. Die Zuordnung bestätigst du für diesen Plan im nächsten Schritt.')}</div>
     <div id="main-error" class="notice error" role="alert" hidden></div>
     <button id="retry-plan" class="button wide" hidden>${t('Vorschau erneut prüfen')}</button>
     <button id="retry-connection" class="button wide" hidden>${t('Verbindung erneut prüfen')}</button>
@@ -109,7 +112,7 @@ app.innerHTML = `
       <div class="scan-toolbar"><button id="scan" class="button wide" disabled>${t("Monat einlesen")}</button></div>
     </section>
     <section id="scan-progress" class="notice" role="status" hidden></section>
-    <section id="draft-check-result" class="notice draft-check-result" role="status" aria-labelledby="draft-check-result-title" hidden><h2 id="draft-check-result-title">${t('Entwurf geprüft – nicht gespeichert')}</h2><dl id="draft-check-details" class="confirm-details"></dl><p class="hint">${t('Der Tag ist unverändert. Lies den Monat erneut ein, um weiterzuarbeiten.')}</p></section>
+    <section id="draft-check-result" class="notice draft-check-result" role="status" aria-labelledby="draft-check-result-title" hidden><h2 id="draft-check-result-title">${t('Plan geprüft – nicht gespeichert')}</h2><dl id="draft-check-details" class="confirm-details"></dl><p class="hint">${t('Kontozuordnung und Tagesdaten wurden lesend geprüft. Die Speicherung wurde nicht getestet. Lies den Monat erneut ein, um weiterzuarbeiten.')}</p></section>
     <section class="preview" aria-labelledby="preview-title">
       <div class="section-title"><div><h2 id="preview-title">${t("Monatsvorschau")}</h2><p id="preview-subtitle" class="preview-subtitle">${t("Vor dem Buchen alle Änderungen prüfen.")}</p></div><button id="redistribute" class="button subtle" hidden>${t("Neu verteilen")}</button></div>
       <div id="preview-empty" class="empty-preview"><strong>${t("Dein Monat auf einen Blick")}</strong><p>${t("Lies zuerst den Monat aus HiBob ein. Feiertage, Abwesenheiten und bestehende Einträge werden berücksichtigt.")}</p></div>
@@ -123,7 +126,7 @@ app.innerHTML = `
     <footer class="footer"><div class="footer-buttons"><button id="cancel-run" class="button danger" hidden>${t("Abbrechen")}</button><button id="apply" class="button primary" disabled>${t("Jetzt buchen")}</button></div><p id="footer-hint" class="hint">${t("Es wird erst nach deiner Bestätigung gespeichert.")}</p></footer>
   </div>
   <dialog id="conflict-dialog" aria-labelledby="conflict-title"><div class="dialog-body"><h2 id="conflict-title">${t("Vorhandene Buchungen prüfen")}</h2><p class="hint">${t("Entscheide für jeden Tag. Beim Überschreiben werden die bisherigen Arbeits- und Pauseneinträge durch die Vorschau ersetzt.")}</p><div class="dialog-toolbar"><button id="overwrite-all" class="button">${t("Alle überschreiben")}</button><button id="skip-all" class="button">${t("Alle überspringen")}</button></div><div id="conflict-error" class="notice error" role="alert" style="margin-top:12px" hidden></div><div id="conflict-items"></div></div><div class="dialog-footer"><button id="close-conflicts" class="button">${t("Zurück")}</button><button id="save-conflicts" class="button primary">${t("Entscheidungen übernehmen")}</button></div></dialog>
-  <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t("Buchungen jetzt speichern?")}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><div id="account-confirmation-field" class="notice account-confirmation" hidden><label class="ack-label" for="account-confirmation"><input id="account-confirmation" type="checkbox" /><span id="account-confirmation-label"></span></label></div><div class="draft-check-controls field"><label for="draft-check-date">${t('Tag für Entwurfsprüfung')}</label><select id="draft-check-date" disabled></select><p class="hint">${t('Der ausgewählte Tag wird ausgefüllt, geprüft und wieder verworfen. Es wird nicht gespeichert. Danach den Monat erneut einlesen.')}</p><button id="check-draft" class="button wide" disabled>${t('Entwurf testen – ohne Speichern')}</button></div><p class="hint">${t("Die Extension kontrolliert jeden gespeicherten Tag. Bei einer Abweichung stoppt der Lauf.")}</p></div><div class="dialog-footer"><button id="close-apply" class="button">${t("Zurück")}</button><button id="confirm-apply" class="button primary" disabled>${t("Buchungen starten")}</button></div></dialog>
+  <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t("Buchungen jetzt speichern?")}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><div id="account-confirmation-field" class="notice account-confirmation" hidden><label class="ack-label" for="account-confirmation"><input id="account-confirmation" type="checkbox" /><span id="account-confirmation-label"></span></label></div><div class="draft-check-controls field"><label for="draft-check-date">${t('Tag für Planprüfung')}</label><select id="draft-check-date" disabled></select><p class="hint">${t('Der ausgewählte Tag und die geplanten Daten werden ohne Änderungen geprüft. Das bestätigt keine serverseitige Speicherung. Danach den Monat erneut einlesen.')}</p><button id="check-draft" class="button wide" disabled>${t('Plan prüfen – ohne Speichern')}</button></div><p class="hint">${t("Die Extension kontrolliert jeden gespeicherten Tag. Bei einer Abweichung stoppt der Lauf.")}</p></div><div class="dialog-footer"><button id="close-apply" class="button">${t("Zurück")}</button><button id="confirm-apply" class="button primary" disabled>${t("Buchungen starten")}</button></div></dialog>
   <dialog id="import-dialog" aria-labelledby="import-title"><div class="dialog-body"><h2 id="import-title">${t('Einstellungen importieren?')}</h2><p class="hint">${t('Diese Vorgaben ersetzen deine aktuellen Einstellungen. Der Import startet keine Buchungen; prüfe danach die Monatsvorschau.')}</p><dl id="import-details" class="confirm-details"></dl></div><div class="dialog-footer"><button id="cancel-import" class="button">${t('Abbrechen')}</button><button id="confirm-import" class="button primary">${t('Einstellungen übernehmen')}</button></div></dialog>
 `;
 
@@ -182,7 +185,7 @@ function activeJob(): SessionState['job'] | undefined {
   return state.job && (state.job.status === 'running' || state.job.status === 'cancelling') ? state.job : undefined;
 }
 
-function isRunning(): boolean { return busy || applying || checkingDraft || Boolean(activeJob()) || (!state.job && state.run?.status === 'running'); }
+function isRunning(): boolean { return busy || applying || checkingPreflight || connecting || Boolean(activeJob()) || (!state.job && state.run?.status === 'running'); }
 
 function updating(): boolean { return updateRequested || state.updateApplying === true; }
 
@@ -208,11 +211,25 @@ function revokeApproval(): void {
 }
 
 function approved(): boolean {
-  return Boolean(!updating() && !initializing && !initializationFailed && preferencesLoaded && !draftCheckNeedsScan && plan?.canReview && !pendingDraft && approvedPlanRevision === planRevision() && sameJsonValue(plan, state.plan));
+  return Boolean(connected() && !updating() && !initializing && !initializationFailed && preferencesLoaded && !preflightNeedsScan && plan?.canReview && !pendingDraft && approvedPlanRevision === planRevision() && sameJsonValue(plan, state.plan));
 }
 
 function needsAccountConfirmation(reviewed: BookingPlan): boolean {
-  return reviewed.snapshot.source === 'hibob' && reviewed.snapshot.context?.mode === 'user-confirmed-ui';
+  return reviewed.snapshot.source === 'hibob' && (reviewed.snapshot.context?.mode === 'api-session' || reviewed.snapshot.context?.mode === 'user-confirmed-ui');
+}
+
+function connected(): boolean {
+  return isDemo || Boolean(state.connection?.status === 'connected' && state.connection.capabilities?.read);
+}
+
+function canWrite(): boolean {
+  return isDemo || Boolean(connected() && state.connection?.capabilities?.write
+    && (!plan?.days.some(day => day.action === 'overwrite') || state.connection.capabilities.overwrite));
+}
+
+function accountLabel(): string {
+  if (isDemo) return state.snapshot?.employeeLabel ?? t('Lokales Testkonto');
+  return [state.connection?.employeeLabel, state.connection?.companyLabel].filter(Boolean).join(' · ');
 }
 
 function writableDays(reviewed: BookingPlan): DayPlan[] {
@@ -230,10 +247,10 @@ function updateConfirmationButton(): void {
   const review = confirmed;
   const ready = applyDialog.open && currentConfirmation();
   const consent = !review || !needsAccountConfirmation(review.plan) || input('account-confirmation').checked;
-  $<HTMLButtonElement>('confirm-apply').disabled = !ready || !consent;
+  $<HTMLButtonElement>('confirm-apply').disabled = !ready || !consent || !canWrite();
   select('draft-check-date').disabled = !ready;
   $<HTMLButtonElement>('check-draft').disabled = !ready || !consent || !review
-    || select('draft-check-date').value !== review.draftCheckDate || !writableDays(review.plan).some(day => day.date === review.draftCheckDate);
+    || select('draft-check-date').value !== review.preflightDate || !writableDays(review.plan).some(day => day.date === review.preflightDate);
 }
 
 function showError(message: string): void {
@@ -242,11 +259,11 @@ function showError(message: string): void {
 }
 
 async function request(command: PanelMessage): Promise<PanelResponse> {
-  if (!hasExtension) throw new Error(t('Die Erweiterung ist hier nicht aktiv. Lade den Extension-Ordner in Chrome und öffne sie über einem HiBob-Tab.'));
+  if (!hasExtension) throw new Error(t('Die Erweiterung ist hier nicht aktiv. Lade den Extension-Ordner in Chrome und öffne sie über das Extension-Symbol.'));
   const requestedAtRevision = sessionRevision;
   const response = await chrome.runtime.sendMessage(command) as PanelResponse;
   if (response?.state && (typeof response.state.revision === 'number' || requestedAtRevision === sessionRevision)) receiveState(response.state);
-  if (!response?.ok) throw new Error(response?.error || t('Die HiBob-Verbindung hat nicht geantwortet. Bitte den Tab prüfen.'));
+  if (!response?.ok) throw new Error(response?.error || t('Die HiBob-Verbindung hat nicht geantwortet. Bitte erneut verbinden.'));
   return response;
 }
 
@@ -270,8 +287,8 @@ function receiveState(incoming: SessionState): void {
   if (typeof incoming.revision === 'number' && incoming.revision <= (state.revision ?? -1)) return;
   const previous = state;
   state = structuredClone(incoming);
-  if (draftCheckResult && (previous.tabId !== state.tabId || previous.planRevision !== state.planRevision || state.snapshot || activeJob())) draftCheckResult = undefined;
-  if (state.snapshot && !activeJob()) draftCheckNeedsScan = false;
+  if (preflightResult && (!sameJsonValue(previous.connection, state.connection) || previous.planRevision !== state.planRevision || state.snapshot || activeJob())) preflightResult = undefined;
+  if (state.snapshot && !activeJob()) preflightNeedsScan = false;
   if (state.plan && !renderablePlan(state.plan)) {
     state.plan = undefined;
     localError = t('Der gespeicherte Plan ist ungültig. Bitte den Monat erneut einlesen.');
@@ -283,7 +300,7 @@ function receiveState(incoming: SessionState): void {
     // this dialog. A replacement event may arrive without an invalidation event.
     $('conflict-items').replaceChildren();
   }
-  if (confirmed && (confirmed.planRevision !== planRevision() || !sameJsonValue(confirmed.plan, state.plan) || !sameJsonValue(confirmed.plan.snapshot, state.snapshot) || confirmed.contextFingerprint !== contextFingerprint(state.snapshot?.context) || activeJob())) closeConfirmation();
+  if (confirmed && (!sameJsonValue(previous.connection, state.connection) || confirmed.planRevision !== planRevision() || !sameJsonValue(confirmed.plan, state.plan) || !sameJsonValue(confirmed.plan.snapshot, state.snapshot) || confirmed.contextFingerprint !== contextFingerprint(state.snapshot?.context) || activeJob())) closeConfirmation();
   if (approvedPlanRevision !== undefined && (approvedPlanRevision !== planRevision() || !sameJsonValue(plan, state.plan))) approvedPlanRevision = undefined;
   if (!initializing && !pendingDraft) {
     if (state.plan && state.snapshot && state.plan.settings.month === settings.month) {
@@ -299,7 +316,7 @@ function receiveState(incoming: SessionState): void {
     }
   }
   // A reset or a job starting in another panel invalidates every local draft.
-  if (pendingDraft && (previous.tabId !== state.tabId || activeJob())) {
+  if (pendingDraft && (!sameJsonValue(previous.connection, state.connection) || activeJob())) {
     pendingDraft = undefined;
     buildVersion++;
     rebuilding = false;
@@ -328,6 +345,20 @@ async function refreshApproval(): Promise<void> {
   } catch (error) {
     if (version === buildVersion && !pendingDraft) { connectionRetryAvailable = true; showError(errorText(error)); }
   }
+}
+
+async function changeConnection(disconnect = false): Promise<void> {
+  if (isDemo || !hasExtension || transferBlocked()) return;
+  revokeApproval();
+  preflightResult = undefined;
+  preflightNeedsScan = false;
+  connecting = true;
+  localError = '';
+  renderState();
+  try {
+    await message({ type: disconnect ? 'PANEL_DISCONNECT' : 'PANEL_CONNECT' });
+  } catch (error) { localError = errorText(error); }
+  finally { connecting = false; renderState(); }
 }
 
 function updateConditionalFields(): void {
@@ -392,7 +423,7 @@ async function rebuild(newSeed = false): Promise<void> {
 }
 
 function beginDraft(newSeed = false): Draft {
-  draftCheckResult = undefined;
+  preflightResult = undefined;
   if (newSeed) seed = freshSeed();
   const draft: Draft = {
     version: ++buildVersion, changeId: crypto.randomUUID(), settings: structuredClone(settings),
@@ -516,34 +547,41 @@ function renderState(): void {
   $<HTMLButtonElement>('activate-update').disabled = transferBlocked() || Boolean(state.job);
   $('activate-update').textContent = updating() ? t('Aktualisierung wird aktiviert …') : t('Jetzt aktualisieren');
   $('update-notice').hidden = !state.update?.pendingVersion && !updating();
-  $('update-notice').textContent = updating() ? t('Die Erweiterung wird neu geladen. Lade danach den HiBob-Tab neu und lies den Monat erneut ein.')
+  $('update-notice').textContent = updating() ? t('Die Erweiterung wird neu geladen. Verbinde dich danach mit HiBob und lies den Monat erneut ein.')
     : state.job?.status === 'interrupted' ? t('Version {version} ist bereit. Kläre zuerst den unterbrochenen Vorgang durch erneutes Einlesen.', { version: state.update?.pendingVersion ?? '' })
     : running ? t('Version {version} ist verfügbar. Die Aktualisierung wartet auf das Ende des laufenden Vorgangs.', { version: state.update?.pendingVersion ?? '' })
-    : t('Version {version} ist bereit. Nach der Aktualisierung musst du den HiBob-Tab neu laden und den Monat erneut einlesen.', { version: state.update?.pendingVersion ?? '' });
+    : t('Version {version} ist bereit. Verbinde dich nach der Aktualisierung erneut mit HiBob und lies den Monat erneut ein.', { version: state.update?.pendingVersion ?? '' });
   $<HTMLButtonElement>('export-settings').disabled = transferBlocked();
   $<HTMLButtonElement>('import-settings').disabled = transferBlocked();
   $<HTMLInputElement>('settings-file').disabled = transferBlocked();
   $<HTMLButtonElement>('confirm-import').disabled = transferBlocked();
   if ((running || updating()) && importDialog.open) { importCandidate = undefined; importDialog.close(); }
   $('demo-banner').hidden = !isDemo;
-  const bound = state.tabId !== undefined;
-  const scanned = state.snapshot?.month === settings.month;
+  const bound = connected();
+  const scanned = bound && state.snapshot?.month === settings.month;
   $('connection').classList.toggle('connected', scanned);
   $('connection').classList.toggle('selected', bound && !scanned);
-  $('account-context-notice').hidden = isDemo || !scanned || state.snapshot?.context?.mode !== 'user-confirmed-ui';
+  $('account-context-notice').hidden = isDemo || !scanned || (state.snapshot?.context?.mode !== 'api-session' && state.snapshot?.context?.mode !== 'user-confirmed-ui');
+  $('connect').hidden = isDemo || bound;
+  $('disconnect').hidden = isDemo || !bound;
+  $<HTMLButtonElement>('connect').disabled = transferBlocked();
+  $<HTMLButtonElement>('disconnect').disabled = transferBlocked();
+  $('connect').textContent = connecting ? t('Verbindung wird hergestellt …') : t('Mit HiBob anmelden');
+  $('api-capability-notice').hidden = isDemo || !bound || canWrite();
+  $('api-capability-notice').textContent = state.connection?.reason || (state.connection?.capabilities?.write ? t('Das Überschreiben vorhandener Einträge ist für diese API-Verbindung nicht freigegeben.') : t('Lesende API-Verbindung. Vorschau und Planprüfung sind verfügbar; Speichern ist noch nicht freigegeben.'));
   if (state.snapshot && scanned) {
     $('connection-title').textContent = t('Monat eingelesen');
     const time = new Intl.DateTimeFormat(locale(), { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Berlin' }).format(new Date(state.snapshot.scannedAt));
-    $('connection-detail').textContent = t('{employee} · Eingelesen: {time} Uhr · {period}', { employee: state.snapshot.employeeLabel, time, period: state.snapshot.periodLabel });
+    $('connection-detail').textContent = t('{employee} · Eingelesen: {time} Uhr · {period}', { employee: accountLabel() || state.snapshot.employeeLabel, time, period: state.snapshot.periodLabel });
   } else if (isDemo) {
     $('connection-title').textContent = t('Lokale Testoberfläche');
     $('connection-detail').textContent = t('Alle Funktionen können ohne echte Buchungen geprüft werden.');
   } else if (bound) {
-    $('connection-title').textContent = t('HiBob-Tab ausgewählt');
-    $('connection-detail').textContent = state.snapshot ? t('Für {month} ist noch kein Monat eingelesen. Bitte „Monat einlesen“ wählen.', { month: monthLabel(settings.month) }) : state.run ? t('Monat erneut einlesen, um weitere Buchungen vorzubereiten.') : t('Noch kein Monat eingelesen. Klicke auf „Monat einlesen“.');
+    $('connection-title').textContent = t('Mit HiBob verbunden');
+    $('connection-detail').textContent = [accountLabel(), state.connection?.transport === 'temporary-tab' ? t('API über temporären Hintergrund-Tab') : t('Direkte API-Verbindung'), state.snapshot ? t('Für {month} ist noch kein Monat eingelesen. Bitte „Monat einlesen“ wählen.', { month: monthLabel(settings.month) }) : t('Noch kein Monat eingelesen. Klicke auf „Monat einlesen“.')].filter(Boolean).join(' · ');
   } else {
-    $('connection-title').textContent = t('HiBob-Tab auswählen');
-    $('connection-detail').textContent = t('HiBob öffnen und dort auf das Extension-Symbol klicken.');
+    $('connection-title').textContent = connecting ? t('Verbindung wird hergestellt …') : state.connection?.status === 'expired' ? t('HiBob-Anmeldung abgelaufen') : state.connection?.status === 'unsupported' ? t('HiBob-Verbindung nicht verfügbar') : t('Mit HiBob verbinden');
+    $('connection-detail').textContent = state.connection?.reason || t('Melde dich über HiBob an, um deine Anwesenheiten einzulesen.');
   }
   const error = localError || state.error || (state.job?.status === 'interrupted' ? t('Der letzte Vorgang wurde unterbrochen. Bitte den Monat erneut einlesen.') : '');
   $('main-error').hidden = !error;
@@ -561,18 +599,18 @@ function renderState(): void {
     const bar = node('progress');
     bar.max = progress.total || 1;
     bar.value = progress.completed;
-    bar.setAttribute('aria-label', progress.phase === 'scan' ? t('Monat einlesen') : checkingDraft ? t('Entwurfsprüfung') : t('Buchungsfortschritt'));
+    bar.setAttribute('aria-label', progress.phase === 'scan' ? t('Monat einlesen') : checkingPreflight ? t('Planprüfung') : t('Buchungsfortschritt'));
     $('scan-progress').replaceChildren(label, bar);
   }
   renderPreview();
   renderRun();
-  renderDraftCheck();
-  $('cancel-run').hidden = !running;
+  renderPreflight();
+  $('cancel-run').hidden = !running || connecting;
   $<HTMLButtonElement>('cancel-run').disabled = hasExtension && (!activeJob() || activeJob()?.status === 'cancelling');
   const finished = state.run?.status === 'complete' && state.run.planId === plan?.id;
   $<HTMLButtonElement>('apply').disabled = !approved() || locked || rebuilding || finished;
-  $('apply').textContent = rebuilding ? t('Vorschau wird geprüft …') : running ? t('Bitte warten …') : finished ? t('Buchungen abgeschlossen') : t('Jetzt buchen');
-  $('footer-hint').textContent = running ? t('Bitte den HiBob-Tab während des Laufs unverändert lassen.') : draftCheckNeedsScan ? t('Nach der Entwurfsprüfung den Monat erneut einlesen.') : isDemo ? t('Testmodus: Auch „Jetzt buchen“ verändert nur lokale Beispieldaten.') : state.run && !state.snapshot ? t('Für einen weiteren Lauf den Monat erneut einlesen.') : t('Es wird erst nach deiner Bestätigung gespeichert.');
+  $('apply').textContent = rebuilding ? t('Vorschau wird geprüft …') : running ? t('Bitte warten …') : finished ? t('Buchungen abgeschlossen') : canWrite() ? t('Jetzt buchen') : t('Plan prüfen');
+  $('footer-hint').textContent = running ? t('Bitte das HiBob-Konto während des Laufs nicht wechseln.') : preflightNeedsScan ? t('Nach der Planprüfung den Monat erneut einlesen.') : isDemo ? t('Testmodus: Auch „Jetzt buchen“ verändert nur lokale Beispieldaten.') : state.run && !state.snapshot ? t('Für einen weiteren Lauf den Monat erneut einlesen.') : t('Es wird erst nach deiner Bestätigung gespeichert.');
   updateConfirmationButton();
   if (focusId && focused && !focused.isConnected) document.getElementById(focusId)?.focus({ preventScroll: true });
   scrolling.scrollTop = scrollTop;
@@ -683,14 +721,14 @@ function renderRun(): void {
   }));
 }
 
-function renderDraftCheck(): void {
-  $('draft-check-result').hidden = !draftCheckResult;
+function renderPreflight(): void {
+  $('draft-check-result').hidden = !preflightResult;
   const list = $('draft-check-details');
   list.replaceChildren();
-  if (!draftCheckResult) return;
-  detailsLine(list, t('Geprüfter Tag'), dateLabel(draftCheckResult.date));
-  detailsLine(list, t('Geprüfte Segmente'), entriesElement([...draftCheckResult.entries].sort((a, b) => a.start.localeCompare(b.start)), true));
-  detailsLine(list, t('Netto'), formatMinutes(draftCheckResult.netMinutes));
+  if (!preflightResult) return;
+  detailsLine(list, t('Geprüfter Tag'), dateLabel(preflightResult.date));
+  detailsLine(list, t('Prüfung'), t('Kontozuordnung, Tagesdaten und lokale Planvalidierung; keine serverseitige Speicherbestätigung.'));
+  detailsLine(list, t('Netto'), formatMinutes(preflightResult.netMinutes));
 }
 
 function settingsChanged(): void {
@@ -762,16 +800,16 @@ async function saveChoices(): Promise<void> {
 }
 
 async function scanMonth(): Promise<void> {
-  if (isRunning() || updating() || rebuilding) return;
+  if (!connected() || isRunning() || updating() || rebuilding) return;
   if (!$<HTMLFormElement>('settings-form').reportValidity()) return;
   settings = readSettings();
-  busy = true; demoCancelled = false; localError = ''; plan = undefined; choices = {}; draftCheckResult = undefined;
+  busy = true; demoCancelled = false; localError = ''; plan = undefined; choices = {}; preflightResult = undefined;
   if (isDemo) {
     state.run = undefined;
     state.progress = { phase: 'scan', completed: 0, total: 1, message: t('HiBob-Monat wird geprüft …') };
   }
   const month = settings.month;
-  const tabId = state.tabId;
+  const connectionGeneration = state.connection?.generation;
   const draft = beginDraft(true);
   plan = undefined;
   renderState();
@@ -783,11 +821,11 @@ async function scanMonth(): Promise<void> {
       if (demoCancelled) throw new Error(t('Einlesen abgebrochen.'));
       if (!demoSnapshot || demoSnapshot.month !== month) demoSnapshot = createDemoSnapshot(settings);
       state.snapshot = structuredClone(demoSnapshot);
-      draftCheckNeedsScan = false;
+      preflightNeedsScan = false;
       state.progress = undefined;
     } else {
       const scanned = await message({ type: 'PANEL_SCAN', month });
-      if (!sameJsonValue(scanned, state) || state.tabId !== tabId || state.snapshot?.month !== month || activeJob()) return;
+      if (!sameJsonValue(scanned, state) || state.connection?.generation !== connectionGeneration || state.snapshot?.month !== month || activeJob()) return;
     }
     await rebuild();
   } catch (error) { localError = errorText(error); }
@@ -796,23 +834,25 @@ async function scanMonth(): Promise<void> {
 
 function openApply(): void {
   if (!approved() || !plan || isRunning() || rebuilding) return;
-  draftCheckResult = undefined;
+  preflightResult = undefined;
   const days = writableDays(plan);
-  confirmed = { plan: structuredClone(plan), planRevision: planRevision(), contextFingerprint: contextFingerprint(plan.snapshot.context), draftCheckDate: days[0]?.date ?? '' };
+  confirmed = { plan: structuredClone(plan), planRevision: planRevision(), contextFingerprint: contextFingerprint(plan.snapshot.context), preflightDate: days[0]?.date ?? '' };
   const reviewed = confirmed.plan;
+  $('apply-title').textContent = canWrite() ? t('Buchungen jetzt speichern?') : t('Plan prüfen');
   const manual = needsAccountConfirmation(reviewed);
   $('account-confirmation-field').hidden = !manual;
   input('account-confirmation').checked = false;
   input('account-confirmation').required = manual;
   input('account-confirmation').disabled = !manual;
-  $('account-confirmation-label').textContent = t('Ich bestätige, dass links meine eigenen HiBob-Anwesenheiten für {month} im richtigen Firmenkonto angezeigt werden.', { month: monthLabel(reviewed.settings.month) });
+  $('account-confirmation-label').textContent = t('Ich bestätige, dass die Anwesenheiten für {month} zu meinem angezeigten HiBob-Konto im richtigen Firmenkonto gehören.', { month: monthLabel(reviewed.settings.month) });
   const dateSelect = select('draft-check-date');
   dateSelect.replaceChildren(...days.map(day => { const option = node('option', `${dateLabel(day.date)} · ${formatMinutes(day.netMinutes)}`); option.value = day.date; return option; }));
-  dateSelect.value = confirmed.draftCheckDate;
+  dateSelect.value = confirmed.preflightDate;
   const overwriteCount = days.filter((day) => day.action === 'overwrite').length;
-  $('apply-description').textContent = isDemo ? t('Du startest eine lokale Simulation. Dein echtes HiBob-Konto wird nicht verändert.') : manual ? t('Prüfe links, ob deine eigenen Anwesenheiten im richtigen HiBob-Firmenkonto angezeigt werden. Diese Bestätigung gilt nur für diesen Plan.') : t('Die folgenden Änderungen werden in deinem HiBob-Konto „{employee}“ gespeichert.', { employee: reviewed.snapshot.employeeLabel });
+  $('apply-description').textContent = isDemo ? t('Du startest eine lokale Simulation. Dein echtes HiBob-Konto wird nicht verändert.') : manual ? t('Prüfe das angezeigte Mitarbeiter- und Firmenkonto. Diese Bestätigung gilt nur für diesen Plan.') : t('Die folgenden Änderungen werden in deinem HiBob-Konto „{employee}“ gespeichert.', { employee: reviewed.snapshot.employeeLabel });
   const list = $('apply-details'); list.replaceChildren();
   detailsLine(list, t('Monat'), monthLabel(reviewed.settings.month));
+  if (!isDemo) detailsLine(list, t('HiBob-Konto'), accountLabel());
   detailsLine(list, t('Tage zum Buchen'), String(days.length));
   detailsLine(list, t('Davon überschreiben'), String(overwriteCount));
   detailsLine(list, t('Bundesland'), t(GERMAN_STATES.find((item) => item.code === reviewed.settings.state)?.name || reviewed.settings.state));
@@ -826,51 +866,49 @@ function accountConfirmation(review: NonNullable<typeof confirmed>): AccountConf
   } : undefined;
 }
 
-function validDraftCheck(result: DraftCheckResult | undefined, day: DayPlan): result is DraftCheckResult {
-  if (!result || result.date !== day.date || result.saved !== false || result.unchanged !== true || !Array.isArray(result.entries)) return false;
-  if (!result.entries.every(entry => entry && (entry.type === 'work' || entry.type === 'break') && typeof entry.start === 'string' && typeof entry.end === 'string')) return false;
-  const ordered = (entries: AttendanceEntry[]) => [...entries].sort((a, b) => a.start.localeCompare(b.start) || a.end.localeCompare(b.end) || a.type.localeCompare(b.type));
-  return Number.isSafeInteger(result.netMinutes) && result.netMinutes === netMinutes(result.entries) && result.netMinutes === day.netMinutes
-    && sameJsonValue(ordered(result.entries), ordered(day.proposed));
+function validPreflight(result: PreflightResult | undefined, day: DayPlan): result is PreflightResult {
+  return Boolean(result && result.date === day.date && result.saved === false && result.checked === true && result.serverValidated === false
+    && Number.isSafeInteger(result.netMinutes) && result.netMinutes === day.netMinutes && result.netMinutes === netMinutes(day.proposed));
 }
 
-async function demoCheckDraft(day: DayPlan): Promise<DraftCheckResult> {
+async function demoPreflight(day: DayPlan): Promise<PreflightResult> {
   demoCancelled = false;
-  state.progress = { phase: 'apply', completed: 0, total: 1, date: day.date, message: t('Tagesentwurf wird ohne Speichern geprüft …') };
+  state.progress = { phase: 'apply', completed: 0, total: 1, date: day.date, message: t('Tagesdaten und Plan werden ohne Speichern geprüft …') };
   renderState();
   await new Promise(resolve => setTimeout(resolve, 160));
-  if (demoCancelled) throw new Error(t('Entwurfsprüfung abgebrochen. Es wurde nicht gespeichert.'));
-  return { date: day.date, entries: structuredClone(day.proposed), netMinutes: netMinutes(day.proposed)!, saved: false, unchanged: true };
+  if (demoCancelled) throw new Error(t('Planprüfung abgebrochen. Es wurde nicht gespeichert.'));
+  return { date: day.date, checked: true, netMinutes: netMinutes(day.proposed)!, saved: false, serverValidated: false };
 }
 
-async function checkDraft(): Promise<void> {
+async function checkPreflight(): Promise<void> {
   const review = confirmed;
-  if (!review || !applyDialog.open || !currentConfirmation() || select('draft-check-date').value !== review.draftCheckDate || (needsAccountConfirmation(review.plan) && !input('account-confirmation').checked)) return;
-  const day = writableDays(review.plan).find(day => day.date === review.draftCheckDate);
+  if (!connected() || !review || !applyDialog.open || !currentConfirmation() || select('draft-check-date').value !== review.preflightDate || (needsAccountConfirmation(review.plan) && !input('account-confirmation').checked)) return;
+  const day = writableDays(review.plan).find(day => day.date === review.preflightDate);
   if (!day) return;
   const confirmation = accountConfirmation(review);
-  const tabId = state.tabId;
+  const connectionGeneration = state.connection?.generation;
+  const reviewedConnection = structuredClone(state.connection);
   const revision = state.revision ?? 0;
   const version = buildVersion;
   closeConfirmation();
   approvedPlanRevision = undefined;
-  checkingDraft = true; draftCheckNeedsScan = true; draftCheckResult = undefined; localError = ''; renderState();
+  checkingPreflight = true; preflightNeedsScan = true; preflightResult = undefined; localError = ''; renderState();
   try {
-    const response = isDemo ? undefined : await request({ type: 'PANEL_CHECK_DRAFT', plan: review.plan, expectedPlanRevision: review.planRevision, date: day.date, ...(confirmation ? { confirmation } : {}) });
-    const result = isDemo ? await demoCheckDraft(day) : response?.draftCheck;
+    const response = isDemo ? undefined : await request({ type: 'PANEL_PREFLIGHT', plan: review.plan, expectedPlanRevision: review.planRevision, date: day.date, ...(confirmation ? { confirmation } : {}) });
+    const result = isDemo ? await demoPreflight(day) : response?.preflight;
     const completedState = response?.state;
-    const invalidated = isDemo || Boolean(completedState && completedState.schemaVersion === 3 && completedState.tabId === tabId
+    const invalidated = isDemo || Boolean(completedState && completedState.schemaVersion === 4 && completedState.connection?.generation === connectionGeneration
+      && sameJsonValue(completedState.connection, reviewedConnection)
       && typeof completedState.revision === 'number' && completedState.revision > revision
       && typeof completedState.planRevision === 'number' && completedState.planRevision > review.planRevision
       && completedState.snapshot === undefined && completedState.job === undefined && (!completedState.plan || completedState.plan.canReview === false));
-    if (!validDraftCheck(result, day) || !invalidated) throw new Error(t('Die Entwurfsprüfung hat kein eindeutiges Ergebnis geliefert. Bitte den Tag prüfen und den Monat erneut einlesen.'));
-    // A late result from an older document or a superseded operation must not
-    // claim that the page currently selected by the user was checked.
-    if (buildVersion === version && state.tabId === tabId && !activeJob() && (isDemo || sameJsonValue(completedState, state))) draftCheckResult = structuredClone(result);
+    if (!validPreflight(result, day) || !invalidated) throw new Error(t('Die Planprüfung hat kein eindeutiges Ergebnis geliefert. Bitte den Tag prüfen und den Monat erneut einlesen.'));
+    // A late result cannot describe a replaced account connection as checked.
+    if (buildVersion === version && state.connection?.generation === connectionGeneration && !activeJob() && (isDemo || sameJsonValue(completedState, state))) preflightResult = structuredClone(result);
   } catch (error) { localError = errorText(error); }
   finally {
-    checkingDraft = false;
-    draftCheckNeedsScan = true;
+    checkingPreflight = false;
+    preflightNeedsScan = true;
     revokeApproval();
     if (isDemo) {
       state.snapshot = undefined; state.plan = undefined; state.progress = undefined; plan = undefined;
@@ -909,7 +947,7 @@ async function demoApply(activePlan: BookingPlan): Promise<void> {
 
 async function applyPlan(): Promise<void> {
   const review = confirmed;
-  if (!review || !applyDialog.open || !currentConfirmation() || (needsAccountConfirmation(review.plan) && !input('account-confirmation').checked)) return;
+  if (!canWrite() || !review || !applyDialog.open || !currentConfirmation() || (needsAccountConfirmation(review.plan) && !input('account-confirmation').checked)) return;
   const confirmation = accountConfirmation(review);
   closeConfirmation();
   const activePlan = review.plan;
@@ -1017,7 +1055,7 @@ async function initialize(retry = false): Promise<void> {
     if (area !== 'session' || !changes.sessionState) return;
     sessionRevision++;
     receiveState(changes.sessionState.newValue as SessionState ?? {});
-    if (!initializing && !initializationFailed && !pendingDraft && !busy && !applying && !checkingDraft && !activeJob() && !updating()) {
+    if (!initializing && !initializationFailed && !pendingDraft && !busy && !applying && !checkingPreflight && !activeJob() && !updating()) {
       if (state.plan && approvedPlanRevision === undefined && !refreshScheduled) {
         // A storage event alone never grants approval. Verify the newest
         // canonical record through an acknowledged controller request first.
@@ -1087,15 +1125,17 @@ input('account-confirmation').addEventListener('change', updateConfirmationButto
 select('draft-check-date').addEventListener('change', () => {
   if (!confirmed || !currentConfirmation()) return;
   const date = select('draft-check-date').value;
-  confirmed.draftCheckDate = writableDays(confirmed.plan).some(day => day.date === date) ? date : '';
+  confirmed.preflightDate = writableDays(confirmed.plan).some(day => day.date === date) ? date : '';
   input('account-confirmation').checked = false;
   updateConfirmationButton();
 });
-$('check-draft').addEventListener('click', () => { void checkDraft(); });
+$('check-draft').addEventListener('click', () => { void checkPreflight(); });
 $('confirm-apply').addEventListener('click', () => { void applyPlan(); });
 $('cancel-run').addEventListener('click', () => { void cancelRun(); });
 $('retry-plan').addEventListener('click', () => { if (pendingDraft && !rebuilding && !isRunning() && !updating()) void processDraft(pendingDraft); });
 $('retry-connection').addEventListener('click', () => { if (updating()) return; if (initializationFailed) void initialize(true); else { connectionRetryAvailable = false; void refreshApproval(); } });
+$('connect').addEventListener('click', () => { void changeConnection(); });
+$('disconnect').addEventListener('click', () => { void changeConnection(true); });
 $('build-preview').addEventListener('click', () => { if (!isRunning() && !updating() && !pendingDraft && state.snapshot?.month === settings.month) void rebuild(); });
 $('export-settings').addEventListener('click', exportSettings);
 $('import-settings').addEventListener('click', () => {

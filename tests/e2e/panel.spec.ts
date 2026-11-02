@@ -80,7 +80,7 @@ test('cancellation stops the local queue and cannot blindly resume', async ({ pa
   await expect(page.locator('#apply')).toBeDisabled();
 });
 
-test('local draft-only checking preserves example attendance and never persists its result', async ({ page }) => {
+test('local read-only preflight preserves example attendance and never persists its result', async ({ page }) => {
   await openDemo(page);
   await scan(page);
   await skipConflicts(page);
@@ -96,7 +96,7 @@ test('local draft-only checking preserves example attendance and never persists 
   expect(after.run).toEqual(before.run);
   expect(after.snapshot).toBeUndefined();
   expect(after.plan).toBeUndefined();
-  expect(JSON.stringify(after)).not.toContain('draftCheck');
+  expect(JSON.stringify(after)).not.toContain('preflight');
   await page.reload();
   await expect(page.locator('#draft-check-result')).not.toBeVisible();
   await expect(page.locator('#apply')).toBeDisabled();
