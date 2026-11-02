@@ -1,0 +1,52 @@
+name: Publish installation site
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', 'docs/**', 'scripts/build-site.mjs', 'scripts/pages-status.mjs', 'scripts/distribution.mjs', 'public/manifest.json', '.github/workflows/pages.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+jobs:
+  build:
+    if: github.repository == 'thors-github/hibob-chrome-extension'
+    runs-on: ubuntu-latest
+    outputs:
+      pages_configured: ${{ steps.pages-status.outputs.configured }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - id: pages-status
+        name: Check one-time Pages setup without changing repository settings
+        run: node scripts/pages-status.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Configure an existing Actions-based Pages site
+        if: steps.pages-status.outputs.configured == 'true'
+        uses: actions/configure-pages@v5
+      - name: Build a static site with explicit Store availability
+        run: node scripts/build-site.mjs "$RUNNER_TEMP/installation-site"
+        env:
+          CWS_STORE_PUBLISHED: ${{ vars.CWS_STORE_PUBLISHED }}
+          CWS_STORE_URL: ${{ vars.CWS_STORE_URL }}
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/installation-site
+  deploy:
+    needs: build
+    if: needs.build.outputs.pages_configured == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

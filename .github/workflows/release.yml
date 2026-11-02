@@ -1,0 +1,138 @@
+name: Publish extension release
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: extension-release
+  cancel-in-progress: false
+jobs:
+  resolve:
+    if: github.repository == 'thors-github/hibob-chrome-extension'
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.release.outputs.enabled }}
+      tag: ${{ steps.release.outputs.tag }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      bootstrap: ${{ steps.release.outputs.bootstrap }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - id: release
+        run: node scripts/distribution.mjs workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a commit contained in main
+        run: git merge-base --is-ancestor HEAD origin/main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      - name: Build the release package once
+        run: npm run build
+        env:
+          HIBOB_RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+      - run: node scripts/verify-release.mjs
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        with:
+          name: extension-release
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            release/hibob-monthly-attendance.zip
+            release/INSTALLATION.txt
+            release/SHA256SUMS.txt
+            release/release.json
+            release/RELEASE_NOTES.md
+  github-release:
+    needs: [resolve, build]
+    if: needs.resolve.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: extension-release
+          path: release
+      - run: node scripts/verify-release.mjs
+      - name: Publish verified assets through a draft release
+        run: node scripts/publish-github.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HIBOB_BOOTSTRAP_RELEASE: ${{ needs.resolve.outputs.bootstrap }}
+      - name: Explain Store setup status
+        if: needs.resolve.outputs.prerelease == 'true' || vars.CWS_AUTOMATION_ENABLED != 'true'
+        run: |
+          echo '## Chrome Web Store' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Store submission was not run. Prereleases are ZIP-only. Stable automation additionally needs the publisher and Workload Identity setup in docs/STORE_SETUP.md.' >> "$GITHUB_STEP_SUMMARY"
+  chrome-web-store:
+    needs: [resolve, build, github-release]
+    if: needs.resolve.outputs.prerelease == 'false' && vars.CWS_AUTOMATION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: chrome-web-store
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CWS_AUTOMATION_ENABLED: ${{ vars.CWS_AUTOMATION_ENABLED }}
+      CWS_PUBLISHER_ID: ${{ vars.CWS_PUBLISHER_ID }}
+      CWS_EXTENSION_ID: ${{ vars.CWS_EXTENSION_ID }}
+      CWS_WIF_PROVIDER: ${{ vars.CWS_WIF_PROVIDER }}
+      CWS_SERVICE_ACCOUNT: ${{ vars.CWS_SERVICE_ACCOUNT }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@v4
+        with:
+          name: extension-release
+          path: release
+      - run: node scripts/verify-release.mjs
+      - name: Require explicit publisher setup
+        run: node scripts/distribution.mjs store-config
+      - id: google-auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.CWS_WIF_PROVIDER }}
+          service_account: ${{ vars.CWS_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+          access_token_lifetime: 600s
+          create_credentials_file: false
+          export_environment_variables: false
+      - name: Submit the same ZIP using Chrome Web Store API v2
+        run: node scripts/webstore.mjs
+        env:
+          CWS_ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}

@@ -3,6 +3,7 @@ import { defaultSettings, GERMAN_STATES, getHolidays, getMonthDates, parseMonth,
 import { t } from '../i18n';
 import { parseTime, netMinutes } from '../shared/entries';
 import { canonicalJson } from '../shared/json';
+import { isReviewableContext } from '../shared/context';
 
 export { defaultSettings, GERMAN_STATES, getHolidays, getMonthDates } from './calendar';
 export { parseTime, netMinutes } from '../shared/entries';
@@ -127,8 +128,8 @@ function allocateDurations(count: number, target: number, durations: number[], r
 export function buildMonthPlan(settings: Settings, snapshot: MonthSnapshot, choices: ConflictChoices = {}, seed = 73129): BookingPlan {
   const safeSettings: Settings = { ...settings, excludedDates: [...settings.excludedDates], localHolidays: { ...settings.localHolidays } };
   const errors = validateSettings(settings);
-  if (snapshot.source === 'hibob' && (!snapshot.context?.verified || !snapshot.context.employeeKey || !snapshot.context.tenantKey || !snapshot.context.documentId)) {
-    errors.push(snapshot.context?.reason || t('Der HiBob-Kontokontext ist nicht eindeutig bestätigt. Die Vorschau ist verfügbar; Buchen bleibt gesperrt.'));
+  if (snapshot.source === 'hibob' && !isReviewableContext(snapshot.context)) {
+    errors.push(snapshot.context?.mode === 'unavailable' ? snapshot.context.reason : t('Der HiBob-Seitenkontext ist nicht zuverlässig lesbar. Bitte den Monat erneut einlesen.'));
   }
   if (snapshot.month !== settings.month) errors.push(t('Der gelesene HiBob-Monat stimmt nicht mit dem ausgewählten Monat überein. Bitte neu einlesen.'));
   const dates = getMonthDates(settings.month);
@@ -227,5 +228,5 @@ export function buildMonthPlan(settings: Settings, snapshot: MonthSnapshot, choi
   if (!days.some(day => day.eligible)) errors.push(t('In diesem Monat stehen keine bearbeitbaren Arbeitstage zur Verfügung.'));
   const uniqueErrors = [...new Set(errors)];
   const id = `plan-${hash(canonicalJson({ settings: safeSettings, context: snapshot.context ?? null, fingerprints: days.map(day => [day.date, day.fingerprint]), choices, seed })!)}`;
-  return { id, seed, settings: safeSettings, snapshot, choices: { ...choices }, days, weeks, errors: uniqueErrors, canApply: uniqueErrors.length === 0 && days.some(day => day.action === 'create' || day.action === 'overwrite') };
+  return { id, seed, settings: safeSettings, snapshot, choices: { ...choices }, days, weeks, errors: uniqueErrors, canReview: uniqueErrors.length === 0 && days.some(day => day.action === 'create' || day.action === 'overwrite') };
 }

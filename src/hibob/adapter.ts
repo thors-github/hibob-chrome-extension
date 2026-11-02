@@ -1,6 +1,8 @@
 import { t } from '../i18n/index';
 import { netMinutes } from '../shared/entries';
-import type { AdapterProgress, AttendanceContext, AttendanceEntry, DayPlan, DaySnapshot, MonthSnapshot } from '../shared/types';
+import { assertApplyAuthorization, contextFingerprint, isReviewableContext } from '../shared/context';
+import type { AdapterProgress, ApplyAuthorization, AttendanceContext, AttendanceEntry, DayPlan, DaySnapshot, MonthSnapshot } from '../shared/types';
+import type { AttendanceContextEvidence } from './context-reader';
 
 const PREFIX = 'time_attendance_employee_timesheet.';
 const PANEL = '#attendance-right-panel';
@@ -57,7 +59,7 @@ interface AdapterOptions {
   pollMs?: number;
   stabilityMs?: number;
   documentId?: string;
-  readContext?: () => AttendanceContext | Promise<AttendanceContext>;
+  readContext?: () => AttendanceContextEvidence | AttendanceContext | Promise<AttendanceContextEvidence | AttendanceContext>;
 }
 
 export class HiBobDomAdapter {
@@ -90,25 +92,24 @@ export class HiBobDomAdapter {
 
   private async context(): Promise<AttendanceContext> {
     this.assertPage();
-    // No stable employee key is exposed by the inspected native attendance UI.
-    // Avatar resources and display names are not employee identifiers. Until a
-    // supported visible identity reader exists, native scans remain read-only.
     const value = await this.contextReader?.();
-    if (!value?.verified || !value.employeeKey?.trim() || !value.tenantKey?.trim()) return {
-      documentId: this.documentId, verified: false,
-      reason: t('Die stabile HiBob-Mitarbeiteridentität ist in dieser Ansicht nicht nachweisbar. Die Vorschau bleibt schreibgeschützt.'),
-    };
-    return { documentId: this.documentId, verified: true, employeeKey: value.employeeKey, tenantKey: value.tenantKey };
+    const candidate = value && { ...value, documentId: this.documentId };
+    if (isReviewableContext(candidate)) {
+      if (candidate.mode === 'stable-identity') return { mode: candidate.mode, documentId: this.documentId, employeeKey: candidate.employeeKey, tenantKey: candidate.tenantKey };
+      return { mode: candidate.mode, documentId: this.documentId, pageUrl: candidate.pageUrl, markerFingerprint: candidate.markerFingerprint };
+    }
+    return { mode: 'unavailable', documentId: this.documentId, reason: value?.mode === 'unavailable' && value.reason.trim() ? value.reason : t('Die sichtbaren HiBob-Kontomerkmale sind nicht verfügbar. Bitte den Monat erneut einlesen.') };
   }
 
   private contextSignature(value: AttendanceContext): string {
-    return JSON.stringify([value.documentId, value.verified, value.employeeKey ?? '', value.tenantKey ?? '']);
+    return contextFingerprint(value);
   }
 
-  private async assertContext(expected: AttendanceContext | undefined) {
-    if (!expected?.verified || !expected.documentId || !expected.employeeKey || !expected.tenantKey) throw new AdapterError(t('Die Vorschau ist keinem verifizierten HiBob-Konto zugeordnet. Bitte neu einlesen; ohne stabile Identität wird nicht gebucht.'));
+  private async assertContext(expected: AttendanceContext | undefined, authorization: ApplyAuthorization | undefined) {
+    try { assertApplyAuthorization(expected, authorization); }
+    catch (error) { throw new AdapterError(error instanceof Error ? error.message : t('Die Buchungsfreigabe ist nicht gültig. Bitte die Vorschau erneut prüfen.')); }
     const current = await this.context();
-    if (!current.verified || this.contextSignature(current) !== this.contextSignature(expected)) throw new AdapterError(t('Das HiBob-Konto oder das Browserdokument hat sich seit der Vorschau geändert. Bitte neu einlesen.'));
+    if (!isReviewableContext(current) || this.contextSignature(current) !== this.contextSignature(expected!)) throw new AdapterError(t('Das HiBob-Konto oder das Browserdokument hat sich seit der Vorschau geändert. Bitte neu einlesen.'));
   }
 
   private assertPage(signal?: AbortSignal) {
@@ -525,7 +526,8 @@ export class HiBobDomAdapter {
       }
     }
     onProgress?.({ phase: 'scan', completed: expected, total: expected, message: t('Monat vollständig gelesen') });
-    return { month, employeeLabel: context.verified ? `${context.employeeKey} · ${context.tenantKey}` : t('Nicht verifiziertes HiBob-Konto · schreibgeschützte Vorschau'), context, periodLabel, scannedAt: new Date().toISOString(), source: 'hibob', days: result };
+    const employeeLabel = context.mode === 'stable-identity' ? `${context.employeeKey} · ${context.tenantKey}` : context.mode === 'user-confirmed-ui' ? t('HiBob-Seitenkontext · Kontobestätigung erforderlich') : t('HiBob-Seitenkontext nicht verfügbar · schreibgeschützte Vorschau');
+    return { month, employeeLabel, context, periodLabel, scannedAt: new Date().toISOString(), source: 'hibob', days: result };
   }
 
   private setInput(input: HTMLInputElement, value: string) {
@@ -585,10 +587,10 @@ export class HiBobDomAdapter {
     return shape(a) === shape(b);
   }
 
-  async applyDay(day: DayPlan, onProgress?: (progress: AdapterProgress) => void, signal?: AbortSignal, expectedContext?: AttendanceContext): Promise<DaySnapshot> {
+  async applyDay(day: DayPlan, onProgress?: (progress: AdapterProgress) => void, signal?: AbortSignal, expectedContext?: AttendanceContext, authorization?: ApplyAuthorization): Promise<DaySnapshot> {
     this.assertPage(signal);
     this.assertNoManualForm();
-    await this.assertContext(expectedContext);
+    await this.assertContext(expectedContext, authorization);
     if (!['create', 'overwrite'].includes(day.action) || !day.eligible || !/^\d{4}-\d{2}-\d{2}$/.test(day.date)) throw new AdapterError(t('Dieser Tag ist nicht zum Schreiben freigegeben.'));
     this.validateProposed(day.proposed);
     await this.selectMonth(day.date.slice(0, 7), signal);
@@ -598,11 +600,11 @@ export class HiBobDomAdapter {
       const current = await this.findDay(day.date, signal);
       if (current.absence || current.nonWorking) throw new AdapterError(t('In HiBob ist inzwischen eine Abwesenheit oder ein arbeitsfreier Tag eingetragen.'));
       const panel = await this.openDay(current, signal, expectedContext);
-      await this.assertContext(expectedContext);
+      await this.assertContext(expectedContext, authorization);
       const before = await this.inspectDay(current, panel, signal);
       if (before.fingerprint !== day.fingerprint || !before.editable || before.unsupportedReason) throw new AdapterError(t('Der Tag hat sich seit der Vorschau geändert oder ist nicht vollständig bearbeitbar. Bitte neu einlesen.'));
       if (day.action === 'create' && before.entries.length) throw new AdapterError(t('Der Tag enthält inzwischen Einträge.'));
-      await this.assertContext(expectedContext);
+      await this.assertContext(expectedContext, authorization);
       await this.enterEdit(panel, signal);
       // Only empty drafts created by opening the editor may be removed. Saved segments are never deleted.
       if (before.entries.length) {
@@ -637,12 +639,18 @@ export class HiBobDomAdapter {
       if (!this.sameEntries(draft, day.proposed)) throw new AdapterError(t('Der HiBob-Entwurf einschließlich Notizen und Gründen stimmt nicht mit der Vorschau überein.'));
       const error = this.validationError(panel);
       if (error) throw new AdapterError(t('HiBob lehnt den Entwurf ab: {error}', { error }));
-      const save = this.button(panel, ['Save']);
       this.assertPage(signal); // Cancellation is honoured until this exact boundary.
       this.assertOwnedPanel();
-      await this.assertContext(expectedContext);
+      await this.assertContext(expectedContext, authorization);
       this.assertPage(signal);
       this.assertOwnedPanel();
+      // Context hashing is asynchronous. Re-read the complete draft after that
+      // await so edits made while hashing cannot slip past the final Save gate.
+      if (!this.sameEntries(this.readPanelEntries(panel), day.proposed)) throw new AdapterError(t('Der HiBob-Entwurf einschließlich Notizen und Gründen stimmt nicht mit der Vorschau überein.'));
+      const finalError = this.validationError(panel);
+      if (finalError) throw new AdapterError(t('HiBob lehnt den Entwurf ab: {error}', { error: finalError }));
+      const save = this.button(panel, ['Save']);
+      if (save.hasAttribute('disabled') || save.getAttribute('aria-disabled') === 'true' || save.closest('[data-disabled="true"]')) throw new AdapterError(t('Das HiBob-Steuerelement ist nicht verfügbar.'));
       saveClicked = true;
       this.click(save);
       await this.waitFor(() => !this.panel(), t('HiBob hat den Speichervorgang nicht eindeutig abgeschlossen.'));
@@ -655,7 +663,7 @@ export class HiBobDomAdapter {
       const verifyPanel = await this.openDay(afterRow, undefined, expectedContext);
       verificationOpened = true;
       const after = await this.inspectDay(afterRow, verifyPanel);
-      await this.assertContext(expectedContext);
+      await this.assertContext(expectedContext, authorization);
       if (!this.sameEntries(after.entries, day.proposed) || afterRow.workedMinutes !== netMinutes(day.proposed) || after.unsupportedReason) throw new AdapterError(t('Die gespeicherten HiBob-Segmente, Zusatzdaten oder die Nettozeit weichen von der Vorschau ab. Bitte den Tag manuell prüfen.'), true);
       await this.cancelOwned();
       onProgress?.({ phase: 'apply', date: day.date, completed: 1, total: 1, message: t('Gespeicherte Segmente und Nettozeit geprüft') });
@@ -678,4 +686,4 @@ export class HiBobDomAdapter {
 }
 
 export const scanMonth = (month: string, onProgress?: (progress: AdapterProgress) => void, signal?: AbortSignal) => new HiBobDomAdapter().scanMonth(month, onProgress, signal);
-export const applyDay = (day: DayPlan, onProgress?: (progress: AdapterProgress) => void, signal?: AbortSignal, expectedContext?: AttendanceContext) => new HiBobDomAdapter().applyDay(day, onProgress, signal, expectedContext);
+export const applyDay = (day: DayPlan, onProgress?: (progress: AdapterProgress) => void, signal?: AbortSignal, expectedContext?: AttendanceContext, authorization?: ApplyAuthorization) => new HiBobDomAdapter().applyDay(day, onProgress, signal, expectedContext, authorization);

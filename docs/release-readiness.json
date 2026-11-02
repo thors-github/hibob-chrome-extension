@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "version": "1.2.1",
+  "stableReleaseReady": false,
+  "bootstrapTag": "v1.2.1-beta.1",
+  "blockers": [
+    "Manual account confirmation is a prerelease assurance mode; live attendance saving and future-day acceptance have not been verified."
+  ],
+  "validationEvidence": [
+    "npm run check: 265 unit/DOM tests, 15 isolated Chromium tests, TypeScript and 331 translated messages passed.",
+    "Native Chrome 1.2.1-beta.1: November 2026 read all 30 dates; 21 workdays / 168 net hours / nine weekend exclusions; manual account confirmation dialog checked without starting a booking.",
+    "Native dialog starts unchecked, enables Start booking only after consent, and resets consent after closing and reopening. No live attendance was saved."
+  ]
+}

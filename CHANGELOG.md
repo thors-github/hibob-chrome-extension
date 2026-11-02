@@ -1,6 +1,18 @@
 # Changelog
 
+## 1.2.1-beta.1
+
+- Connect a production reader for visible HiBob account context and replace the permanently blocked identity path with explicit manual account confirmation for each reviewed plan.
+- Keep automatic employee identity, manual page-context confirmation and unavailable context distinct. Images are change markers, not employee IDs.
+- Bind consent to the plan ID, revision and document/context fingerprint; discard it on close, edits, rescans, reloads and restarts. No reusable consent is exported or persisted.
+- Require matching authorization in the controller and content script and recheck page context before staging and immediately before Save.
+- Upgrade session format and adapter protocol to 3; retain preferences, update controls and run history while discarding old previews.
+- Strip image URL tokens and resize transformations before computing marker digests; block ambiguous, missing or inconsistent markers.
+- Keep permissions unchanged and provide German/English confirmation messages. Live acceptance covers read-only flows; actual saving and future-day acceptance remain unverified.
+
 ## 1.2.0 — Pending native validation
+
+Distribution preview: **1.2.0-beta.1**. The stable release and Store submission remain blocked while the native identity requirement is unresolved.
 
 - Revoke booking approval before changing settings, persist a revisioned invalidation, and reject stale or conflicting edits from other panels. Final confirmation uses the immutable reviewed plan.
 - Keep booking blocked after a preference or session-storage failure; retry the same configuration without redistributing its generated times.
@@ -11,6 +23,11 @@
 - Add session migration, revision and job guards; interrupted jobs never resume writes automatically.
 - Preserve keyboard focus and scroll position when changing day selections, and show when the newly selected month still needs reading.
 - Keep the existing permissions and German/English language selection. Regression tests use local fixtures; no real attendance write is included in this validation.
+- Add settings-only JSON export/import for transferring preferences between installations, with explicit import confirmation and no automatic bookings.
+- Show the installed version and distribution channel. Expose a pending Chrome Store update only at a safe idle point; ZIP installations keep a manual update path.
+- Add a public English installation and privacy site. The Store installation control remains disabled until a real published listing is configured.
+- Add CI, one-build GitHub release packaging, checksums, draft-first asset verification and an explicitly configured prerelease bootstrap on the first `main` push.
+- Add stable-only Chrome Web Store API v2 submission using Workload Identity Federation and short-lived service-account tokens. The Store account and listing have not yet been created; no Store availability is claimed.
 
 ## 1.1.1
 

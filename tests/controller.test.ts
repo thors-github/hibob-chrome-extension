@@ -3,10 +3,12 @@ import { BookingController, type ControllerBridge } from '../src/controller';
 import { buildMonthPlan, defaultSettings, getMonthDates } from '../src/domain/index';
 import type { BookingPlan, DayPlan, DaySnapshot, MonthSnapshot, SessionState } from '../src/shared/types';
 import { isHiBobAttendance, isHiBobOrigin } from '../src/shared/validation';
+import { contextFingerprint } from '../src/shared/context';
+import type { AccountConfirmation } from '../src/shared/types';
 
 function snapshot(): MonthSnapshot {
   return {
-    month: '2026-11', employeeLabel: 'Testperson', periodLabel: '01/11/2026–30/11/2026', scannedAt: '2026-11-02T10:00:00Z', source: 'hibob', context: { documentId: 'doc-review', employeeKey: 'employee-review', tenantKey: 'tenant-review', verified: true },
+    month: '2026-11', employeeLabel: 'Testperson', periodLabel: '01/11/2026–30/11/2026', scannedAt: '2026-11-02T10:00:00Z', source: 'hibob', context: { documentId: 'doc-review', employeeKey: 'employee-review', tenantKey: 'tenant-review', mode: 'stable-identity' },
     days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: `empty-${date}` })),
   };
 }
@@ -83,13 +85,13 @@ describe('write queue and recovery', () => {
     await review(controller, planFor(controller));
     const original = structuredClone(controller.state.plan!);
     await controller.bindTab(undefined, 'Bitte HiBob öffnen.');
-    expect(stored()).toMatchObject({ error: 'Bitte HiBob öffnen.', schemaVersion: 2 });
+    expect(stored()).toMatchObject({ error: 'Bitte HiBob öffnen.', schemaVersion: 3 });
     expect(stored()?.tabId).toBeUndefined();
     await expect(controller.scan('2026-11')).rejects.toThrow('Extension-Symbol');
     await expect(applyReviewed(controller, original)).rejects.toThrow('Vorschau');
     expect(bridge.applyDay).not.toHaveBeenCalled();
     await controller.bindTab(99);
-    expect(controller.state).toMatchObject({ tabId: 99, error: undefined, schemaVersion: 2 });
+    expect(controller.state).toMatchObject({ tabId: 99, error: undefined, schemaVersion: 3 });
     await controller.scan('2026-11');
     await review(controller, planFor(controller));
     await controller.bindTab(100);
@@ -126,7 +128,7 @@ describe('write queue and recovery', () => {
     expect(controller.state.run?.status).toBe('failed');
     expect(controller.state.run?.results.filter(r => r.status === 'uncertain')).toHaveLength(1);
     expect(controller.state.snapshot).toBeUndefined();
-    expect(controller.state.plan?.canApply).toBe(false);
+    expect(controller.state.plan?.canReview).toBe(false);
     await expect(applyReviewed(controller, plan)).rejects.toThrow();
     await expect(review(controller, plan)).rejects.toThrow('Lesestand');
     expect(bridge.applyDay).toHaveBeenCalledTimes(1);
@@ -166,7 +168,7 @@ describe('write queue and recovery', () => {
     expect(restored.state.run?.status).toBe('stopped');
     expect(stored()?.run?.results[0].status).toBe('uncertain');
     expect(restored.state.snapshot).toBeUndefined();
-    expect(restored.state.plan?.canApply).toBe(false);
+    expect(restored.state.plan).toBeUndefined();
   });
 
   it('completes once and will not apply the same scan twice', async () => {
@@ -272,7 +274,7 @@ describe('canonical edit leases, journaling, and job recovery', () => {
     await expect(controller.apply(input, invalid.planRevision!)).rejects.toThrow('Vorschau');
     await controller.savePlan(input, invalid.editLease!);
     expect(controller.state.plan?.seed).toBe(input.seed);
-    expect(controller.state.plan?.canApply).toBe(true);
+    expect(controller.state.plan?.canReview).toBe(true);
     await controller.apply(controller.state.plan!, invalid.planRevision!);
     expect(bridge.applyDay).toHaveBeenCalledTimes(21);
   });
@@ -315,7 +317,7 @@ describe('canonical edit leases, journaling, and job recovery', () => {
     await controller.scan('2026-11');
     expect(bridge.recover).toHaveBeenCalledWith(42, oldJob.id);
     expect(controller.state.job).toBeUndefined();
-    expect(controller.state.schemaVersion).toBe(2);
+    expect(controller.state.schemaVersion).toBe(3);
   });
 
   it('persists an active scan, rejects stale progress and cancellation, and ignores progress after completion', async () => {
@@ -348,7 +350,7 @@ describe('canonical edit leases, journaling, and job recovery', () => {
     expect(controller.state.revision).toBeGreaterThan(prior);
     await controller.bindTab(99);
     expect(controller.state.revision).toBeGreaterThan(prior + 1);
-    await expect(setup({ schemaVersion: 2, job: { id: 'bad', kind: 'other' } as never })).rejects.toThrow('ungültig');
+    await expect(setup({ schemaVersion: 3, job: { id: 'bad', kind: 'other' } as never })).rejects.toThrow('ungültig');
     await expect(setup({ run: { status: 'unknown', results: [] } as never })).rejects.toThrow('ungültig');
   });
 });
@@ -386,8 +388,105 @@ describe('recovery publication and cold canonical state', () => {
     const corrupted = structuredClone(durable);
     corrupted.plan!.days.find(day => day.action === 'create')!.proposed[0].start = '00:00';
     const rejected = await setup(corrupted);
-    expect(rejected.controller.state.plan?.canApply).toBe(false);
+    expect(rejected.controller.state.plan?.canReview).toBe(false);
     await expect(rejected.controller.apply(corrupted.plan!, corrupted.planRevision!)).rejects.toThrow('Vorschau');
     expect(rejected.bridge.applyDay).not.toHaveBeenCalled();
+  });
+});
+
+describe('per-plan manual account confirmation and schema 3', () => {
+  async function manualPlan() {
+    const fixture = await setup();
+    fixture.controller.state.snapshot!.context = {
+      mode: 'user-confirmed-ui', documentId: 'manual-document',
+      pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: 'self-page-marker',
+    };
+    await review(fixture.controller, planFor(fixture.controller));
+    return fixture;
+  }
+  const consent = (controller: BookingController): AccountConfirmation => ({
+    planId: controller.state.plan!.id, planRevision: controller.state.planRevision!,
+    contextFingerprint: contextFingerprint(controller.state.snapshot!.context), confirmed: true,
+  });
+
+  it('blocks a UI-context run without consent and passes only canonical ephemeral authorization after consent', async () => {
+    const { controller, bridge } = await manualPlan();
+    const plan = structuredClone(controller.state.plan!);
+    const revision = controller.state.planRevision!;
+    expect(plan.canReview).toBe(true);
+    await expect(controller.apply(plan, revision)).rejects.toThrow('ausdrücklich');
+    expect(bridge.applyDay).not.toHaveBeenCalled();
+    expect(controller.state.job).toBeUndefined();
+    const confirmation = consent(controller);
+    await controller.apply(plan, revision, confirmation);
+    expect(bridge.applyDay).toHaveBeenCalledTimes(21);
+    expect(vi.mocked(bridge.applyDay).mock.calls[0][4]).toEqual({ planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context), confirmation });
+    for (const [state] of vi.mocked(bridge.save).mock.calls) {
+      expect((state as SessionState & { confirmation?: unknown }).confirmation).toBeUndefined();
+      expect((state as SessionState & { authorization?: unknown }).authorization).toBeUndefined();
+      expect((state.plan as BookingPlan & { confirmation?: unknown } | undefined)?.confirmation).toBeUndefined();
+    }
+  });
+
+  it.each(['planId', 'planRevision', 'contextFingerprint', 'confirmed'] as const)('rejects a missing or stale manual %s before writing', async key => {
+    const { controller, bridge } = await manualPlan();
+    const invalid = { ...consent(controller), [key]: key === 'planRevision' ? controller.state.planRevision! - 1 : key === 'confirmed' ? false : 'stale' } as AccountConfirmation;
+    await expect(controller.apply(controller.state.plan!, controller.state.planRevision!, invalid)).rejects.toThrow('ausdrücklich');
+    expect(bridge.applyDay).not.toHaveBeenCalled();
+    expect(controller.state.run).toBeUndefined();
+  });
+
+  it('requires fresh consent after settings create a new canonical revision and plan', async () => {
+    const { controller, bridge } = await manualPlan();
+    const previous = consent(controller);
+    const changed = buildMonthPlan({ ...defaultSettings('2026-11'), start: '09:00', end: '17:30' }, controller.state.snapshot!, {}, 1234);
+    await review(controller, changed);
+    await expect(controller.apply(controller.state.plan!, controller.state.planRevision!, previous)).rejects.toThrow('ausdrücklich');
+    expect(bridge.applyDay).not.toHaveBeenCalled();
+    await controller.apply(controller.state.plan!, controller.state.planRevision!, consent(controller));
+    expect(bridge.applyDay).toHaveBeenCalledTimes(21);
+  });
+
+  it('keeps stable-identity runs independent of manual consent while still passing canonical authorization', async () => {
+    const { controller, bridge } = await setup();
+    await review(controller, planFor(controller));
+    const plan = structuredClone(controller.state.plan!);
+    const revision = controller.state.planRevision!;
+    await controller.apply(plan, revision);
+    expect(vi.mocked(bridge.applyDay).mock.calls[0][4]).toEqual({ planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context) });
+  });
+
+  it('never restores reusable consent even when unknown consent fields are injected into a schema-3 session', async () => {
+    const { controller } = await manualPlan();
+    const inherited = structuredClone(controller.state) as SessionState & { confirmation?: unknown; authorization?: unknown };
+    inherited.confirmation = consent(controller);
+    inherited.authorization = { planId: inherited.plan!.id, confirmation: inherited.confirmation };
+    (inherited.plan as BookingPlan & { confirmation?: unknown }).confirmation = inherited.confirmation;
+    const restored = await setup(inherited);
+    expect(restored.controller.state.plan?.canReview).toBe(true);
+    expect((restored.controller.state as typeof inherited).confirmation).toBeUndefined();
+    expect((restored.controller.state as typeof inherited).authorization).toBeUndefined();
+    expect((restored.controller.state.plan as BookingPlan & { confirmation?: unknown }).confirmation).toBeUndefined();
+    await expect(restored.controller.apply(restored.controller.state.plan!, restored.controller.state.planRevision!)).rejects.toThrow('ausdrücklich');
+    expect(restored.bridge.applyDay).not.toHaveBeenCalled();
+  });
+
+  it('migrates schema-2 plans without restoring approvals, while preserving run history and update metadata', async () => {
+    const { controller } = await setup();
+    await review(controller, planFor(controller));
+    const legacy = structuredClone(controller.state) as SessionState & { confirmation?: unknown };
+    legacy.schemaVersion = 2;
+    legacy.update = { installedVersion: '1.2.0', pendingVersion: '1.2.1' };
+    legacy.confirmation = { planId: legacy.plan!.id, confirmed: true };
+    legacy.run = { planId: legacy.plan!.id, status: 'complete', startedAt: '2026-11-02T10:00:00Z', updatedAt: '2026-11-02T10:01:00Z', results: [{ date: '2026-11-02', status: 'verified', message: 'Historical verified day' }] };
+    const restored = await setup(legacy);
+    expect(restored.controller.state.schemaVersion).toBe(3);
+    expect(restored.controller.state.snapshot).toBeUndefined(); expect(restored.controller.state.plan).toBeUndefined(); expect(restored.controller.state.editLease).toBeUndefined();
+    expect(restored.controller.state.run).toEqual(legacy.run);
+    expect(restored.controller.state.update).toEqual(legacy.update);
+    expect(restored.controller.state.revision).toBeGreaterThan(legacy.revision!);
+    expect(restored.controller.state.planRevision).toBeGreaterThan(legacy.planRevision!);
+    expect((restored.controller.state as typeof legacy).confirmation).toBeUndefined();
+    expect(restored.bridge.applyDay).not.toHaveBeenCalled();
   });
 });

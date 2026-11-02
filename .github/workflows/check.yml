@@ -1,0 +1,27 @@
+name: Check extension
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
+      - run: npm run build
+      - run: node scripts/verify-release.mjs
+      - run: npm run test:e2e
+      - name: Validate installation-site build
+        run: node scripts/build-site.mjs "$RUNNER_TEMP/installation-site"

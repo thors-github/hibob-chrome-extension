@@ -1,11 +1,12 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { buildMonthPlan, defaultSettings, getMonthDates } from '../src/domain/index';
 import type { MonthSnapshot, SessionState } from '../src/shared/types';
+import { contextFingerprint } from '../src/shared/context';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
 
 it('unbinds and discards the preview when opened outside HiBob without scanning automatically', async () => {
-  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Test', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02', context: { documentId: 'doc-review', employeeKey: 'employee-review', tenantKey: 'tenant-review', verified: true }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
+  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Test', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02', context: { documentId: 'doc-review', employeeKey: 'employee-review', tenantKey: 'tenant-review', mode: 'stable-identity' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
   let stored: SessionState = { tabId: 9, snapshot, plan: buildMonthPlan(defaultSettings('2026-11'), snapshot, {}, 1) };
   let clicked!: (tab: { id?: number; windowId: number; url?: string }) => void;
   const sendMessage = vi.fn();
@@ -14,7 +15,7 @@ it('unbinds and discards the preview when opened outside HiBob without scanning 
     storage: { session: { get: async () => ({ sessionState: stored }), set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); } } },
     sidePanel: { open: async () => {} },
     action: { onClicked: { addListener: (listener: typeof clicked) => { clicked = listener; } } },
-    runtime: { id: 'test', getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: () => {} } },
+    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: () => {} } },
     tabs: { sendMessage }, scripting: { executeScript },
   });
   await import('../src/background');
@@ -44,19 +45,19 @@ it('cancels a pending transport preparation before APPLY_DAY is dispatched', asy
   let release!: () => void;
   const pingEntered = new Promise<void>(resolve => { entered = resolve; });
   const writes: unknown[] = [];
-  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Test', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02', context: { documentId: 'doc-review', employeeKey: 'employee-review', tenantKey: 'tenant-review', verified: true }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
+  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Test', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02', context: { documentId: 'doc-review', employeeKey: 'employee-review', tenantKey: 'tenant-review', mode: 'stable-identity' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
   vi.stubGlobal('chrome', {
     storage: { session: { get: async () => ({ sessionState: stored }), set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); } } },
     sidePanel: { open: async () => {} },
     action: { onClicked: { addListener: (listener: typeof clicked) => { clicked = listener; } } },
-    runtime: { id: 'test', getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
+    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
     tabs: {
       get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }),
       sendMessage: async (_tabId: number, message: { type: string }) => {
         if (message.type === 'PING' && holdPing) { entered(); await new Promise<void>(resolve => { release = resolve; }); }
         if (message.type === 'SCAN_MONTH') return { ok: true, snapshot };
         if (message.type === 'APPLY_DAY') writes.push(message);
-        return { ok: true, protocolVersion: 2 };
+        return { ok: true, protocolVersion: 3, extensionVersion: '1.2.0' };
       },
     },
     scripting: { executeScript: async () => {} },
@@ -91,7 +92,7 @@ it('retries a failed session read and shares each initialization attempt across 
   vi.stubGlobal('chrome', {
     storage: { session: { get: async () => { reads++; return reads === 1 ? firstRead : { sessionState: stored }; }, set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); } } },
     sidePanel: { open: async () => {} }, action: { onClicked: { addListener: (listener: typeof clicked) => { clicked = listener; } } },
-    runtime: { id: 'test', getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
+    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
     tabs: { sendMessage: vi.fn() }, scripting: { executeScript: vi.fn() },
   });
   await import('../src/background');
@@ -107,15 +108,15 @@ it('retries a failed session read and shares each initialization attempt across 
   expect(reads).toBe(2);
 });
 
-it('requires a supported content protocol before dispatching a scan', async () => {
+it.each([undefined, 2])('requires protocol 3 before dispatching a scan (received %s)', async protocolVersion => {
   let receiver!: (message: unknown, sender: object, respond: (response: { ok: boolean; state?: SessionState; error?: string }) => void) => unknown;
   const sent: string[] = [];
   const executeScript = vi.fn();
   vi.stubGlobal('chrome', {
     storage: { session: { get: async () => ({ sessionState: { tabId: 9 } }), set: async () => {} } },
     sidePanel: { open: async () => {} }, action: { onClicked: { addListener: () => {} } },
-    runtime: { id: 'test', getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
-    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string }) => { sent.push(message.type); return { ok: true }; } },
+    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
+    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string }) => { sent.push(message.type); return { ok: true, protocolVersion, extensionVersion: '1.2.0' }; } },
     scripting: { executeScript },
   });
   await import('../src/background');
@@ -132,12 +133,12 @@ it('cancels only the persisted interrupted job and waits for idle before startin
   let active: { id: string; kind: string } | undefined = { id: 'interrupted-scan', kind: 'scan' };
   const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Test', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02', days: [] };
   vi.stubGlobal('chrome', {
-    storage: { session: { get: async () => ({ sessionState: { schemaVersion: 2, revision: 3, planRevision: 2, tabId: 9, job: { id: 'interrupted-scan', kind: 'scan', status: 'running', tabId: 9, month: '2026-11', startedAt: 'x', updatedAt: 'x' } } }), set: async () => {} } },
+    storage: { session: { get: async () => ({ sessionState: { schemaVersion: 3, revision: 3, planRevision: 2, tabId: 9, job: { id: 'interrupted-scan', kind: 'scan', status: 'running', tabId: 9, month: '2026-11', startedAt: 'x', updatedAt: 'x' } } }), set: async () => {} } },
     sidePanel: { open: async () => {} }, action: { onClicked: { addListener: () => {} } },
-    runtime: { id: 'test', getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
+    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
     tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string; jobId?: string }) => {
       sent.push(message);
-      if (message.type === 'PING') return { ok: true, protocolVersion: 2, activeJob: active };
+      if (message.type === 'PING') return { ok: true, protocolVersion: 3, extensionVersion: '1.2.0', activeJob: active };
       if (message.type === 'CANCEL') { active = undefined; return { ok: true }; }
       return { ok: true, snapshot };
     } }, scripting: { executeScript: vi.fn() },
@@ -155,15 +156,15 @@ it('returns a newer blocked state and visible error when canonical plan persiste
   let stored: SessionState = { tabId: 9 };
   let rejectedRevision = -1;
   let rejectPlan = true;
-  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Review fixture', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02T10:00:00Z', context: { documentId: 'doc', employeeKey: 'employee', tenantKey: 'tenant', verified: true }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
+  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Review fixture', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02T10:00:00Z', context: { documentId: 'doc', employeeKey: 'employee', tenantKey: 'tenant', mode: 'stable-identity' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
   vi.stubGlobal('chrome', {
     storage: { session: { get: async () => ({ sessionState: stored }), set: async ({ sessionState }: { sessionState: SessionState }) => {
-      if (rejectPlan && sessionState.plan?.canApply) { rejectPlan = false; rejectedRevision = sessionState.revision!; throw new Error('plan journal unavailable'); }
+      if (rejectPlan && sessionState.plan?.canReview) { rejectPlan = false; rejectedRevision = sessionState.revision!; throw new Error('plan journal unavailable'); }
       stored = structuredClone(sessionState);
     } } },
     sidePanel: { open: async () => {} }, action: { onClicked: { addListener: () => {} } },
-    runtime: { id: 'test', getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
-    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string }) => message.type === 'PING' ? { ok: true, protocolVersion: 2 } : { ok: true, snapshot } },
+    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
+    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string }) => message.type === 'PING' ? { ok: true, protocolVersion: 3, extensionVersion: '1.2.0' } : { ok: true, snapshot } },
     scripting: { executeScript: vi.fn() },
   });
   await import('../src/background');
@@ -176,7 +177,7 @@ it('returns a newer blocked state and visible error when canonical plan persiste
   expect(rejected.error).toContain('plan journal unavailable');
   expect(rejected.state?.error).toContain('plan journal unavailable');
   expect(rejected.state?.revision).toBeGreaterThan(rejectedRevision);
-  expect(rejected.state?.plan?.canApply).toBe(false);
+  expect(rejected.state?.plan?.canReview).toBe(false);
 });
 
 it('reopens the same bound tab during a held scan without an error or a second scan', async () => {
@@ -191,9 +192,9 @@ it('reopens the same bound tab during a held scan without an error or a second s
   vi.stubGlobal('chrome', {
     storage: { session: { get: async () => ({ sessionState: stored }), set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); } } },
     sidePanel: { open: vi.fn(async () => {}) }, action: { onClicked: { addListener: (listener: typeof clicked) => { clicked = listener; } } },
-    runtime: { id: 'test', getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
+    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
     tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string }) => {
-      if (message.type === 'PING') return { ok: true, protocolVersion: 2 };
+      if (message.type === 'PING') return { ok: true, protocolVersion: 3, extensionVersion: '1.2.0' };
       scanCalls++; entered(); await heldScan; return { ok: true, snapshot };
     } }, scripting: { executeScript: vi.fn() },
   });
@@ -215,4 +216,36 @@ it('reopens the same bound tab during a held scan without an error or a second s
   expect((await scanning).ok).toBe(true);
   expect((await rpc({ type: 'PANEL_GET_STATE' })).state?.error).toBeUndefined();
   expect(scanCalls).toBe(1);
+});
+
+it('requires per-plan manual consent and carries canonical authorization through protocol 3', async () => {
+  let receiver!: (message: unknown, sender: object, respond: (response: { ok: boolean; state?: SessionState; error?: string }) => void) => unknown;
+  let stored: SessionState = { tabId: 9 };
+  const writes: { type: string; jobId?: string; authorization?: unknown }[] = [];
+  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Review fixture', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02T10:00:00Z', context: { mode: 'user-confirmed-ui', documentId: 'manual-doc', pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: 'self-page' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
+  vi.stubGlobal('chrome', {
+    storage: { session: { get: async () => ({ sessionState: stored }), set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); } } },
+    sidePanel: { open: async () => {} }, action: { onClicked: { addListener: () => {} } },
+    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
+    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string; day?: { date: string; proposed: unknown[] }; jobId?: string; authorization?: unknown }) => {
+      if (message.type === 'PING') return { ok: true, protocolVersion: 3, extensionVersion: '1.2.0' };
+      if (message.type === 'SCAN_MONTH') return { ok: true, snapshot };
+      writes.push(structuredClone(message)); return { ok: true, day: { date: message.day!.date, entries: message.day!.proposed, editable: true, fingerprint: 'saved' } };
+    } }, scripting: { executeScript: vi.fn() },
+  });
+  await import('../src/background');
+  const rpc = (message: object) => new Promise<{ ok: boolean; state?: SessionState; error?: string }>(resolve => receiver(message, { id: 'test', url: 'chrome-extension://test/sidepanel.html' }, resolve));
+  await rpc({ type: 'PANEL_SCAN', month: '2026-11' });
+  const invalid = await rpc({ type: 'PANEL_INVALIDATE_PLAN', expectedPlanRevision: stored.planRevision, changeId: 'manual-review' });
+  const settings = { ...defaultSettings('2026-11'), excludedDates: getMonthDates('2026-11').filter(date => date !== '2026-11-02') };
+  const saved = await rpc({ type: 'PANEL_SAVE_PLAN', plan: buildMonthPlan(settings, stored.snapshot!, {}, 1), lease: invalid.state!.editLease });
+  const plan = structuredClone(saved.state!.plan!);
+  const revision = saved.state!.planRevision!;
+  const missing = await rpc({ type: 'PANEL_APPLY', plan, expectedPlanRevision: revision });
+  expect(missing.ok).toBe(false); expect(missing.error).toContain('ausdrücklich'); expect(writes).toHaveLength(0);
+  const confirmation = { planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context), confirmed: true };
+  expect((await rpc({ type: 'PANEL_APPLY', plan, expectedPlanRevision: revision, confirmation })).ok).toBe(true);
+  expect(writes).toHaveLength(1);
+  expect(writes[0].authorization).toEqual({ planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context), confirmation });
+  expect((stored as SessionState & { confirmation?: unknown }).confirmation).toBeUndefined();
 });

@@ -5,3 +5,7 @@ test-results/
 test-evidence/
 playwright-report/
 .DS_Store
+.env
+.env.*
+*.pem
+*.key

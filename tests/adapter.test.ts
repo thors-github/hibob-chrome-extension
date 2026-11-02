@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from 'vitest';
 import { AdapterError, HiBobDomAdapter, isAttendanceLocation, localDateFromUi, snapshotFingerprint } from '../src/hibob/adapter';
-import type { AdapterProgress, AttendanceContext, AttendanceEntry, DayPlan } from '../src/shared/types';
+import { makeUiContextReader, type AttendanceContextEvidence } from '../src/hibob/context-reader';
+import { contextFingerprint } from '../src/shared/context';
+import type { AdapterProgress, ApplyAuthorization, AttendanceContext, AttendanceEntry, DayPlan } from '../src/shared/types';
+import { attendanceUrl, avatarB, installUiContextFixture, markerUrl } from './fixtures/ui-context';
 
 const prefix = 'time_attendance_employee_timesheet.';
 const uiDate = (day: number) => `${String(day).padStart(2, '0')}/02/2026`;
@@ -11,10 +14,12 @@ const planned: AttendanceEntry[] = [work('08:00', '12:00'), { type: 'break', sta
 /** A real-style split AG Grid with virtual rows and the native staged editor. */
 function fixture(options: {
   entries?: AttendanceEntry[]; save?: 'ok' | 'timeout' | 'wrong'; absence?: string; manual?: boolean; onInput?: () => void;
-  reported?: string; rowHeights?: number[]; monthDelayMs?: number; neverLoad?: boolean; unverifiedContext?: boolean;
+  reported?: string; rowHeights?: number[]; monthDelayMs?: number; neverLoad?: boolean; unverifiedContext?: boolean; contextMode?: 'stable-identity' | 'user-confirmed-ui';
+  contextReader?: () => AttendanceContext | AttendanceContextEvidence | Promise<AttendanceContext | AttendanceContextEvidence>;
   timing?: { settleMs?: number; timeoutMs?: number; pollMs?: number; stabilityMs?: number; readinessTimeoutMs?: number; rowSeekTimeoutMs?: number };
 } = {}) {
-  const identity: AttendanceContext = { documentId: crypto.randomUUID(), employeeKey: 'fixture-profile-A', tenantKey: 'fixture-tenant-A', verified: !options.unverifiedContext };
+  const identity: Extract<AttendanceContext, { mode: 'stable-identity' }> = { mode: 'stable-identity', documentId: crypto.randomUUID(), employeeKey: 'fixture-profile-A', tenantKey: 'fixture-tenant-A' };
+  const readContext = options.contextReader ?? ((): AttendanceContext => options.unverifiedContext ? { mode: 'unavailable', documentId: identity.documentId, reason: 'Fixture context unavailable' } : options.contextMode === 'user-confirmed-ui' ? { mode: 'user-confirmed-ui', documentId: identity.documentId, pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: `${identity.employeeKey}/${identity.tenantKey}` } : identity);
   let gridMonth = options.monthDelayMs !== undefined || options.neverLoad ? '01' : '02';
   const heights = options.rowHeights ?? Array.from({ length: 28 }, () => 48);
   const offsets = heights.map((_, index) => heights.slice(0, index).reduce((sum, height) => sum + height, 0));
@@ -149,19 +154,25 @@ function fixture(options: {
     });
   }
   renderRows();
-  return { replaceViewport, get viewport() { return viewport; }, identity, reviewedContext: undefined as AttendanceContext | undefined, adapter: new HiBobDomAdapter({ document, location: () => 'https://app.hibob.com/attendance/my-attendance', settleMs: 1, timeoutMs: 60, pollMs: 1, stabilityMs: 1, readinessTimeoutMs: 3000, rowSeekTimeoutMs: 1000, documentId: identity.documentId, readContext: () => identity, ...options.timing }), saves: () => saves, opens: () => opens, deletes: () => deletes, entries: () => persisted, panel };
+  return { replaceViewport, get viewport() { return viewport; }, identity, reviewedContext: undefined as AttendanceContext | undefined, reviewedAuthorization: undefined as ApplyAuthorization | undefined, adapter: new HiBobDomAdapter({ document, location: () => 'https://app.hibob.com/attendance/my-attendance', settleMs: 1, timeoutMs: 60, pollMs: 1, stabilityMs: 1, readinessTimeoutMs: 3000, rowSeekTimeoutMs: 1000, documentId: identity.documentId, readContext, ...options.timing }), saves: () => saves, opens: () => opens, deletes: () => deletes, entries: () => persisted, panel };
 }
 
 function toMinutes(time: string) { return +time.slice(0, 2) * 60 + +time.slice(3); }
 async function planFor(app: ReturnType<typeof fixture>): Promise<DayPlan> {
   const snapshot = await app.adapter.scanMonth('2026-02');
   app.reviewedContext = snapshot.context;
+  app.reviewedAuthorization = { planId: 'fixture-plan', planRevision: 1, contextFingerprint: contextFingerprint(snapshot.context) };
   const day = snapshot.days.find(d => d.date === '2026-02-02')!;
   return { date: day.date, existing: day.entries, proposed: planned, action: day.entries.length ? 'overwrite' : 'create', fingerprint: day.fingerprint, eligible: true, netMinutes: 480, existingNetMinutes: null };
 }
 
 function applyPlan(app: ReturnType<typeof fixture>, day: DayPlan, progress?: (value: AdapterProgress) => void, signal?: AbortSignal) {
-  return app.adapter.applyDay(day, progress, signal, app.reviewedContext);
+  return app.adapter.applyDay(day, progress, signal, app.reviewedContext, app.reviewedAuthorization);
+}
+
+function confirmPlan(app: ReturnType<typeof fixture>) {
+  const authorization = app.reviewedAuthorization!;
+  authorization.confirmation = { planId: authorization.planId, planRevision: authorization.planRevision, contextFingerprint: authorization.contextFingerprint, confirmed: true };
 }
 
 beforeEach(() => { document.body.innerHTML = ''; });
@@ -402,15 +413,15 @@ describe('reviewed account and document binding', () => {
   it('keeps unknown native identity read-only', async () => {
     const app = fixture({ unverifiedContext: true });
     const plan = await planFor(app);
-    expect(app.reviewedContext).toMatchObject({ verified: false, reason: expect.stringContaining('schreibgeschützt') });
-    await expect(applyPlan(app, plan)).rejects.toThrow('keinem verifizierten HiBob-Konto');
+    expect(app.reviewedContext).toMatchObject({ mode: 'unavailable', reason: 'Fixture context unavailable' });
+    await expect(applyPlan(app, plan)).rejects.toThrow('nicht zuverlässig lesbar');
     expect(app.saves()).toBe(0);
   });
 
   it('rejects a write command without its reviewed context', async () => {
     const app = fixture();
     const plan = await planFor(app);
-    await expect(app.adapter.applyDay(plan)).rejects.toThrow('keinem verifizierten HiBob-Konto');
+    await expect(app.adapter.applyDay(plan)).rejects.toThrow('nicht zuverlässig lesbar');
     expect(app.saves()).toBe(0);
   });
 
@@ -426,7 +437,7 @@ describe('reviewed account and document binding', () => {
     const old = fixture();
     const plan = await planFor(old);
     const replacement = fixture();
-    await expect(replacement.adapter.applyDay(plan, undefined, undefined, old.reviewedContext)).rejects.toThrow('Browserdokument');
+    await expect(replacement.adapter.applyDay(plan, undefined, undefined, old.reviewedContext, old.reviewedAuthorization)).rejects.toThrow('Browserdokument');
     expect(replacement.opens()).toBe(0);
     expect(replacement.saves()).toBe(0);
   });
@@ -508,11 +519,107 @@ describe('final readiness and cleanup boundaries', () => {
     document.body.insertAdjacentHTML('afterbegin', '<header data-employee-id="not-trusted">Example employee<img alt="Account avatar" src="https://media.example.test/avatar.png?token=must-not-persist"></header>');
     const native = new HiBobDomAdapter({ document, location: () => 'https://app.hibob.com/attendance/my-attendance', documentId: 'native-document', settleMs: 1, pollMs: 1, stabilityMs: 1 });
     const snapshot = await native.scanMonth('2026-02');
-    expect(snapshot.context).toMatchObject({ documentId: 'native-document', verified: false });
+    expect(snapshot.context).toMatchObject({ documentId: 'native-document', mode: 'unavailable' });
     expect(JSON.stringify(snapshot.context)).not.toContain('must-not-persist');
     const day = snapshot.days[1];
     const proposed: DayPlan = { date: day.date, existing: day.entries, proposed: planned, action: 'create', fingerprint: day.fingerprint, eligible: true, netMinutes: 480, existingNetMinutes: 0 };
-    await expect(native.applyDay(proposed, undefined, undefined, snapshot.context)).rejects.toThrow('keinem verifizierten HiBob-Konto');
+    await expect(native.applyDay(proposed, undefined, undefined, snapshot.context)).rejects.toThrow('nicht zuverlässig lesbar');
     expect(app.saves()).toBe(0);
+  });
+});
+
+describe('explicit approval of one visible UI context', () => {
+  it('requires explicit confirmation before staging a manual UI plan', async () => {
+    const app = fixture({ contextMode: 'user-confirmed-ui' });
+    const plan = await planFor(app);
+    const opened = app.opens();
+    await expect(applyPlan(app, plan)).rejects.toThrow('ausdrücklich bestätigen');
+    expect(app.opens()).toBe(opened);
+    expect(app.saves()).toBe(0);
+  });
+
+  it('saves and independently verifies the explicitly confirmed UI plan', async () => {
+    const app = fixture({ contextMode: 'user-confirmed-ui' });
+    const plan = await planFor(app);
+    confirmPlan(app);
+    expect((await applyPlan(app, plan)).reportedMinutes).toBe(480);
+    expect(app.saves()).toBe(1);
+  });
+
+  it.each(['planId', 'planRevision', 'contextFingerprint'] as const)('rejects an approval with stale %s', async field => {
+    const app = fixture({ contextMode: 'user-confirmed-ui' });
+    const plan = await planFor(app);
+    confirmPlan(app);
+    if (field === 'planRevision') app.reviewedAuthorization!.confirmation!.planRevision++;
+    else app.reviewedAuthorization!.confirmation![field] += '-stale';
+    await expect(applyPlan(app, plan)).rejects.toThrow('ausdrücklich bestätigen');
+    expect(app.saves()).toBe(0);
+  });
+
+  it('rejects a confirmed context after its visible marker changes', async () => {
+    const app = fixture({ contextMode: 'user-confirmed-ui' });
+    const plan = await planFor(app);
+    confirmPlan(app);
+    app.identity.employeeKey = 'different-marker';
+    await expect(applyPlan(app, plan)).rejects.toThrow('seit der Vorschau geändert');
+    expect(app.saves()).toBe(0);
+  });
+
+  it('connects the actual production marker reader to the approved local form flow', async () => {
+    const app = fixture({ contextReader: makeUiContextReader(document, () => attendanceUrl) });
+    installUiContextFixture(document);
+    const plan = await planFor(app);
+    expect(app.reviewedContext?.mode).toBe('user-confirmed-ui');
+    expect(app.reviewedContext).not.toHaveProperty('employeeKey');
+    confirmPlan(app);
+    await applyPlan(app, plan);
+    expect(app.saves()).toBe(1);
+  });
+
+  it('rechecks real visible image resources immediately before Save', async () => {
+    let ui: ReturnType<typeof installUiContextFixture>;
+    const app = fixture({ contextReader: makeUiContextReader(document, () => attendanceUrl), onInput: () => { ui.accountImage.src = ui.attendanceImage.src = markerUrl('avatar', avatarB); } });
+    ui = installUiContextFixture(document);
+    const plan = await planFor(app);
+    confirmPlan(app);
+    await expect(applyPlan(app, plan)).rejects.toThrow('seit der Vorschau geändert');
+    expect(app.saves()).toBe(0);
+    expect(app.panel.getAttribute('aria-hidden')).toBe('false');
+  });
+});
+
+describe('final draft integrity after asynchronous context hashing', () => {
+  it.each(['time', 'note', 'validation', 'disabled-save'] as const)('rejects %s changed while the final context check awaits', async change => {
+    let reached!: () => void;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { reached = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let paused = false;
+    const contextReader = async (): Promise<AttendanceContextEvidence> => {
+      const panels = [...document.querySelectorAll('.entry-panel')];
+      const filled = panels.length === 3 && panels.every(panel => [...panel.querySelectorAll<HTMLInputElement>('input[type="tel"]')].every(input => input.value));
+      if (filled && !paused) { paused = true; reached(); await gate; }
+      return { mode: 'user-confirmed-ui', pageUrl: attendanceUrl, markerFingerprint: 'same-visible-markers' };
+    };
+    const app = fixture({ contextReader });
+    const plan = await planFor(app);
+    confirmPlan(app);
+    const running = applyPlan(app, plan);
+    await held;
+    if (change === 'time') {
+      const input = app.panel.querySelector<HTMLInputElement>('input[type="tel"]')!;
+      input.value = '09';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    } else if (change === 'note') {
+      app.panel.querySelector<HTMLTextAreaElement>('textarea')!.value = 'Manual note added while comparing account markers';
+    } else if (change === 'validation') {
+      const error = document.createElement('div');
+      error.setAttribute('role', 'alert'); error.textContent = 'Late validation error';
+      app.panel.append(error);
+    } else [...app.panel.querySelectorAll('button')].find(button => button.textContent === 'Save')!.disabled = true;
+    release();
+    await expect(running).rejects.toThrow(change === 'validation' ? 'Late validation error' : change === 'disabled-save' ? 'nicht verfügbar' : 'nicht mit der Vorschau');
+    expect(app.saves()).toBe(0);
+    expect(app.entries()).toEqual([]);
   });
 });

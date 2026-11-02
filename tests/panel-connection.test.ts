@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildMonthPlan, defaultSettings, getMonthDates } from '../src/domain/index';
-import type { BookingPlan, MonthSnapshot, PlanEditLease, SessionState, Settings } from '../src/shared/types';
+import { contextFingerprint } from '../src/shared/context';
+import type { AccountConfirmation, BookingPlan, MonthSnapshot, PlanEditLease, SessionState, Settings } from '../src/shared/types';
 
 const settings = defaultSettings('2026-11');
 type StorageListener = (changes: Record<string, chrome.storage.StorageChange>, area: string) => void;
@@ -12,25 +13,27 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function snapshot(): MonthSnapshot {
+function snapshot(mode: 'stable-identity' | 'user-confirmed-ui' = 'stable-identity'): MonthSnapshot {
   return {
     month: '2026-11', source: 'hibob', employeeLabel: 'Thorsten Test',
     periodLabel: '01/11/2026–30/11/2026 (Running)', scannedAt: '2026-11-02T08:30:00.000Z',
-    context: { documentId: 'test-document', employeeKey: 'test-employee', tenantKey: 'test-tenant', verified: true },
+    context: mode === 'stable-identity'
+      ? { mode, documentId: 'test-document', employeeKey: 'test-employee', tenantKey: 'test-tenant' }
+      : { mode, documentId: 'test-document', pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: 'own-attendance-markers' },
     days: getMonthDates('2026-11').map(date => ({ date, editable: true, entries: [], fingerprint: `empty:${date}`, reportedMinutes: 0 })),
   };
 }
 
-function reviewedState(): SessionState {
-  const scanned = snapshot();
+function reviewedState(mode: 'stable-identity' | 'user-confirmed-ui' = 'stable-identity'): SessionState {
+  const scanned = snapshot(mode);
   scanned.days.find(day => day.date === '2026-11-02')!.entries = [{ type: 'work', start: '08:00', end: '16:00' }];
   scanned.days.find(day => day.date === '2026-11-02')!.reportedMinutes = 480;
   const plan = buildMonthPlan(settings, scanned, { '2026-11-02': 'skip' }, 123);
-  expect(plan.canApply).toBe(true);
-  return { schemaVersion: 2, revision: 1, planRevision: 1, tabId: 9, snapshot: scanned, plan };
+  expect(plan.canReview).toBe(true);
+  return { schemaVersion: 3, revision: 1, planRevision: 1, tabId: 9, snapshot: scanned, plan };
 }
 
-type Message = { type: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; plan?: BookingPlan; jobId?: string };
+type Message = { type: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; plan?: BookingPlan; jobId?: string; confirmation?: AccountConfirmation };
 type Reply = { ok: boolean; state?: SessionState; error?: string };
 
 function mockChrome(options: {
@@ -41,7 +44,7 @@ function mockChrome(options: {
   onMessage?: (message: Message, state: SessionState) => Promise<Reply | undefined>;
 } = {}) {
   const listeners = new Set<StorageListener>();
-  let backend: SessionState = { schemaVersion: 2, revision: 0, planRevision: 0, ...structuredClone(options.state ?? {}) };
+  let backend: SessionState = { schemaVersion: 3, revision: 0, planRevision: 0, ...structuredClone(options.state ?? {}) };
   const sendMessage = vi.fn(async (message: Message): Promise<Reply> => {
     const custom = await options.onMessage?.(message, structuredClone(backend));
     if (custom) return custom;
@@ -76,7 +79,7 @@ function mockChrome(options: {
     sendMessage, addListener, setSettings,
     get state() { return structuredClone(backend); },
     emit(state: SessionState) {
-      backend = { schemaVersion: 2, revision: (backend.revision ?? 0) + 1, planRevision: (backend.planRevision ?? 0) + 1, ...structuredClone(state) };
+      backend = { schemaVersion: 3, revision: (backend.revision ?? 0) + 1, planRevision: (backend.planRevision ?? 0) + 1, ...structuredClone(state) };
       for (const listener of listeners) listener({ sessionState: { newValue: structuredClone(backend) } }, 'session');
     },
   };
@@ -368,7 +371,7 @@ describe('actual extension panel connection states', () => {
   });
 
   it.each(['scan', 'apply'] as const)('restores an active %s job and cancels only its canonical job id', async kind => {
-    const state: SessionState = { schemaVersion: 2, revision: 2, planRevision: 2, tabId: 9,
+    const state: SessionState = { schemaVersion: 3, revision: 2, planRevision: 2, tabId: 9,
       job: { id: `${kind}-job-7`, kind, status: 'running', tabId: 9, month: '2026-11', startedAt: '2026-11-02T09:00:00Z', updatedAt: '2026-11-02T09:00:01Z' },
       progress: { phase: kind, completed: 7, total: 30, message: 'Local job fixture' } };
     const chrome = mockChrome({ state });
@@ -441,5 +444,100 @@ describe('actual extension panel connection states', () => {
     expect(document.getElementById('main-error')?.hidden).toBe(true);
     expect(chrome.setSettings).not.toHaveBeenCalled();
     expect(chrome.addListener).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows reviewing a manual UI context but requires fresh account consent before sending APPLY', async () => {
+    const initial = reviewedState('user-confirmed-ui');
+    const chrome = mockChrome({ state: initial });
+    await mount();
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    expect(document.getElementById('account-context-notice')?.hidden).toBe(false);
+    expect(document.getElementById('account-context-notice')?.classList.contains('error')).toBe(false);
+    expect(document.getElementById('main-error')?.hidden).toBe(true);
+    expect(document.getElementById('plan-errors')?.hidden).toBe(true);
+    button('apply').click();
+    expect(dialog('apply-dialog').open).toBe(true);
+    expect(field('account-confirmation').required).toBe(true);
+    expect(field('account-confirmation').checked).toBe(false);
+    expect(button('confirm-apply').disabled).toBe(true);
+    expect(document.getElementById('account-confirmation-label')?.textContent).toContain('November 2026');
+    expect(document.getElementById('apply-description')?.textContent).not.toContain('Thorsten Test');
+    button('confirm-apply').dispatchEvent(new Event('click'));
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
+    field('account-confirmation').checked = true;
+    field('account-confirmation').dispatchEvent(new Event('change'));
+    expect(button('confirm-apply').disabled).toBe(false);
+    button('confirm-apply').click();
+    await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(true));
+    const sent = chrome.sendMessage.mock.calls.find(([message]) => message.type === 'PANEL_APPLY')![0];
+    expect(sent.confirmation).toEqual({ planId: initial.plan!.id, planRevision: 1, contextFingerprint: contextFingerprint(initial.snapshot!.context), confirmed: true });
+    expect(sent.plan?.snapshot.context).toEqual(initial.snapshot!.context);
+    expect(field('account-confirmation').checked).toBe(false);
+    expect(chrome.setSettings).not.toHaveBeenCalled();
+    expect(JSON.stringify(chrome.state)).not.toContain('"confirmation"');
+  });
+
+  it('clears manual account consent on Back, Escape, every reopen, and settings edits', async () => {
+    const chrome = mockChrome({ state: reviewedState('user-confirmed-ui') });
+    await mount();
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    const consent = () => { field('account-confirmation').checked = true; field('account-confirmation').dispatchEvent(new Event('change')); };
+    button('apply').click(); consent();
+    button('close-apply').click();
+    expect(field('account-confirmation').checked).toBe(false);
+    button('apply').click();
+    expect(field('account-confirmation').checked).toBe(false);
+    expect(button('confirm-apply').disabled).toBe(true);
+    consent(); dialog('apply-dialog').dispatchEvent(new Event('cancel'));
+    expect(dialog('apply-dialog').open).toBe(false);
+    expect(field('account-confirmation').checked).toBe(false);
+    button('apply').click(); consent();
+    change('start', '09:00');
+    expect(dialog('apply-dialog').open).toBe(false);
+    expect(field('account-confirmation').checked).toBe(false);
+    button('confirm-apply').dispatchEvent(new Event('click'));
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    button('apply').click();
+    expect(field('account-confirmation').checked).toBe(false);
+    expect(button('confirm-apply').disabled).toBe(true);
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
+  });
+
+  it.each(['revision', 'plan', 'snapshot', 'context', 'job'] as const)('discards manual consent after a %s replacement event', async changed => {
+    const initial = reviewedState('user-confirmed-ui');
+    const chrome = mockChrome({ state: initial });
+    await mount();
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    button('apply').click();
+    field('account-confirmation').checked = true;
+    field('account-confirmation').dispatchEvent(new Event('change'));
+    expect(button('confirm-apply').disabled).toBe(false);
+    const replacement = structuredClone(initial);
+    replacement.revision = 10;
+    if (changed === 'revision') replacement.planRevision = 10;
+    if (changed === 'plan') replacement.plan = buildMonthPlan({ ...settings, start: '09:00' }, replacement.snapshot!, { '2026-11-02': 'skip' }, 124);
+    if (changed === 'snapshot') replacement.snapshot!.scannedAt = '2026-11-02T10:30:00.000Z';
+    if (changed === 'context') replacement.snapshot!.context = { mode: 'user-confirmed-ui', documentId: 'different-document', pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: 'different-markers' };
+    if (changed === 'job') replacement.job = { id: 'other-job', kind: 'scan', status: 'running', tabId: 9, month: '2026-11', startedAt: 'now', updatedAt: 'now' };
+    chrome.emit(replacement);
+    expect(dialog('apply-dialog').open).toBe(false);
+    expect(field('account-confirmation').checked).toBe(false);
+    button('confirm-apply').dispatchEvent(new Event('click'));
+    await settleStartup();
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
+  });
+
+  it('does not require manual account confirmation for a stable identity context', async () => {
+    const chrome = mockChrome({ state: reviewedState() });
+    await mount();
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    expect(document.getElementById('account-context-notice')?.hidden).toBe(true);
+    button('apply').click();
+    expect(document.getElementById('account-confirmation-field')?.hidden).toBe(true);
+    expect(field('account-confirmation').required).toBe(false);
+    expect(button('confirm-apply').disabled).toBe(false);
+    button('confirm-apply').click();
+    await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(true));
+    expect(chrome.sendMessage.mock.calls.find(([message]) => message.type === 'PANEL_APPLY')![0].confirmation).toBeUndefined();
   });
 });

@@ -2,15 +2,19 @@ import { t } from './i18n/index';
 import { buildMonthPlan } from './domain/index';
 import { assertWritablePlan } from './shared/validation';
 import { sameJsonValue } from './shared/json';
-import type { AdapterProgress, AttendanceContext, BookingPlan, DayPlan, DaySnapshot, JobState, MonthSnapshot, PlanEditLease, RunState, SessionState } from './shared/types';
+import { assertApplyAuthorization, contextFingerprint } from './shared/context';
+import { isExtensionVersion, isNewerExtensionVersion } from './shared/updates';
+import type { AccountConfirmation, AdapterProgress, ApplyAuthorization, AttendanceContext, BookingPlan, DayPlan, DaySnapshot, JobState, MonthSnapshot, PlanEditLease, RunState, SessionState } from './shared/types';
 
 export interface ControllerBridge {
   load(): Promise<SessionState | undefined>;
   save(state: SessionState): Promise<void>;
   scan(tabId: number, month: string, jobId: string): Promise<MonthSnapshot>;
-  applyDay(tabId: number, day: DayPlan, context: AttendanceContext | undefined, jobId: string): Promise<DaySnapshot>;
+  applyDay(tabId: number, day: DayPlan, context: AttendanceContext | undefined, jobId: string, authorization: ApplyAuthorization): Promise<DaySnapshot>;
   cancel(tabId: number, jobId: string): Promise<void>;
   recover?(tabId: number, jobId: string): Promise<void>;
+  checkUpdateIdle?(tabId: number | undefined): Promise<void>;
+  reload?(): void;
 }
 const clone = <T>(value: T): T => structuredClone(value);
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -27,11 +31,13 @@ function validateStoredState(state: SessionState): void {
   if (state.progress && (!object(state.progress) || !['scan', 'apply'].includes(state.progress.phase) || !safeCounter(state.progress.completed) || !safeCounter(state.progress.total) || state.progress.completed > state.progress.total || typeof state.progress.message !== 'string')) invalid();
   if (state.job && (!object(state.job) || typeof state.job.id !== 'string' || !state.job.id || !['scan', 'apply'].includes(state.job.kind) || !['running', 'cancelling', 'interrupted'].includes(state.job.status) || !Number.isSafeInteger(state.job.tabId) || state.job.tabId < 0 || typeof state.job.month !== 'string' || (state.job.month !== '' && !/^\d{4}-(0[1-9]|1[0-2])$/.test(state.job.month)) || typeof state.job.startedAt !== 'string' || typeof state.job.updatedAt !== 'string')) invalid();
   if (state.editLease && (!object(state.editLease) || !safeCounter(state.editLease.planRevision) || typeof state.editLease.changeId !== 'string' || !state.editLease.changeId)) invalid();
+  if (state.update && (!object(state.update) || !isExtensionVersion(state.update.installedVersion) || state.update.pendingVersion !== undefined && !isExtensionVersion(state.update.pendingVersion))) invalid();
+  if (state.updateApplying !== undefined && typeof state.updateApplying !== 'boolean') invalid();
 }
 
 /** Owns the only write queue and the global lease for reviewed configuration. */
 export class BookingController {
-  state: SessionState = { schemaVersion: 2, revision: 0, planRevision: 0 };
+  state: SessionState = { schemaVersion: 3, revision: 0, planRevision: 0 };
   private busy = false;
   private cancelRequested = false;
   private persistence: Promise<void> = Promise.resolve();
@@ -45,17 +51,23 @@ export class BookingController {
   async init(): Promise<void> {
     const loaded: unknown = await this.bridge.load();
     if (loaded !== undefined && !object(loaded)) throw new Error(t('Der gespeicherte Sitzungszustand ist ungültig. Bitte die Erweiterung neu laden.'));
-    if (object(loaded) && loaded.schemaVersion !== undefined && loaded.schemaVersion !== 2) throw new Error(t('Diese Sitzungsversion wird nicht unterstützt. Bitte die Erweiterung neu laden.'));
+    if (object(loaded) && loaded.schemaVersion !== undefined && loaded.schemaVersion !== 2 && loaded.schemaVersion !== 3) throw new Error(t('Diese Sitzungsversion wird nicht unterstützt. Bitte die Erweiterung neu laden.'));
     const restored = clone((loaded ?? {}) as SessionState);
     validateStoredState(restored);
+    // Consent is deliberately ephemeral, including when loading unknown extra fields.
+    for (const item of [restored, restored.plan, restored.snapshot, restored.run]) if (object(item)) {
+      delete item.confirmation; delete item.accountConfirmation; delete item.authorization;
+    }
     if (restored.run && (!Array.isArray(restored.run.results) || !restored.run.results.every(result => object(result) && typeof result.date === 'string' && typeof result.status === 'string'))) throw new Error(t('Der gespeicherte Buchungsverlauf ist ungültig. Vor weiteren Buchungen den HiBob-Zustand prüfen.'));
     if (restored.snapshot && (!object(restored.snapshot) || !Array.isArray(restored.snapshot.days))) throw new Error(t('Der gespeicherte Sitzungszustand ist ungültig. Bitte die Erweiterung neu laden.'));
     if (restored.plan && (!object(restored.plan) || !Array.isArray(restored.plan.days) || !object(restored.plan.settings))) throw new Error(t('Der gespeicherte Sitzungszustand ist ungültig. Bitte die Erweiterung neu laden.'));
     this.revision = Math.max(this.revision, counter(restored.revision));
     this.planRevision = Math.max(this.planRevision, counter(restored.planRevision));
-    this.state = { ...restored, schemaVersion: 2, revision: this.revision, planRevision: this.planRevision };
+    this.state = { ...restored, schemaVersion: 3, revision: this.revision, planRevision: this.planRevision };
     this.durableLease = undefined; this.approvedPlanRevision = undefined; this.leaseCandidate = undefined;
-    const legacy = object(loaded) && loaded.schemaVersion !== 2;
+    const legacy = object(loaded) && loaded.schemaVersion !== 3;
+    const interruptedUpdate = restored.updateApplying === true;
+    this.state.updateApplying = false;
     const interrupted = restored.job?.status === 'running' || restored.job?.status === 'cancelling' || restored.run?.status === 'running' || !!restored.progress;
     if (interrupted) {
       const kind = restored.job?.kind ?? (restored.run?.status === 'running' ? 'apply' : 'scan');
@@ -67,8 +79,9 @@ export class BookingController {
         for (const result of this.state.run.results) if (result.status === 'running') { result.status = 'uncertain'; result.message = t('Ausführung unterbrochen. Persistierten Zustand erneut einlesen.'); }
       }
       this.state.progress = undefined; this.invalidateScan();
+      if (legacy) this.state.plan = undefined;
       this.state.error = t('Der letzte Vorgang wurde unterbrochen. Vor weiteren Buchungen den Monat erneut einlesen.');
-    } else if (legacy && (restored.snapshot || restored.plan)) {
+    } else if ((legacy || interruptedUpdate) && (restored.snapshot || restored.plan)) {
       this.invalidateScan(); this.state.plan = undefined;
       this.state.error = t('Die Sitzung wurde aktualisiert. Bitte den Monat erneut einlesen.');
     } else if (this.state.editLease && this.state.editLease.planRevision === this.planRevision && typeof this.state.editLease.changeId === 'string') {
@@ -77,13 +90,55 @@ export class BookingController {
         const canonical = buildMonthPlan(this.state.plan.settings, this.state.snapshot, this.state.plan.choices, this.state.plan.seed);
         if (sameJsonValue(this.state.plan.snapshot, this.state.snapshot) && sameJsonValue(this.state.plan, canonical)) {
           this.leaseCandidate = clone(canonical); this.approvedPlanRevision = this.planRevision;
-        } else { this.state.plan.canApply = false; this.state.error = t('Die Vorschau wurde geändert. Bitte zuerst die aktuelle Vorschau prüfen.'); }
+        } else { this.state.plan.canReview = false; this.state.error = t('Die Vorschau wurde geändert. Bitte zuerst die aktuelle Vorschau prüfen.'); }
       }
     } else {
       this.state.editLease = undefined;
-      if (this.state.plan) this.state.plan.canApply = false;
+      if (this.state.plan) this.state.plan.canReview = false;
     }
-    if (legacy || interrupted) await this.persist();
+    if (legacy || interrupted || interruptedUpdate) await this.persist();
+  }
+
+  /** Called from the native Chrome event only; no network polling is involved. */
+  async configureUpdates(installedVersion: string, announcedVersion?: string): Promise<void> {
+    if (!isExtensionVersion(installedVersion)) throw new Error('Invalid installed extension version.');
+    const previous = this.state.update;
+    const changedVersion = previous && previous.installedVersion !== installedVersion;
+    const candidates = [changedVersion ? undefined : previous?.pendingVersion, announcedVersion]
+      .filter((version): version is string => isNewerExtensionVersion(version, installedVersion));
+    let pendingVersion: string | undefined;
+    for (const version of candidates) if (!pendingVersion || isNewerExtensionVersion(version, pendingVersion)) pendingVersion = version;
+    const update = { installedVersion, ...(pendingVersion ? { pendingVersion } : {}) };
+    if (changedVersion) {
+      this.invalidateScan(); this.state.plan = undefined;
+      this.state.error = t('Die Erweiterung wurde aktualisiert. Bitte den HiBob-Tab neu laden und den Monat erneut einlesen.');
+    }
+    if (sameJsonValue(previous, update) && !changedVersion) return;
+    this.state.update = update;
+    await this.persist();
+  }
+
+  async activateUpdate(): Promise<SessionState> {
+    if (this.busy || this.state.job || this.state.run?.status === 'running' || this.state.updateApplying) throw new Error(t('Das Update kann erst nach Abschluss des laufenden Vorgangs aktiviert werden.'));
+    if (!this.state.update?.pendingVersion) throw new Error(t('Chrome hat noch kein Update zur Aktivierung bereitgestellt.'));
+    if (!this.bridge.reload) throw new Error(t('Das Update kann hier nicht aktiviert werden. Bitte Chrome neu starten.'));
+    // Acquire the same synchronous lock as scan/apply before probing the tab or
+    // writing the invalidation. Another panel cannot enter the queue meanwhile.
+    this.busy = true; this.state.updateApplying = true;
+    try {
+      await this.bridge.checkUpdateIdle?.(this.state.tabId);
+      this.invalidateScan(); this.state.plan = undefined; this.state.progress = undefined;
+      this.state.error = t('Die Erweiterung wird aktualisiert. Danach den HiBob-Tab neu laden und den Monat erneut einlesen.');
+      await this.persist();
+      this.bridge.reload();
+      // reload() replaces this context. Keep it locked if an embedding/test
+      // environment lets the old context continue after returning.
+      return clone(this.state);
+    } catch (error) {
+      this.busy = false; this.state.updateApplying = false; this.state.error = errorText(error);
+      this.touch();
+      throw error;
+    }
   }
 
   async bindTab(tabId: number | undefined, error?: string): Promise<void> {
@@ -93,7 +148,7 @@ export class BookingController {
       if (tabId !== undefined && tabId === this.state.tabId && !error) return;
       throw new Error(t('Ein Vorgang läuft bereits. Bitte zuerst abbrechen.'));
     }
-    if (tabId === undefined || this.state.tabId !== tabId) { this.state = { schemaVersion: 2, revision: this.revision, planRevision: this.planRevision }; this.invalidateScan(); }
+    if (tabId === undefined || this.state.tabId !== tabId) { this.state = { schemaVersion: 3, revision: this.revision, planRevision: this.planRevision, update: this.state.update }; this.invalidateScan(); }
     if (tabId !== undefined) this.state.tabId = tabId;
     this.state.error = error; await this.persist();
   }
@@ -142,8 +197,9 @@ export class BookingController {
     } catch (error) { failure = error; this.state.error = errorText(error); }
     finally {
       if (job && this.state.job?.id === job.id) this.state.job = recovered ? undefined : interrupted;
-      this.state.progress = undefined; this.busy = false;
+      this.state.progress = undefined;
       try { await this.persist(); } catch (error) { this.state.error ||= errorText(error); failure ??= error; this.touch(); }
+      finally { this.busy = false; }
     }
     if (failure) throw new Error(this.state.error || errorText(failure)); return clone(this.state);
   }
@@ -159,7 +215,7 @@ export class BookingController {
     try { await this.persist(); if (!this.currentLease(lease)) throw stalePlan(); this.approvedPlanRevision = lease.planRevision; }
     catch (error) {
       if (this.currentLease(lease) && this.approvedPlanRevision !== lease.planRevision && this.state.plan === candidate) {
-        this.state.plan.canApply = false;
+        this.state.plan.canReview = false;
         this.state.error = errorText(error);
         // The failed acknowledgement changes the public in-memory state too.
         // Give it a newer revision than any earlier candidate storage event.
@@ -170,12 +226,16 @@ export class BookingController {
     return clone(this.state);
   }
 
-  async apply(input: BookingPlan, expectedPlanRevision: number): Promise<SessionState> {
+  async apply(input: BookingPlan, expectedPlanRevision: number, confirmation?: AccountConfirmation): Promise<SessionState> {
     if (this.busy) throw new Error(t('Ein Vorgang läuft bereits.'));
     const plan = this.state.plan;
     if (expectedPlanRevision !== this.planRevision || this.approvedPlanRevision !== this.planRevision || !plan || !this.state.snapshot || input.id !== plan.id || !sameJsonValue(input, plan)) throw stalePlan();
     assertWritablePlan(plan);
-    if (!plan.snapshot.context?.verified || !plan.snapshot.context.employeeKey || !plan.snapshot.context.tenantKey || !plan.snapshot.context.documentId) throw new Error(t('Die Kontozuordnung ist nicht sicher bestätigt. Buchungen bleiben gesperrt; bitte den Monat erneut einlesen.'));
+    const authorization: ApplyAuthorization = {
+      planId: plan.id, planRevision: expectedPlanRevision, contextFingerprint: contextFingerprint(plan.snapshot.context),
+      ...(confirmation ? { confirmation: clone(confirmation) } : {}),
+    };
+    assertApplyAuthorization(plan.snapshot.context, authorization);
     const tabId = this.requireTab(); this.busy = true; this.cancelRequested = false; this.state.error = undefined;
     const job = this.newJob('apply', tabId, plan.settings.month); this.state.job = job;
     const changes = plan.days.filter(day => day.action === 'create' || day.action === 'overwrite');
@@ -192,7 +252,7 @@ export class BookingController {
         if (this.cancelRequested) { result.status = 'pending'; result.message = t('Vor dem Schreiben abgebrochen.'); break; }
         // Local journaling errors must not overwrite an already verified remote outcome.
         try {
-          const saved = await this.bridge.applyDay(tabId, day, plan.snapshot.context, job.id);
+          const saved = await this.bridge.applyDay(tabId, day, plan.snapshot.context, job.id, authorization);
           if (saved.date !== day.date) throw Object.assign(new Error(t('HiBob hat nach dem Speichern einen anderen Tag geliefert.')), { uncertain: true });
           result.status = 'verified'; result.message = t('Gespeichert und erneut aus HiBob gelesen.'); this.state.progress.completed = i + 1;
         } catch (error) {
@@ -205,10 +265,11 @@ export class BookingController {
       if (run.status === 'stopped') this.state.error = t('Lauf abgebrochen. Bereits bestätigte Buchungen bleiben erhalten. Vor dem Fortsetzen erneut einlesen.');
     } catch (error) { failure = error; this.journalFailure(run, error); }
     finally {
-      run.updatedAt = new Date().toISOString(); this.state.progress = undefined; this.busy = false;
+      run.updatedAt = new Date().toISOString(); this.state.progress = undefined;
       if (this.state.job?.id === job.id) this.state.job = undefined;
       this.invalidateScan();
       try { await this.persist(); } catch (error) { this.journalFailure(run, error); failure ??= error; this.touch(); }
+      finally { this.busy = false; }
     }
     if (failure) throw new Error(this.state.error || errorText(failure)); return clone(this.state);
   }
@@ -229,8 +290,8 @@ export class BookingController {
   private newJob(kind: JobState['kind'], tabId: number, month: string): JobState { const now = new Date().toISOString(); return { id: crypto.randomUUID(), kind, status: 'running', tabId, month, startedAt: now, updatedAt: now }; }
   private currentLease(lease: PlanEditLease | undefined): lease is PlanEditLease { return !!lease && lease.planRevision === this.planRevision && this.state.editLease?.planRevision === lease.planRevision && this.state.editLease.changeId === lease.changeId; }
   private advancePlanRevision(): void { this.state.planRevision = ++this.planRevision; this.approvedPlanRevision = undefined; this.durableLease = undefined; this.leaseCandidate = undefined; }
-  private invalidateScan(): void { this.state.snapshot = undefined; if (this.state.plan) this.state.plan.canApply = false; this.state.editLease = undefined; this.advancePlanRevision(); }
+  private invalidateScan(): void { this.state.snapshot = undefined; if (this.state.plan) this.state.plan.canReview = false; this.state.editLease = undefined; this.advancePlanRevision(); }
   private requireTab(): number { if (this.state.tabId === undefined) throw new Error(t('HiBob öffnen und dort auf das Extension-Symbol klicken.')); return this.state.tabId; }
-  private touch(): void { this.state.schemaVersion = 2; this.state.revision = ++this.revision; this.state.planRevision = this.planRevision; }
+  private touch(): void { this.state.schemaVersion = 3; this.state.revision = ++this.revision; this.state.planRevision = this.planRevision; }
   private async persist(): Promise<void> { this.touch(); const state = clone(this.state); const operation = this.persistence.then(() => this.bridge.save(state)); this.persistence = operation.catch(() => {}); await operation; }
 }

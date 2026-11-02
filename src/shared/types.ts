@@ -2,12 +2,25 @@ export type LocalDate = string;
 export type ConflictChoice = 'overwrite' | 'skip';
 export type ConflictChoices = Record<LocalDate, ConflictChoice>;
 
-export interface AttendanceContext {
-  documentId: string;
-  employeeKey?: string;
-  tenantKey?: string;
-  verified: boolean;
-  reason?: string;
+export type AttendanceContext =
+  | { mode: 'stable-identity'; documentId: string; employeeKey: string; tenantKey: string }
+  | { mode: 'user-confirmed-ui'; documentId: string; pageUrl: string; markerFingerprint: string }
+  | { mode: 'unavailable'; documentId: string; reason: string };
+
+/** Explicit consent to one immutable plan, never a preference or reusable identity. */
+export interface AccountConfirmation {
+  planId: string;
+  planRevision: number;
+  contextFingerprint: string;
+  confirmed: true;
+}
+
+/** Produced by the controller after checking the current reviewed plan and consent. */
+export interface ApplyAuthorization {
+  planId: string;
+  planRevision: number;
+  contextFingerprint: string;
+  confirmation?: AccountConfirmation;
 }
 
 export interface PlanEditLease {
@@ -103,7 +116,7 @@ export interface BookingPlan {
   days: DayPlan[];
   weeks: WeekPlan[];
   errors: string[];
-  canApply: boolean;
+  canReview: boolean;
 }
 
 export interface DayResult {
@@ -132,17 +145,22 @@ export interface AdapterProgress {
 
 export type AdapterCommand =
   | { type: 'SCAN_MONTH'; month: string; jobId: string }
-  | { type: 'APPLY_DAY'; day: DayPlan; context?: AttendanceContext; jobId: string }
+  | { type: 'APPLY_DAY'; day: DayPlan; context?: AttendanceContext; authorization: ApplyAuthorization; jobId: string }
   | { type: 'CANCEL'; jobId: string }
   | { type: 'PING' };
 
 export type AdapterResponse =
-  | { ok: true; snapshot?: MonthSnapshot; day?: DaySnapshot; protocolVersion?: number; activeJob?: { id: string; kind: 'scan' | 'apply' } }
+  | { ok: true; snapshot?: MonthSnapshot; day?: DaySnapshot; protocolVersion?: number; extensionVersion?: string; activeJob?: { id: string; kind: 'scan' | 'apply' } }
   | { ok: false; error: string; uncertain?: boolean };
 
+export interface UpdateStatus {
+  installedVersion: string;
+  pendingVersion?: string;
+}
+
 export interface SessionState {
-  /** Optional on input only, for migration from version 1.1.1 sessions. */
-  schemaVersion?: 2;
+  /** Optional on input only, for migration from older sessions. */
+  schemaVersion?: 2 | 3;
   revision?: number;
   planRevision?: number;
   editLease?: PlanEditLease;
@@ -152,5 +170,7 @@ export interface SessionState {
   plan?: BookingPlan;
   run?: RunState;
   progress?: AdapterProgress;
+  update?: UpdateStatus;
+  updateApplying?: boolean;
   error?: string;
 }

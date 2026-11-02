@@ -39,7 +39,7 @@ test('the packaged MV3 extension starts with its declared permissions and CSP', 
     const info = await worker.evaluate(() => ({ permissions: chrome.runtime.getManifest().permissions, csp: chrome.runtime.getManifest().content_security_policy, state: chrome.storage.session.get('sessionState') }));
     expect(info.permissions).toEqual(['sidePanel', 'storage', 'activeTab', 'scripting']);
     expect(info.csp).toEqual({ extension_pages: "script-src 'self'; object-src 'none'; connect-src 'none'" });
-    expect(await worker.evaluate(() => chrome.runtime.getManifest().version)).toBe('1.2.0');
+    expect(await worker.evaluate(() => chrome.runtime.getManifest().version)).toBe('1.2.1');
     await expect(page.locator('#connection-title')).toHaveText(labels.unbound);
     await expect(page.locator('#scan')).toBeDisabled();
     // A top-level extension tab is not the native side panel. The production

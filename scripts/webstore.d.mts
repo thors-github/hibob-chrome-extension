@@ -1,0 +1,1 @@
+export function submitStorePackage(options: { metadata: { prerelease: boolean; stableReleaseReady: boolean; version: string }; bytes: Uint8Array; publisherId: string; extensionId: string; token: string; fetcher?: typeof fetch; sleep?: (ms: number) => Promise<void> }): Promise<{ state: string; version?: string }>;
