@@ -2,6 +2,42 @@ export type LocalDate = string;
 export type ConflictChoice = 'overwrite' | 'skip';
 export type ConflictChoices = Record<LocalDate, ConflictChoice>;
 
+export type AttendanceContext =
+  | { mode: 'stable-identity'; documentId: string; employeeKey: string; tenantKey: string }
+  | { mode: 'user-confirmed-ui'; documentId: string; pageUrl: string; markerFingerprint: string }
+  | { mode: 'unavailable'; documentId: string; reason: string };
+
+/** Explicit consent to one immutable plan, never a preference or reusable identity. */
+export interface AccountConfirmation {
+  planId: string;
+  planRevision: number;
+  contextFingerprint: string;
+  confirmed: true;
+}
+
+/** Produced by the controller after checking the current reviewed plan and consent. */
+export interface ApplyAuthorization {
+  planId: string;
+  planRevision: number;
+  contextFingerprint: string;
+  confirmation?: AccountConfirmation;
+}
+
+export interface PlanEditLease {
+  planRevision: number;
+  changeId: string;
+}
+
+export interface JobState {
+  id: string;
+  kind: 'scan' | 'apply';
+  status: 'running' | 'cancelling' | 'interrupted';
+  tabId: number;
+  month: string;
+  startedAt: string;
+  updatedAt: string;
+}
+
 export interface AttendanceEntry {
   type: 'work' | 'break';
   start: string;
@@ -19,6 +55,7 @@ export interface DaySnapshot {
   nonWorking?: string;
   unsupportedReason?: string;
   fingerprint: string;
+  reportedMinutes?: number | null;
 }
 
 export interface MonthSnapshot {
@@ -27,6 +64,7 @@ export interface MonthSnapshot {
   periodLabel: string;
   scannedAt: string;
   source: 'hibob' | 'demo';
+  context?: AttendanceContext;
   days: DaySnapshot[];
 }
 
@@ -52,7 +90,7 @@ export interface DayPlan {
   date: LocalDate;
   existing: AttendanceEntry[];
   proposed: AttendanceEntry[];
-  action: 'create' | 'overwrite' | 'skip' | 'conflict' | 'unchanged';
+  action: 'create' | 'overwrite' | 'skip' | 'conflict' | 'unchanged' | 'blocked';
   reason?: string;
   holiday?: string;
   netMinutes: number | null;
@@ -78,7 +116,7 @@ export interface BookingPlan {
   days: DayPlan[];
   weeks: WeekPlan[];
   errors: string[];
-  canApply: boolean;
+  canReview: boolean;
 }
 
 export interface DayResult {
@@ -93,9 +131,11 @@ export interface RunState {
   results: DayResult[];
   startedAt: string;
   updatedAt: string;
+  journalError?: string;
 }
 
 export interface AdapterProgress {
+  jobId?: string;
   phase: 'scan' | 'apply';
   date?: LocalDate;
   completed: number;
@@ -104,20 +144,33 @@ export interface AdapterProgress {
 }
 
 export type AdapterCommand =
-  | { type: 'SCAN_MONTH'; month: string }
-  | { type: 'APPLY_DAY'; day: DayPlan }
-  | { type: 'CANCEL' }
+  | { type: 'SCAN_MONTH'; month: string; jobId: string }
+  | { type: 'APPLY_DAY'; day: DayPlan; context?: AttendanceContext; authorization: ApplyAuthorization; jobId: string }
+  | { type: 'CANCEL'; jobId: string }
   | { type: 'PING' };
 
 export type AdapterResponse =
-  | { ok: true; snapshot?: MonthSnapshot; day?: DaySnapshot }
+  | { ok: true; snapshot?: MonthSnapshot; day?: DaySnapshot; protocolVersion?: number; extensionVersion?: string; activeJob?: { id: string; kind: 'scan' | 'apply' } }
   | { ok: false; error: string; uncertain?: boolean };
 
+export interface UpdateStatus {
+  installedVersion: string;
+  pendingVersion?: string;
+}
+
 export interface SessionState {
+  /** Optional on input only, for migration from older sessions. */
+  schemaVersion?: 2 | 3;
+  revision?: number;
+  planRevision?: number;
+  editLease?: PlanEditLease;
+  job?: JobState;
   tabId?: number;
   snapshot?: MonthSnapshot;
   plan?: BookingPlan;
   run?: RunState;
   progress?: AdapterProgress;
+  update?: UpdateStatus;
+  updateApplying?: boolean;
   error?: string;
 }

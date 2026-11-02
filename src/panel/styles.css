@@ -32,6 +32,12 @@ small { font-size: 12px; }
 .app-mark { width: 40px; height: 40px; flex: 0 0 40px; display: grid; place-items: center; }
 .app-mark img { display: block; width: 40px; height: 40px; }
 .app-header p { margin-top: 4px; color: var(--muted); font-size: 12px; }
+.version-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: -10px 0 14px; color: var(--muted); font-size: 11px; }
+.version-bar .button { font-size: 12px; padding-block: 4px; min-height: 30px; }
+.settings-transfer { margin-top: 17px; padding-top: 14px; border-top: 1px solid var(--border); }
+.settings-transfer .hint { margin-top: 9px; }
+.transfer-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 11px; }
+.transfer-actions .button { flex: 1 1 140px; font-size: 12px; padding-inline: 10px; }
 .connection { display: flex; align-items: flex-start; gap: 9px; border-block: 1px solid var(--border); padding: 13px 0; margin-bottom: 21px; font-size: 12px; }
 .connection-dot { width: 7px; height: 7px; margin-top: 6px; border-radius: 50%; background: #9aabb1; flex: 0 0 7px; }
 .connection.connected .connection-dot { background: #358c67; }
@@ -102,7 +108,7 @@ details .field { margin-top: 10px; }
 .day-date { font-size: 13px; font-weight: 600; }
 .status { font-size: 10px; font-weight: 600; color: #3a6555; background: #e6efe9; border-radius: 4px; padding: 2px 6px; flex-shrink: 0; }
 .status.skip { color: #647077; background: #e9edef; }
-.status.conflict { color: #8e5f12; background: #fff0ce; }
+.status.conflict, .status.blocked { color: #8e5f12; background: #fff0ce; }
 .status.overwrite { color: #8c4e25; background: #fae8db; }
 .day-lines { margin: 0 0 0 25px; display: grid; grid-template-columns: 48px minmax(0,1fr); gap: 3px 6px; font-size: 11px; line-height: 1.45; }
 .day-lines dt { color: #738087; }
@@ -135,9 +141,13 @@ dialog::backdrop { background: #20333e66; }
 .metadata { margin: 9px 0; padding: 9px 10px; font-size: 11px; border-left: 3px solid #e2b947; background: #fffbef; white-space: pre-wrap; overflow-wrap: anywhere; }
 .ack-label { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; margin-top: 10px; }
 .ack-label input { margin-top: 2px; }
+.account-confirmation { margin-top: 16px; }
+.account-confirmation .ack-label { margin-top: 0; line-height: 1.5; }
 .confirm-details { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin: 17px 0; font-size: 13px; }
 .confirm-details dd { margin: 0; font-weight: 600; }
 .confirm-details dt { color: var(--muted); }
+#import-dialog .confirm-details { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+#import-dialog .confirm-details dd { overflow-wrap: anywhere; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
 @media (max-width: 350px) {
   .shell { padding-inline: 12px; }

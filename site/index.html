@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Prepare and review a month of your own HiBob attendance. Installation options, update guidance and privacy information.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light">
+  <title>HiBob Monthly Attendance — Install</title>
+  <link rel="icon" href="./app-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./configuration.js" defer></script>
+  <script src="./site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="page-header wrap">
+    <a class="brand" href="./" aria-label="HiBob Monthly Attendance home"><img src="./app-icon.svg" width="42" height="42" alt=""><span>HiBob<br><strong>Monthly Attendance</strong></span></a>
+    <nav aria-label="Main"><a href="#install">Install</a><a href="./privacy.html">Privacy</a><a href="https://github.com/thors-github/hibob-chrome-extension">GitHub <span aria-hidden="true">↗</span></a></nav>
+  </header>
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> A little less admin</p>
+        <h1 id="hero-title">Your month,<br>ready to review.</h1>
+        <p class="hero-description">Prepare work times and breaks for your own HiBob attendance. Check every day in a clear monthly preview before anything is saved.</p>
+        <div class="hero-actions"><a class="button button-primary" href="#install">Choose an installation <span aria-hidden="true">↓</span></a><a class="text-link" href="https://github.com/thors-github/hibob-chrome-extension#readme">Read the guide <span aria-hidden="true">↗</span></a></div>
+        <p class="hero-detail">English &amp; German · German public holidays · Your existing HiBob login</p>
+      </div>
+      <div class="month-card" aria-label="Illustrative monthly preview, not account data">
+        <div class="month-card-top"><div><p class="small-label">A month at a glance</p><h2>Plan. Check. Confirm.</h2></div><img src="./app-icon.svg" width="54" height="54" alt=""></div>
+        <div class="weekdays" aria-hidden="true"><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span></div>
+        <div class="calendar" aria-hidden="true"><span class="day selected">2</span><span class="day selected">3</span><span class="day selected">4</span><span class="day selected">5</span><span class="day selected">6</span><span class="day weekend">7</span><span class="day weekend">8</span><span class="day selected">9</span><span class="day selected">10</span><span class="day selected">11</span><span class="day selected">12</span><span class="day selected">13</span><span class="day weekend">14</span><span class="day weekend">15</span></div>
+        <div class="example-row"><span class="example-check" aria-hidden="true">✓</span><div><strong>Work and break periods</strong><span>08:00–12:00 · break · 12:30–16:30</span></div><span class="example-time">8 h</span></div>
+        <div class="example-caption"><span class="status-dot" aria-hidden="true"></span> Example preview. No attendance has been booked.</div>
+      </div>
+    </section>
+
+    <section class="validation-note wrap" id="validation-note" aria-labelledby="validation-title">
+      <span class="note-symbol" aria-hidden="true">i</span><div><h2 id="validation-title">Current preview: manual account confirmation</h2><p id="validation-text">The current preview requires explicit account confirmation for each plan and matching visible page context. This is not automatic employee-ID verification. Actual saving in a live account has not been validated.</p><a id="preview-release" href="https://github.com/thors-github/hibob-chrome-extension/releases">View preview releases <span aria-hidden="true">↗</span></a></div>
+    </section>
+
+    <section class="installation wrap" id="install" aria-labelledby="install-title">
+      <div class="section-heading"><p class="eyebrow">Get started</p><h2 id="install-title">A clear path into Chrome.</h2><p>Store installation will be the simplest option once its listing is published. The GitHub ZIP remains available for manual installation.</p></div>
+      <div class="install-grid">
+        <article class="install-card store-card" aria-labelledby="store-title"><div class="card-heading"><span class="card-number" aria-hidden="true">01</span><span class="pill" id="store-status">Not yet published</span></div><h3 id="store-title">Chrome Web Store</h3><p>Install through Chrome and let the browser deliver approved updates automatically.</p><ul class="simple-list"><li>Chrome handles installation and updates</li><li>Unlisted: accessible through the Store link</li><li>New versions still require Google review</li></ul><div class="card-action"><button class="button button-disabled" id="store-install" type="button" disabled>Store publication pending</button><p id="store-explanation">No published Store listing is configured yet. This button becomes active only after the real listing is published.</p></div></article>
+        <article class="install-card" aria-labelledby="zip-title"><div class="card-heading"><span class="card-number" aria-hidden="true">02</span><span class="pill neutral">Manual setup</span></div><h3 id="zip-title">GitHub release ZIP</h3><p>Download the built extension, extract it once, and load its folder in Chrome.</p><ol class="install-steps"><li>Download the built extension ZIP from your chosen release and extract it into a permanent folder. New releases use <strong>hibob-monthly-attendance.zip</strong>.</li><li>Open <code>chrome://extensions</code> and enable <strong>Developer mode</strong>.</li><li>Choose <strong>Load unpacked</strong> and select the folder containing <code>manifest.json</code>.</li><li>Open HiBob’s <strong>My attendance</strong> page, click the extension icon, then choose <strong>Read month</strong>.</li></ol><div class="card-action"><a class="button button-outline" id="github-release" href="https://github.com/thors-github/hibob-chrome-extension/releases">Browse GitHub releases <span aria-hidden="true">↗</span></a><p>Use the built extension ZIP. GitHub’s automatic “Source code” archives require a build first. For the current gated build, use its clearly labelled prerelease.</p></div></article>
+      </div>
+    </section>
+
+    <section class="updates wrap" aria-labelledby="updates-title"><div><p class="eyebrow">Keep it current</p><h2 id="updates-title">Know how your copy updates.</h2></div><div class="update-details"><article><h3>Installed from the Store</h3><p>After publication, Chrome checks for approved Store updates. A GitHub release alone does not update a Store installation. Apply a downloaded update only when no attendance scan or booking is running.</p></article><article><h3>Installed from a ZIP</h3><p>Updates are manual: replace the files in the same installation folder, reload the extension in <code>chrome://extensions</code>, then reload HiBob. Finish any active operation first.</p></article><article><h3>Moving from ZIP to Store</h3><p>Export preferences from your old copy, install the Store copy, import the preferences, and disable the old copy. Previews and run history are not transferred; read the month again.</p></article></div></section>
+
+    <section class="privacy-strip wrap" aria-labelledby="privacy-strip-title"><div><p class="eyebrow">Local by design</p><h2 id="privacy-strip-title">Your attendance stays in your workflow.</h2><p>No project backend, analytics, or external holiday lookup. Settings stay in local Chrome storage; HiBob receives only the form submissions you confirm.</p></div><a class="button button-outline" href="./privacy.html">Read the privacy statement <span aria-hidden="true">→</span></a></section>
+  </main>
+  <footer class="page-footer wrap"><p>HiBob Monthly Attendance <span id="source-version"></span><br><span>An independent extension. Not affiliated with HiBob.</span></p><div><a href="./privacy.html">Privacy</a><a href="https://github.com/thors-github/hibob-chrome-extension/issues">Support</a><a href="https://github.com/thors-github/hibob-chrome-extension">Source code</a></div></footer>
+</body>
+</html>

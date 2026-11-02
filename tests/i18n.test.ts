@@ -109,7 +109,7 @@ describe('localized presentation with unchanged attendance data', () => {
     expect(plan.days.find(day => day.date === '2026-11-03')!.reason).toContain('Urlaub der Testperson');
     expect(plan.days.find(day => day.date === '2026-11-03')!.reason).not.toContain('Abwesenheit');
     const impossible = buildMonthPlan({ ...fixed, variable: true, end: '15:30', variationMinutes: 0 }, source);
-    expect(impossible.canApply).toBe(false);
+    expect(impossible.canReview).toBe(false);
     expect(impossible.errors.join(' ')).not.toContain('Woche ab');
     expect(impossible.errors.join(' ')).not.toContain('Das Ziel');
     expect(impossible.errors.join(' ')).not.toMatch(/\{(?:week|error|target)\}/);

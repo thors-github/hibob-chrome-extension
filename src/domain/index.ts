@@ -1,16 +1,12 @@
 import type { AttendanceEntry, BookingPlan, ConflictChoices, DayPlan, MonthSnapshot, Settings, WeekPlan } from '../shared/types';
 import { defaultSettings, GERMAN_STATES, getHolidays, getMonthDates, parseMonth, weekday, weekStart } from './calendar';
 import { t } from '../i18n';
+import { parseTime, netMinutes } from '../shared/entries';
+import { canonicalJson } from '../shared/json';
+import { isReviewableContext } from '../shared/context';
 
 export { defaultSettings, GERMAN_STATES, getHolidays, getMonthDates } from './calendar';
-
-export function parseTime(value: string): number | null {
-  const match = /^(\d{2}):(\d{2})$/.exec(value);
-  if (!match) return null;
-  const hour = Number(match[1]);
-  const minute = Number(match[2]);
-  return hour < 24 && minute < 60 ? hour * 60 + minute : null;
-}
+export { parseTime, netMinutes } from '../shared/entries';
 
 function timeText(minutes: number): string {
   return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
@@ -21,28 +17,6 @@ export function formatMinutes(minutes: number | null): string {
   const sign = minutes < 0 ? '−' : '';
   const value = Math.abs(Math.round(minutes));
   return t('{sign}{hours} h {minutes} min', { sign, hours: Math.floor(value / 60), minutes: String(value % 60).padStart(2, '0') });
-}
-
-export function netMinutes(entries: AttendanceEntry[]): number | null {
-  if (!entries.length) return 0;
-  const work: Array<[number, number]> = [];
-  const breaks: Array<[number, number]> = [];
-  for (const entry of entries) {
-    if (entry.type !== 'work' && entry.type !== 'break') return null;
-    const start = parseTime(entry.start);
-    const end = parseTime(entry.end);
-    if (start === null || end === null || start >= end) return null;
-    (entry.type === 'work' ? work : breaks).push([start, end]);
-  }
-  if (!work.length) return null;
-  for (const intervals of [work, breaks]) {
-    intervals.sort((a, b) => a[0] - b[0]);
-    if (intervals.some((interval, index) => index > 0 && interval[0] < intervals[index - 1][1])) return null;
-  }
-  if (breaks.some(([start, end]) => start < work[0][0] || end > work[work.length - 1][1])) return null;
-  const gross = work.reduce((total, [start, end]) => total + end - start, 0);
-  const overlap = work.reduce((total, [workStart, workEnd]) => total + breaks.reduce((sum, [start, end]) => sum + Math.max(0, Math.min(workEnd, end) - Math.max(workStart, start)), 0), 0);
-  return gross - overlap;
 }
 
 export function validateSettings(settings: Settings): string[] {
@@ -154,6 +128,9 @@ function allocateDurations(count: number, target: number, durations: number[], r
 export function buildMonthPlan(settings: Settings, snapshot: MonthSnapshot, choices: ConflictChoices = {}, seed = 73129): BookingPlan {
   const safeSettings: Settings = { ...settings, excludedDates: [...settings.excludedDates], localHolidays: { ...settings.localHolidays } };
   const errors = validateSettings(settings);
+  if (snapshot.source === 'hibob' && !isReviewableContext(snapshot.context)) {
+    errors.push(snapshot.context?.mode === 'unavailable' ? snapshot.context.reason : t('Der HiBob-Seitenkontext ist nicht zuverlässig lesbar. Bitte den Monat erneut einlesen.'));
+  }
   if (snapshot.month !== settings.month) errors.push(t('Der gelesene HiBob-Monat stimmt nicht mit dem ausgewählten Monat überein. Bitte neu einlesen.'));
   const dates = getMonthDates(settings.month);
   const byDate = new Map(snapshot.days.map(day => [day.date, day]));
@@ -173,15 +150,33 @@ export function buildMonthPlan(settings: Settings, snapshot: MonthSnapshot, choi
     if (weekday(date) === 0 || weekday(date) === 6) reason = t('Wochenende');
     else if (holidays[date]) { reason = t('Feiertag: {name}', { name: holidays[date] }); result.holiday = holidays[date]; }
     else if (excluded.has(date)) reason = t('Manuell ausgeschlossen');
-    else if (!existingDay) { reason = t('Keine zuverlässig gelesenen HiBob-Daten'); errors.push(t('{date}: {reason}.', { date, reason })); }
+    else if (!existingDay) {
+      reason = t('Keine zuverlässig gelesenen HiBob-Daten');
+      result.eligible = true;
+      result.action = 'blocked';
+      result.netMinutes = null;
+      errors.push(t('{date}: {reason}.', { date, reason }));
+    }
     else if (existingDay.absence) reason = t('Abwesenheit: {name}', { name: existingDay.absence });
     else if (existingDay.nonWorking) reason = existingDay.nonWorking;
-    else if (!existingDay.editable) reason = t('HiBob-Zeitraum oder Tag ist nicht bearbeitbar');
-    else if (existingDay.unsupportedReason) {
-      reason = existingDay.unsupportedReason;
-      if (settings.variable) errors.push(t('{date}: {reason}. Die Wochenstunden können nicht verlässlich berechnet werden.', { date, reason }));
-    }
     if (reason) { result.reason = reason; return result; }
+    if (!existingDay) return result;
+    // An unreadable selected day is a blocking issue. It must not silently
+    // remove eight hours from a variable week's target.
+    const reported = existingDay.reportedMinutes;
+    const hoursIssue = snapshot.source === 'hibob' && (typeof reported !== 'number' || !Number.isInteger(reported) || reported < 0 || reported !== existingNetMinutes)
+      ? t('Die gemeldeten HiBob-Stunden stimmen nicht mit den vollständigen Einträgen überein.') : undefined;
+    const issue = existingDay.unsupportedReason || hoursIssue;
+    if (issue) {
+      result.eligible = true;
+      result.action = 'blocked';
+      result.netMinutes = null;
+      result.existingNetMinutes = null;
+      result.reason = issue;
+      errors.push(t('{date}: {reason}. Bitte den Tag prüfen oder ausdrücklich ausschließen.', { date, reason: issue }));
+      return result;
+    }
+    if (!existingDay.editable) { result.reason = t('HiBob-Zeitraum oder Tag ist nicht bearbeitbar'); return result; }
     result.eligible = true;
     result.proposed = baseCandidate ? entriesFor(settings, baseCandidate) : [];
     result.netMinutes = baseCandidate?.minutes ?? null;
@@ -203,8 +198,8 @@ export function buildMonthPlan(settings: Settings, snapshot: MonthSnapshot, choi
     const weekErrors: string[] = [];
     if (settings.variable && settingsValid) {
       const retained = eligible.filter(day => day.action === 'skip');
-      const editable = eligible.filter(day => day.action !== 'skip');
-      if (retained.some(day => day.existingNetMinutes === null)) {
+      const editable = eligible.filter(day => day.action !== 'skip' && day.action !== 'blocked');
+      if (eligible.some(day => day.action === 'blocked') || retained.some(day => day.existingNetMinutes === null)) {
         weekErrors.push(t('Beibehaltene unvollständige Buchungen verhindern eine verlässliche 40-Stunden-Berechnung.'));
       } else {
         const retainedMinutes = retained.reduce((sum, day) => sum + (day.existingNetMinutes ?? 0), 0);
@@ -232,6 +227,6 @@ export function buildMonthPlan(settings: Settings, snapshot: MonthSnapshot, choi
   if (days.some(day => day.action === 'conflict')) errors.push(t('Bitte für alle vorhandenen Buchungen Überschreiben oder Überspringen wählen.'));
   if (!days.some(day => day.eligible)) errors.push(t('In diesem Monat stehen keine bearbeitbaren Arbeitstage zur Verfügung.'));
   const uniqueErrors = [...new Set(errors)];
-  const id = `plan-${hash(JSON.stringify({ settings: safeSettings, fingerprints: days.map(day => [day.date, day.fingerprint]), choices, seed }))}`;
-  return { id, seed, settings: safeSettings, snapshot, choices: { ...choices }, days, weeks, errors: uniqueErrors, canApply: uniqueErrors.length === 0 && days.some(day => day.action === 'create' || day.action === 'overwrite') };
+  const id = `plan-${hash(canonicalJson({ settings: safeSettings, context: snapshot.context ?? null, fingerprints: days.map(day => [day.date, day.fingerprint]), choices, seed })!)}`;
+  return { id, seed, settings: safeSettings, snapshot, choices: { ...choices }, days, weeks, errors: uniqueErrors, canReview: uniqueErrors.length === 0 && days.some(day => day.action === 'create' || day.action === 'overwrite') };
 }

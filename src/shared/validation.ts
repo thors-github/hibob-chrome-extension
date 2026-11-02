@@ -14,7 +14,7 @@ export function isHiBobOrigin(url?: string): boolean {
 }
 
 export function assertWritablePlan(plan: BookingPlan): void {
-  if (!plan || !plan.canApply || plan.errors.length || plan.days.some(d => d.action === 'conflict') || plan.weeks.some(w => w.errors.length)) throw new Error(t('Die Vorschau enthält noch offene Konflikte oder Fehler.'));
+  if (!plan || !plan.canReview || plan.errors.length || plan.days.some(d => d.action === 'conflict' || d.action === 'blocked') || plan.weeks.some(w => w.errors.length)) throw new Error(t('Die Vorschau enthält noch offene Konflikte oder Fehler.'));
   if (plan.snapshot.source !== 'hibob') throw new Error(t('Testdaten dürfen nicht an HiBob gesendet werden.'));
   if (!plan.days.some(d => d.action === 'create' || d.action === 'overwrite')) throw new Error(t('Es sind keine Änderungen ausgewählt.'));
   const seen = new Set<string>();

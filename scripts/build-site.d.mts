@@ -1,0 +1,1 @@
+export function buildSite(destination: string, env?: Record<string, string | undefined>): Promise<{ storeUrl: string | null; sourceVersion: string; stableReleaseReady: boolean; blockers: string[]; repositoryUrl: string; releaseUrl: string; zipUrl: null; previewReleaseUrl: null }>;

@@ -104,7 +104,7 @@ describe('month planning and conflicts', () => {
     for (const date of ['2026-06-04', '2026-06-05', '2026-06-06', '2026-06-08', '2026-06-09', '2026-06-10']) {
       expect(plan.days.find(day => day.date === date)).toMatchObject({ action: 'skip', eligible: false });
     }
-    expect(plan.canApply).toBe(true);
+    expect(plan.canReview).toBe(true);
     expect(plan.days.find(day => day.date === '2026-06-01')!.proposed).toEqual([
       work('08:00', '12:00'), { type: 'break', start: '12:00', end: '12:30' }, work('12:30', '16:30'),
     ]);
@@ -116,7 +116,7 @@ describe('month planning and conflicts', () => {
     source.days.find(day => day.date === '2026-11-02')!.entries = [work('08:00', '15:00')];
     const unresolved = buildMonthPlan(settings, source);
     expect(unresolved.days.find(day => day.date === '2026-11-02')!.action).toBe('conflict');
-    expect(unresolved.canApply).toBe(false);
+    expect(unresolved.canReview).toBe(false);
     const skipped = buildMonthPlan(settings, source, { '2026-11-02': 'skip' });
     expect(skipped.days.find(day => day.date === '2026-11-02')).toMatchObject({ action: 'skip', netMinutes: 420, existingNetMinutes: 420 });
     const overwritten = buildMonthPlan(settings, source, { '2026-11-02': 'overwrite' });
@@ -134,17 +134,73 @@ describe('month planning and conflicts', () => {
     expect(buildMonthPlan(settings, source, { '2026-11-02': 'overwrite' }).days.find(day => day.date === '2026-11-02')!.action).toBe('overwrite');
   });
 
-  it('fails closed on missing month data while skipping unsupported fixed-mode days', () => {
+  it('blocks unsupported selected days in both modes without reducing weekly targets', () => {
     const settings = defaultSettings('2026-11');
     const source = snapshot(settings.month);
     source.days = source.days.filter(day => day.date !== '2026-11-03');
-    expect(buildMonthPlan(settings, source).canApply).toBe(false);
+    expect(buildMonthPlan(settings, source).canReview).toBe(false);
     const complete = snapshot(settings.month);
     complete.days.find(day => day.date === '2026-11-03')!.unsupportedReason = 'Unbekannte Eingabeform';
     const plan = buildMonthPlan(settings, complete);
-    expect(plan.days.find(day => day.date === '2026-11-03')).toMatchObject({ eligible: false, action: 'skip' });
-    expect(plan.canApply).toBe(true);
-    expect(buildMonthPlan({ ...settings, variable: true }, complete).canApply).toBe(false);
+    expect(plan.days.find(day => day.date === '2026-11-03')).toMatchObject({ eligible: true, action: 'blocked', netMinutes: null });
+    expect(plan.canReview).toBe(false);
+    const variable = buildMonthPlan({ ...settings, variable: true }, complete);
+    expect(variable.canReview).toBe(false);
+    expect(variable.weeks.find(week => week.week === '2026-11-02')).toMatchObject({ targetMinutes: 2400, plannedMinutes: null });
+    const excluded = buildMonthPlan({ ...settings, variable: true, excludedDates: ['2026-11-03'] }, complete);
+    expect(excluded.canReview).toBe(true);
+    expect(excluded.weeks.find(week => week.week === '2026-11-02')).toMatchObject({ targetMinutes: 1920, plannedMinutes: 1920 });
+  });
+
+  it('requires a readable account context and distinguishes manual review from stable identity', () => {
+    const settings = defaultSettings('2026-11');
+    const source = snapshot(settings.month);
+    source.source = 'hibob';
+    source.days.forEach(day => { day.reportedMinutes = 0; });
+    const unknown = buildMonthPlan(settings, source);
+    expect(unknown.canReview).toBe(false);
+    expect(unknown.days.filter(day => day.action === 'create')).toHaveLength(21);
+    expect(unknown.weeks.find(week => week.week === '2026-11-02')!.plannedMinutes).toBe(2400);
+    source.context = { documentId: 'doc-1', tenantKey: 'tenant-1', employeeKey: 'employee-1', mode: 'stable-identity' };
+    expect(buildMonthPlan(settings, source).canReview).toBe(true);
+    source.context = { mode: 'user-confirmed-ui', documentId: 'doc-1', pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: 'observed-marker' };
+    const manual = buildMonthPlan(settings, source);
+    expect(manual.canReview).toBe(true);
+    expect(manual.snapshot.context?.mode).toBe('user-confirmed-ui');
+    expect(manual.snapshot.context).not.toHaveProperty('employeeKey');
+    source.context.pageUrl = 'https://app.hibob.com/home';
+    expect(buildMonthPlan(settings, source).canReview).toBe(false);
+    source.context = { mode: 'unavailable', documentId: 'doc-1', reason: 'Missing account context' };
+    expect(buildMonthPlan(settings, source).canReview).toBe(false);
+  });
+
+  it.each([null, undefined, 240, 480.5])('blocks unrecognised or inconsistent reported minutes: %s', reportedMinutes => {
+    const settings = { ...defaultSettings('2026-11'), variable: true };
+    const source = snapshot(settings.month);
+    source.source = 'hibob';
+    source.context = { documentId: 'doc-1', tenantKey: 'tenant-1', employeeKey: 'employee-1', mode: 'stable-identity' };
+    source.days.forEach(day => { day.reportedMinutes = 0; });
+    const day = source.days.find(day => day.date === '2026-11-03')!;
+    day.entries = [work('08:00', '16:00')];
+    day.reportedMinutes = reportedMinutes;
+    const plan = buildMonthPlan(settings, source, { [day.date]: 'overwrite' });
+    expect(plan.canReview).toBe(false);
+    expect(plan.days.find(item => item.date === day.date)).toMatchObject({ action: 'blocked', eligible: true, netMinutes: null });
+    expect(plan.weeks.find(week => week.week === '2026-11-02')!.targetMinutes).toBe(2400);
+    day.reportedMinutes = 480;
+    expect(buildMonthPlan(settings, source, { [day.date]: 'overwrite' }).canReview).toBe(true);
+  });
+
+  it('blocks unknown markers even when the adapter cannot mark the day editable', () => {
+    const settings = { ...defaultSettings('2026-11'), variable: true };
+    const source = snapshot(settings.month);
+    const day = source.days.find(day => day.date === '2026-11-03')!;
+    day.editable = false;
+    day.unsupportedReason = 'Unknown time-off marker';
+    const plan = buildMonthPlan(settings, source);
+    expect(plan.canReview).toBe(false);
+    expect(plan.days.find(item => item.date === day.date)).toMatchObject({ action: 'blocked', eligible: true });
+    expect(plan.weeks.find(week => week.week === '2026-11-02')!.targetMinutes).toBe(2400);
   });
 
   it('does not mutate settings, snapshots or conflict choices', () => {
@@ -155,12 +211,27 @@ describe('month planning and conflicts', () => {
     expect(JSON.stringify({ settings, source })).toBe(before);
   });
 
+  it('keeps the plan identity stable when Chrome reorders nested object keys', () => {
+    const settings = { ...defaultSettings('2026-11'), variable: true };
+    const source = snapshot(settings.month);
+    source.context = { documentId: 'doc', employeeKey: 'employee', tenantKey: 'tenant', mode: 'stable-identity' };
+    source.days.find(day => day.date === '2026-11-02')!.entries = [work('08:00', '16:00')];
+    source.days.find(day => day.date === '2026-11-03')!.entries = [work('08:00', '16:00')];
+    const choices = { '2026-11-03': 'overwrite' as const, '2026-11-02': 'skip' as const };
+    const reorder = <T>(value: T): T => JSON.parse(JSON.stringify(value, (_key, current) => current && typeof current === 'object' && !Array.isArray(current) ? Object.fromEntries(Object.entries(current).sort(([a], [b]) => a.localeCompare(b))) : current));
+    const original = buildMonthPlan(settings, source, choices, 9182);
+    const stored = buildMonthPlan(reorder(settings), reorder(source), reorder(choices), 9182);
+    expect(stored.id).toBe(original.id);
+    expect(stored.days).toEqual(original.days);
+    expect(stored.weeks).toEqual(original.weeks);
+  });
+
   it('uses the entered schedule in fixed mode without forcing a 40-hour week', () => {
     const settings = { ...defaultSettings('2026-11'), start: '09:00', end: '16:30' };
     const plan = buildMonthPlan(settings, snapshot(settings.month));
     expect(plan.weeks.find(week => week.week === '2026-11-02')).toMatchObject({ targetMinutes: 2100, plannedMinutes: 2100 });
     expect(plan.days.filter(day => day.eligible).every(day => day.netMinutes === 420)).toBe(true);
-    expect(plan.canApply).toBe(true);
+    expect(plan.canReview).toBe(true);
   });
 });
 
@@ -203,7 +274,7 @@ describe('variable exact-week planner', () => {
     const plan = buildMonthPlan(settings, source);
     expect(plan.days.find(day => day.date === '2026-11-02')).toMatchObject({ eligible: false, action: 'skip', proposed: [] });
     expect(plan.weeks.find(week => week.week === '2026-11-02')).toMatchObject({ targetMinutes: 1920, plannedMinutes: 1920 });
-    expect(plan.canApply).toBe(true);
+    expect(plan.canReview).toBe(true);
   });
 
   it('uses retained complete hours when balancing remaining days', () => {
@@ -220,21 +291,21 @@ describe('variable exact-week planner', () => {
   it('blocks infeasible ranges and retained incomplete entries instead of silently changing targets', () => {
     const settings = { ...defaultSettings('2026-11'), variable: true, end: '15:30', variationMinutes: 0 };
     const plan = buildMonthPlan(settings, snapshot(settings.month));
-    expect(plan.canApply).toBe(false);
+    expect(plan.canReview).toBe(false);
     expect(plan.errors.join()).toContain('nicht erreichbar');
     const complete = defaultSettings('2026-11');
     const source = snapshot(complete.month);
     source.days.find(day => day.date === '2026-11-02')!.entries = [work('08:00', '')];
     const incomplete = buildMonthPlan({ ...complete, variable: true }, source, { '2026-11-02': 'skip' });
-    expect(incomplete.canApply).toBe(false);
+    expect(incomplete.canReview).toBe(false);
     expect(incomplete.errors.join()).toContain('unvollständige Buchungen');
-    expect(buildMonthPlan({ ...complete, variable: true }, source, { '2026-11-02': 'overwrite' }).canApply).toBe(true);
+    expect(buildMonthPlan({ ...complete, variable: true }, source, { '2026-11-02': 'overwrite' }).canReview).toBe(true);
   });
 
   it('supports a schedule with no pause and variations around a different baseline', () => {
     const settings = { ...defaultSettings('2026-11'), useBreak: false, start: '09:00', end: '17:00', variable: true };
     const plan = buildMonthPlan(settings, snapshot(settings.month));
-    expect(plan.canApply).toBe(true);
+    expect(plan.canReview).toBe(true);
     expect(plan.days.filter(day => day.eligible).every(day => day.proposed.length === 1)).toBe(true);
     expect(plan.weeks.every(week => week.targetMinutes === week.plannedMinutes)).toBe(true);
   });

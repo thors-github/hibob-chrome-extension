@@ -1,8 +1,13 @@
 import './styles.css';
 import { buildMonthPlan, defaultSettings, formatMinutes, GERMAN_STATES } from '../domain/index';
-import type { AttendanceEntry, BookingPlan, ConflictChoices, DayPlan, MonthSnapshot, SessionState, Settings } from '../shared/types';
+import type { AccountConfirmation, AttendanceEntry, BookingPlan, ConflictChoices, DayPlan, MonthSnapshot, PlanEditLease, SessionState, Settings } from '../shared/types';
+import { sameJsonValue } from '../shared/json';
+import { contextFingerprint } from '../shared/context';
 import { createDemoSnapshot, demoFingerprint } from './demo';
 import { language, locale, localizeText, t } from '../i18n/index';
+import { MAX_SETTINGS_BACKUP_BYTES, parseSettingsBackup, serializeSettingsBackup } from '../shared/settings-backup';
+import { version as packageVersion } from '../../package.json';
+import extensionManifest from '../../public/manifest.json';
 
 document.documentElement.lang = language();
 document.title = t('HiBob · Monatsbuchung');
@@ -22,8 +27,31 @@ let localError = '';
 let demoSnapshot: MonthSnapshot | undefined;
 let buildVersion = 0;
 let sessionRevision = 0;
+let initializing = true;
+let initializationFailed = false;
+let preferencesLoaded = !hasExtension;
+let connectionRetryAvailable = false;
+let approvedPlanRevision: number | undefined;
+let confirmed: { plan: BookingPlan; planRevision: number; contextFingerprint: string } | undefined;
+let pendingDraft: Draft | undefined;
+let invalidations: Promise<void> = Promise.resolve();
+let preferenceWrites: Promise<void> = Promise.resolve();
+let refreshScheduled = false;
+let importCandidate: Settings | undefined;
+let importGeneration = 0;
+let updateRequested = false;
 
-type PanelMessage = { type: string; month?: string; plan?: BookingPlan };
+interface Draft {
+  version: number;
+  changeId: string;
+  settings: Settings;
+  choices: ConflictChoices;
+  seed: number;
+  lease?: PlanEditLease;
+  preferencesSaved: boolean;
+}
+
+type PanelMessage = { type: string; month?: string; plan?: BookingPlan; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation };
 type PanelResponse = { ok: boolean; state?: SessionState; error?: string };
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -33,9 +61,14 @@ app.innerHTML = `
       <div class="app-mark" aria-hidden="true"><img src="/icons/app-icon.svg" alt="" width="40" height="40" /></div>
       <div><h1>${t("Monatsbuchung")}</h1><p>${t("Deine Anwesenheit in HiBob")}</p></div>
     </header>
+    <div class="version-bar"><span id="installed-version"></span><button id="activate-update" class="button subtle" hidden>${t('Jetzt aktualisieren')}</button></div>
+    <div id="update-notice" class="notice" role="status" hidden></div>
     <div id="demo-banner" class="demo-banner" hidden><strong>${t("Lokaler Testmodus")}</strong>${t("Diese Vorschau verwendet Beispieldaten. Es werden keine Daten an HiBob gesendet.")}</div>
     <div id="connection" class="connection"><span class="connection-dot" aria-hidden="true"></span><div><p id="connection-title">${t("HiBob-Tab auswählen")}</p><p id="connection-detail" class="muted">${t("HiBob öffnen und dort auf das Extension-Symbol klicken.")}</p></div></div>
+    <div id="account-context-notice" class="notice" role="status" hidden>${t('Prüfe vor dem Speichern links dein HiBob-Konto. Die Zuordnung bestätigst du für diesen Plan im nächsten Schritt.')}</div>
     <div id="main-error" class="notice error" role="alert" hidden></div>
+    <button id="retry-plan" class="button wide" hidden>${t('Vorschau erneut prüfen')}</button>
+    <button id="retry-connection" class="button wide" hidden>${t('Verbindung erneut prüfen')}</button>
     <section aria-labelledby="settings-title">
       <div class="section-title"><h2 id="settings-title">${t("Zeiten festlegen")}</h2><small>${t("Montag bis Freitag")}</small></div>
       <form id="settings-form">
@@ -69,12 +102,14 @@ app.innerHTML = `
           <details><summary>${t("Zusätzliche Tage ausschließen")}</summary><div class="field"><label for="excludedDates">${t("Datumsangaben")}</label><textarea id="excludedDates" rows="2" placeholder="2026-11-05&#10;2026-11-18"></textarea><p class="hint">${t("Ein Datum pro Zeile im Format JJJJ-MM-TT. Tage lassen sich auch direkt in der Vorschau abwählen.")}</p></div></details>
         </fieldset>
       </form>
+      <details class="settings-transfer"><summary>${t('Einstellungen übertragen')}</summary><p class="hint">${t('Übertrage deine Vorgaben zwischen Installationen. HiBob-Daten und Buchungsverläufe werden nicht exportiert.')}</p><div class="transfer-actions"><button id="export-settings" class="button">${t('Einstellungen exportieren')}</button><button id="import-settings" class="button">${t('Einstellungen importieren')}</button></div><input id="settings-file" type="file" accept="application/json,.json" hidden /><p id="transfer-status" class="hint" role="status" hidden></p></details>
       <div class="scan-toolbar"><button id="scan" class="button wide" disabled>${t("Monat einlesen")}</button></div>
     </section>
     <section id="scan-progress" class="notice" role="status" hidden></section>
     <section class="preview" aria-labelledby="preview-title">
       <div class="section-title"><div><h2 id="preview-title">${t("Monatsvorschau")}</h2><p id="preview-subtitle" class="preview-subtitle">${t("Vor dem Buchen alle Änderungen prüfen.")}</p></div><button id="redistribute" class="button subtle" hidden>${t("Neu verteilen")}</button></div>
       <div id="preview-empty" class="empty-preview"><strong>${t("Dein Monat auf einen Blick")}</strong><p>${t("Lies zuerst den Monat aus HiBob ein. Feiertage, Abwesenheiten und bestehende Einträge werden berücksichtigt.")}</p></div>
+      <button id="build-preview" class="button wide" hidden>${t('Vorschau erstellen')}</button>
       <div id="preview-summary" class="preview-summary" hidden></div>
       <button id="conflicts" class="button wide conflict-button" hidden></button>
       <div id="plan-errors" class="notice error" role="alert" hidden></div>
@@ -84,7 +119,8 @@ app.innerHTML = `
     <footer class="footer"><div class="footer-buttons"><button id="cancel-run" class="button danger" hidden>${t("Abbrechen")}</button><button id="apply" class="button primary" disabled>${t("Jetzt buchen")}</button></div><p id="footer-hint" class="hint">${t("Es wird erst nach deiner Bestätigung gespeichert.")}</p></footer>
   </div>
   <dialog id="conflict-dialog" aria-labelledby="conflict-title"><div class="dialog-body"><h2 id="conflict-title">${t("Vorhandene Buchungen prüfen")}</h2><p class="hint">${t("Entscheide für jeden Tag. Beim Überschreiben werden die bisherigen Arbeits- und Pauseneinträge durch die Vorschau ersetzt.")}</p><div class="dialog-toolbar"><button id="overwrite-all" class="button">${t("Alle überschreiben")}</button><button id="skip-all" class="button">${t("Alle überspringen")}</button></div><div id="conflict-error" class="notice error" role="alert" style="margin-top:12px" hidden></div><div id="conflict-items"></div></div><div class="dialog-footer"><button id="close-conflicts" class="button">${t("Zurück")}</button><button id="save-conflicts" class="button primary">${t("Entscheidungen übernehmen")}</button></div></dialog>
-  <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t("Buchungen jetzt speichern?")}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><p class="hint">${t("Die Extension kontrolliert jeden gespeicherten Tag. Bei einer Abweichung stoppt der Lauf.")}</p></div><div class="dialog-footer"><button id="close-apply" class="button">${t("Zurück")}</button><button id="confirm-apply" class="button primary">${t("Buchungen starten")}</button></div></dialog>
+  <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t("Buchungen jetzt speichern?")}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><div id="account-confirmation-field" class="notice account-confirmation" hidden><label class="ack-label" for="account-confirmation"><input id="account-confirmation" type="checkbox" /><span id="account-confirmation-label"></span></label></div><p class="hint">${t("Die Extension kontrolliert jeden gespeicherten Tag. Bei einer Abweichung stoppt der Lauf.")}</p></div><div class="dialog-footer"><button id="close-apply" class="button">${t("Zurück")}</button><button id="confirm-apply" class="button primary" disabled>${t("Buchungen starten")}</button></div></dialog>
+  <dialog id="import-dialog" aria-labelledby="import-title"><div class="dialog-body"><h2 id="import-title">${t('Einstellungen importieren?')}</h2><p class="hint">${t('Diese Vorgaben ersetzen deine aktuellen Einstellungen. Der Import startet keine Buchungen; prüfe danach die Monatsvorschau.')}</p><dl id="import-details" class="confirm-details"></dl></div><div class="dialog-footer"><button id="cancel-import" class="button">${t('Abbrechen')}</button><button id="confirm-import" class="button primary">${t('Einstellungen übernehmen')}</button></div></dialog>
 `;
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -92,6 +128,7 @@ const input = (id: string) => $<HTMLInputElement>(id);
 const select = (id: string) => $<HTMLSelectElement>(id);
 const conflictDialog = $<HTMLDialogElement>('conflict-dialog');
 const applyDialog = $<HTMLDialogElement>('apply-dialog');
+const importDialog = $<HTMLDialogElement>('import-dialog');
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, className?: string): HTMLElementTagNameMap[K] {
   const element = document.createElement(tag);
@@ -137,7 +174,51 @@ function metadata(entries: AttendanceEntry[]): string[] {
   return entries.flatMap((entry) => [entry.note ? t('Notiz: {note}', { note: entry.note }) : '', entry.reason ? t('Grund: {reason}', { reason: entry.reason }) : '', ...(entry.metadata ?? [])]).filter(Boolean);
 }
 
-function isRunning(): boolean { return busy || applying || state.run?.status === 'running'; }
+function activeJob(): SessionState['job'] | undefined {
+  return state.job && (state.job.status === 'running' || state.job.status === 'cancelling') ? state.job : undefined;
+}
+
+function isRunning(): boolean { return busy || applying || Boolean(activeJob()) || (!state.job && state.run?.status === 'running'); }
+
+function updating(): boolean { return updateRequested || state.updateApplying === true; }
+
+function transferBlocked(): boolean { return isRunning() || updating() || initializing || initializationFailed || !preferencesLoaded || rebuilding || Boolean(pendingDraft); }
+
+function planRevision(): number { return state.planRevision ?? 0; }
+
+function closeConfirmation(): void {
+  confirmed = undefined;
+  input('account-confirmation').checked = false;
+  input('account-confirmation').required = false;
+  input('account-confirmation').disabled = true;
+  $<HTMLButtonElement>('confirm-apply').disabled = true;
+  if (applyDialog.open) applyDialog.close();
+}
+
+function revokeApproval(): void {
+  approvedPlanRevision = undefined;
+  closeConfirmation();
+}
+
+function approved(): boolean {
+  return Boolean(!updating() && !initializing && !initializationFailed && preferencesLoaded && plan?.canReview && !pendingDraft && approvedPlanRevision === planRevision() && sameJsonValue(plan, state.plan));
+}
+
+function needsAccountConfirmation(reviewed: BookingPlan): boolean {
+  return reviewed.snapshot.source === 'hibob' && reviewed.snapshot.context?.mode === 'user-confirmed-ui';
+}
+
+function currentConfirmation(): boolean {
+  return Boolean(confirmed && approved() && !isRunning() && !rebuilding
+    && confirmed.planRevision === planRevision() && sameJsonValue(confirmed.plan, plan)
+    && sameJsonValue(confirmed.plan, state.plan) && sameJsonValue(confirmed.plan.snapshot, state.snapshot)
+    && confirmed.contextFingerprint === contextFingerprint(state.snapshot?.context));
+}
+
+function updateConfirmationButton(): void {
+  $<HTMLButtonElement>('confirm-apply').disabled = !applyDialog.open || !currentConfirmation()
+    || Boolean(confirmed && needsAccountConfirmation(confirmed.plan) && !input('account-confirmation').checked);
+}
 
 function showError(message: string): void {
   localError = message;
@@ -146,9 +227,85 @@ function showError(message: string): void {
 
 async function message(command: PanelMessage): Promise<SessionState> {
   if (!hasExtension) throw new Error(t('Die Erweiterung ist hier nicht aktiv. Lade den Extension-Ordner in Chrome und öffne sie über einem HiBob-Tab.'));
+  const requestedAtRevision = sessionRevision;
   const response = await chrome.runtime.sendMessage(command) as PanelResponse;
+  if (response?.state && (typeof response.state.revision === 'number' || requestedAtRevision === sessionRevision)) receiveState(response.state);
   if (!response?.ok) throw new Error(response?.error || t('Die HiBob-Verbindung hat nicht geantwortet. Bitte den Tab prüfen.'));
   return response.state ?? state;
+}
+
+function renderablePlan(value: unknown): value is BookingPlan {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as BookingPlan;
+  const entryList = (entries: unknown): entries is AttendanceEntry[] => Array.isArray(entries) && entries.every(entry => entry && typeof entry === 'object' && typeof entry.start === 'string' && typeof entry.end === 'string' && (entry.type === 'work' || entry.type === 'break') && (entry.metadata === undefined || Array.isArray(entry.metadata)));
+  return typeof candidate.id === 'string' && typeof candidate.seed === 'number' && typeof candidate.canReview === 'boolean' && Boolean(candidate.settings && typeof candidate.settings.month === 'string')
+    && Boolean(candidate.snapshot && typeof candidate.snapshot.month === 'string' && Array.isArray(candidate.snapshot.days))
+    && Boolean(candidate.choices && typeof candidate.choices === 'object') && Array.isArray(candidate.errors) && candidate.errors.every(error => typeof error === 'string')
+    && Array.isArray(candidate.days) && candidate.days.every(day => day && typeof day.date === 'string' && entryList(day.existing) && entryList(day.proposed))
+    && Array.isArray(candidate.weeks) && candidate.weeks.every(week => week && typeof week.week === 'string' && Array.isArray(week.dates) && Array.isArray(week.errors));
+}
+
+function receiveState(incoming: SessionState): void {
+  if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return;
+  if (typeof incoming.revision === 'number' && incoming.revision <= (state.revision ?? -1)) return;
+  const previous = state;
+  state = structuredClone(incoming);
+  if (state.plan && !renderablePlan(state.plan)) {
+    state.plan = undefined;
+    localError = t('Der gespeicherte Plan ist ungültig. Bitte den Monat erneut einlesen.');
+  }
+  if (state.snapshot && (!Array.isArray(state.snapshot.days) || typeof state.snapshot.month !== 'string' || !Number.isFinite(Date.parse(state.snapshot.scannedAt)))) state.snapshot = undefined;
+  if (conflictDialog.open && (previous.planRevision !== state.planRevision || !sameJsonValue(previous.plan, state.plan) || !sameJsonValue(previous.snapshot, state.snapshot) || activeJob())) {
+    conflictDialog.close();
+    // Metadata acknowledgement belongs only to the exact data displayed in
+    // this dialog. A replacement event may arrive without an invalidation event.
+    $('conflict-items').replaceChildren();
+  }
+  if (confirmed && (confirmed.planRevision !== planRevision() || !sameJsonValue(confirmed.plan, state.plan) || !sameJsonValue(confirmed.plan.snapshot, state.snapshot) || confirmed.contextFingerprint !== contextFingerprint(state.snapshot?.context) || activeJob())) closeConfirmation();
+  if (approvedPlanRevision !== undefined && (approvedPlanRevision !== planRevision() || !sameJsonValue(plan, state.plan))) approvedPlanRevision = undefined;
+  if (!initializing && !pendingDraft) {
+    if (state.plan && state.snapshot && state.plan.settings.month === settings.month) {
+      plan = state.plan;
+      if (!sameJsonValue(settings, plan.settings)) { settings = storedSettings(plan.settings); fillSettings(); }
+      choices = structuredClone(plan.choices);
+      seed = plan.seed;
+    } else {
+      plan = undefined;
+      choices = {};
+      revokeApproval();
+      if (conflictDialog.open) conflictDialog.close();
+    }
+  }
+  // A reset or a job starting in another panel invalidates every local draft.
+  if (pendingDraft && (previous.tabId !== state.tabId || activeJob())) {
+    pendingDraft = undefined;
+    buildVersion++;
+    rebuilding = false;
+    plan = undefined;
+    revokeApproval();
+    if (conflictDialog.open) conflictDialog.close();
+  }
+  renderState();
+}
+
+async function refreshApproval(): Promise<void> {
+  const version = buildVersion;
+  try {
+    const response = await message({ type: 'PANEL_GET_STATE' });
+    if (version === buildVersion && sameJsonValue(response, state) && !pendingDraft) {
+      localError = '';
+      connectionRetryAvailable = false;
+      if (state.plan && state.snapshot?.month === settings.month && renderablePlan(state.plan) && !activeJob() && state.job?.status !== 'interrupted') {
+        plan = state.plan;
+        choices = structuredClone(plan.choices);
+        seed = plan.seed;
+        approvedPlanRevision = planRevision();
+      }
+      renderState();
+    }
+  } catch (error) {
+    if (version === buildVersion && !pendingDraft) { connectionRetryAvailable = true; showError(errorText(error)); }
+  }
 }
 
 function updateConditionalFields(): void {
@@ -197,9 +354,9 @@ function readSettings(): Settings {
   };
 }
 
-async function persistSettings(): Promise<void> {
-  if (hasExtension) await chrome.storage.local.set({ settings });
-  else if (isDemo) localStorage.setItem('hibob-demo-settings', JSON.stringify(settings));
+async function persistSettings(value = settings): Promise<void> {
+  if (hasExtension) await chrome.storage.local.set({ settings: structuredClone(value) });
+  else if (isDemo) localStorage.setItem('hibob-demo-settings', JSON.stringify(value));
 }
 
 function persistDemo(): void {
@@ -207,34 +364,94 @@ function persistDemo(): void {
 }
 
 async function rebuild(newSeed = false): Promise<void> {
-  const version = ++buildVersion;
+  if (updating()) return;
+  const draft = beginDraft(newSeed);
+  await processDraft(draft);
+}
+
+function beginDraft(newSeed = false): Draft {
   if (newSeed) seed = freshSeed();
-  localError = '';
-  if (!state.snapshot || state.snapshot.month !== settings.month) {
-    rebuilding = false;
-    plan = undefined;
-    state.plan = undefined;
-    renderState();
-    return;
-  }
+  const draft: Draft = {
+    version: ++buildVersion, changeId: crypto.randomUUID(), settings: structuredClone(settings),
+    choices: structuredClone(choices), seed, preferencesSaved: false,
+  };
+  pendingDraft = draft;
+  revokeApproval();
+  if (conflictDialog.open) conflictDialog.close();
   rebuilding = true;
+  localError = '';
+  plan = state.snapshot?.month === settings.month ? buildMonthPlan(draft.settings, state.snapshot, draft.choices, draft.seed) : undefined;
+  renderState();
+  return draft;
+}
+
+function currentDraft(draft: Draft): boolean { return pendingDraft === draft && draft.version === buildVersion; }
+
+async function processDraft(draft: Draft, prepareOnly = false): Promise<void> {
+  if (!currentDraft(draft)) return;
+  rebuilding = true;
+  localError = '';
+  renderState();
   try {
-    plan = buildMonthPlan(settings, state.snapshot, choices, seed);
-    state.plan = plan;
+    if (hasExtension) {
+      if (!draft.lease || draft.lease.planRevision !== planRevision() || !sameJsonValue(draft.lease, state.editLease)) {
+        // Only invalidations are serialized. A new edit can revoke an older
+        // in-flight SAVE without waiting for its preferences or acknowledgement.
+        const invalidation = invalidations.catch(() => {}).then(async () => {
+          if (!currentDraft(draft)) return;
+          const response = await message({ type: 'PANEL_INVALIDATE_PLAN', expectedPlanRevision: planRevision(), changeId: draft.changeId });
+          if (!currentDraft(draft)) return;
+          if (!response.editLease || !sameJsonValue(response.editLease, state.editLease)) throw new Error(t('Die Vorschau wurde inzwischen geändert. Bitte erneut prüfen.'));
+          draft.lease = structuredClone(response.editLease);
+        });
+        invalidations = invalidation;
+        await invalidation;
+      }
+    } else {
+      state.planRevision = planRevision() + 1;
+      state.plan = undefined;
+    }
+    if (!currentDraft(draft)) return;
+    if (!draft.preferencesSaved) {
+      const preferences = preferenceWrites.catch(() => {}).then(async () => {
+        if (!currentDraft(draft)) return;
+        await persistSettings(draft.settings);
+        draft.preferencesSaved = true;
+      });
+      preferenceWrites = preferences;
+      await preferences;
+    }
+    if (!currentDraft(draft)) return;
+    if (prepareOnly) {
+      pendingDraft = undefined;
+      return;
+    }
+    if (!state.snapshot || state.snapshot.month !== draft.settings.month) {
+      plan = undefined;
+      persistDemo();
+      pendingDraft = undefined;
+      rebuilding = false;
+      return;
+    }
+    const next = buildMonthPlan(draft.settings, state.snapshot, draft.choices, draft.seed);
+    plan = next;
     renderState();
     if (hasExtension) {
-      const saved = await message({ type: 'PANEL_SAVE_PLAN', plan });
-      if (version === buildVersion) {
-        state = saved;
-        plan = saved.plan;
-        renderState();
-      }
-    }
+      const saved = await message({ type: 'PANEL_SAVE_PLAN', plan: next, lease: draft.lease });
+      if (!currentDraft(draft)) return;
+      if (!sameJsonValue(saved.plan, next) || !sameJsonValue(saved.editLease, draft.lease) || saved.planRevision !== planRevision()) throw new Error(t('Die Vorschau wurde inzwischen geändert. Bitte erneut prüfen.'));
+      plan = saved.plan;
+    } else state.plan = next;
     persistDemo();
+    pendingDraft = undefined;
+    approvedPlanRevision = planRevision();
   } catch (error) {
-    if (version === buildVersion) localError = errorText(error);
+    if (currentDraft(draft)) {
+      localError = t('Die Änderungen sind noch nicht bestätigt. {error}', { error: errorText(error) });
+      revokeApproval();
+    }
   } finally {
-    if (version === buildVersion) { rebuilding = false; renderState(); }
+    if (draft.version === buildVersion) { rebuilding = false; renderState(); }
   }
 }
 
@@ -262,13 +479,36 @@ function storedSettings(value: unknown): Settings {
 }
 
 function renderState(): void {
+  const focused = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+  const focusId = focused?.id;
+  const scrolling = document.scrollingElement ?? document.documentElement;
+  const scrollTop = scrolling.scrollTop;
+  const scrollLeft = scrolling.scrollLeft;
   const running = isRunning();
+  const locked = running || updating();
+  const installedVersion = state.update?.installedVersion ?? packageVersion;
+  const versionLabel = installedVersion === packageVersion ? (extensionManifest as { version_name?: string }).version_name ?? installedVersion : installedVersion;
+  $('installed-version').textContent = t('Version {version}', { version: versionLabel });
+  $('activate-update').hidden = !hasExtension || !state.update?.pendingVersion;
+  $<HTMLButtonElement>('activate-update').disabled = transferBlocked() || Boolean(state.job);
+  $('activate-update').textContent = updating() ? t('Aktualisierung wird aktiviert …') : t('Jetzt aktualisieren');
+  $('update-notice').hidden = !state.update?.pendingVersion && !updating();
+  $('update-notice').textContent = updating() ? t('Die Erweiterung wird neu geladen. Lade danach den HiBob-Tab neu und lies den Monat erneut ein.')
+    : state.job?.status === 'interrupted' ? t('Version {version} ist bereit. Kläre zuerst den unterbrochenen Vorgang durch erneutes Einlesen.', { version: state.update?.pendingVersion ?? '' })
+    : running ? t('Version {version} ist verfügbar. Die Aktualisierung wartet auf das Ende des laufenden Vorgangs.', { version: state.update?.pendingVersion ?? '' })
+    : t('Version {version} ist bereit. Nach der Aktualisierung musst du den HiBob-Tab neu laden und den Monat erneut einlesen.', { version: state.update?.pendingVersion ?? '' });
+  $<HTMLButtonElement>('export-settings').disabled = transferBlocked();
+  $<HTMLButtonElement>('import-settings').disabled = transferBlocked();
+  $<HTMLInputElement>('settings-file').disabled = transferBlocked();
+  $<HTMLButtonElement>('confirm-import').disabled = transferBlocked();
+  if ((running || updating()) && importDialog.open) { importCandidate = undefined; importDialog.close(); }
   $('demo-banner').hidden = !isDemo;
   const bound = state.tabId !== undefined;
-  const scanned = Boolean(state.snapshot);
+  const scanned = state.snapshot?.month === settings.month;
   $('connection').classList.toggle('connected', scanned);
   $('connection').classList.toggle('selected', bound && !scanned);
-  if (state.snapshot) {
+  $('account-context-notice').hidden = isDemo || !scanned || state.snapshot?.context?.mode !== 'user-confirmed-ui';
+  if (state.snapshot && scanned) {
     $('connection-title').textContent = t('Monat eingelesen');
     const time = new Intl.DateTimeFormat(locale(), { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Berlin' }).format(new Date(state.snapshot.scannedAt));
     $('connection-detail').textContent = t('{employee} · Eingelesen: {time} Uhr · {period}', { employee: state.snapshot.employeeLabel, time, period: state.snapshot.periodLabel });
@@ -277,17 +517,19 @@ function renderState(): void {
     $('connection-detail').textContent = t('Alle Funktionen können ohne echte Buchungen geprüft werden.');
   } else if (bound) {
     $('connection-title').textContent = t('HiBob-Tab ausgewählt');
-    $('connection-detail').textContent = state.run ? t('Monat erneut einlesen, um weitere Buchungen vorzubereiten.') : t('Noch kein Monat eingelesen. Klicke auf „Monat einlesen“.');
+    $('connection-detail').textContent = state.snapshot ? t('Für {month} ist noch kein Monat eingelesen. Bitte „Monat einlesen“ wählen.', { month: monthLabel(settings.month) }) : state.run ? t('Monat erneut einlesen, um weitere Buchungen vorzubereiten.') : t('Noch kein Monat eingelesen. Klicke auf „Monat einlesen“.');
   } else {
     $('connection-title').textContent = t('HiBob-Tab auswählen');
     $('connection-detail').textContent = t('HiBob öffnen und dort auf das Extension-Symbol klicken.');
   }
-  const error = localError || state.error || '';
+  const error = localError || state.error || (state.job?.status === 'interrupted' ? t('Der letzte Vorgang wurde unterbrochen. Bitte den Monat erneut einlesen.') : '');
   $('main-error').hidden = !error;
   $('main-error').textContent = localizeText(error);
-  $<HTMLFieldSetElement>('settings-fieldset').disabled = running;
-  $<HTMLButtonElement>('scan').disabled = running || (!isDemo && !bound);
-  $('scan').textContent = busy ? t('Monat wird eingelesen …') : state.snapshot ? t('Monat erneut einlesen') : t('Monat einlesen');
+  $('retry-plan').hidden = !pendingDraft || rebuilding || locked;
+  $('retry-connection').hidden = !hasExtension || (!initializationFailed && !connectionRetryAvailable) || initializing || locked;
+  $<HTMLFieldSetElement>('settings-fieldset').disabled = locked || initializing || initializationFailed;
+  $<HTMLButtonElement>('scan').disabled = locked || initializing || initializationFailed || rebuilding || (!isDemo && !bound);
+  $('scan').textContent = busy || activeJob()?.kind === 'scan' ? t('Monat wird eingelesen …') : scanned ? t('Monat erneut einlesen') : t('Monat einlesen');
   const progress = state.progress;
   $('scan-progress').hidden = !running || !progress;
   if (progress && running) {
@@ -302,28 +544,35 @@ function renderState(): void {
   renderPreview();
   renderRun();
   $('cancel-run').hidden = !running;
+  $<HTMLButtonElement>('cancel-run').disabled = hasExtension && (!activeJob() || activeJob()?.status === 'cancelling');
   const finished = state.run?.status === 'complete' && state.run.planId === plan?.id;
-  $<HTMLButtonElement>('apply').disabled = !plan?.canApply || running || rebuilding || finished;
+  $<HTMLButtonElement>('apply').disabled = !approved() || locked || rebuilding || finished;
   $('apply').textContent = rebuilding ? t('Vorschau wird geprüft …') : running ? t('Bitte warten …') : finished ? t('Buchungen abgeschlossen') : t('Jetzt buchen');
   $('footer-hint').textContent = isDemo ? t('Testmodus: Auch „Jetzt buchen“ verändert nur lokale Beispieldaten.') : running ? t('Bitte den HiBob-Tab während des Laufs unverändert lassen.') : state.run && !state.snapshot ? t('Für einen weiteren Lauf den Monat erneut einlesen.') : t('Es wird erst nach deiner Bestätigung gespeichert.');
+  updateConfirmationButton();
+  if (focusId && focused && !focused.isConnected) document.getElementById(focusId)?.focus({ preventScroll: true });
+  scrolling.scrollTop = scrollTop;
+  scrolling.scrollLeft = scrollLeft;
 }
 
 function renderPreview(): void {
   const running = isRunning();
   $('preview-empty').hidden = Boolean(plan);
+  $('preview-empty').querySelector('p')!.textContent = !plan && state.snapshot?.month === settings.month ? t('Der Monat ist eingelesen. Erstelle jetzt die prüfbare Vorschau.') : t('Lies zuerst den Monat aus HiBob ein. Feiertage, Abwesenheiten und bestehende Einträge werden berücksichtigt.');
+  $('build-preview').hidden = Boolean(plan || pendingDraft || running || updating() || initializing || initializationFailed || state.snapshot?.month !== settings.month);
   $('preview-summary').hidden = !plan;
   $('redistribute').hidden = !plan || !settings.variable;
-  $<HTMLButtonElement>('redistribute').disabled = running;
+  $<HTMLButtonElement>('redistribute').disabled = running || updating();
   $('weeks').replaceChildren();
   $('plan-errors').replaceChildren();
   $('plan-errors').hidden = !plan?.errors.length;
   $('conflicts').hidden = true;
-  $('preview-subtitle').textContent = plan ? `${monthLabel(settings.month)} · ${settings.variable ? t('variable Zeiten ±{minutes} Min.', { minutes: settings.variationMinutes }) : t('feste Zeiten')}` : t('Vor dem Buchen alle Änderungen prüfen.');
+  $('preview-subtitle').textContent = plan ? `${monthLabel(plan.settings.month)} · ${plan.settings.variable ? t('variable Zeiten ±{minutes} Min.', { minutes: plan.settings.variationMinutes }) : t('feste Zeiten')}` : t('Vor dem Buchen alle Änderungen prüfen.');
   if (!plan) return;
   const changed = plan.days.filter((day) => day.action === 'create' || day.action === 'overwrite');
   const excluded = plan.days.filter((day) => !day.eligible);
   const conflictDays = plan.days.filter((day) => day.eligible && day.existing.length > 0);
-  const total = plan.weeks.reduce((minutes, week) => minutes + (week.plannedMinutes ?? 0), 0);
+  const total = plan.weeks.some(week => week.plannedMinutes === null) ? null : plan.weeks.reduce((minutes, week) => minutes + (week.plannedMinutes ?? 0), 0);
   const summaryItems = [[String(changed.length), t('Tage zum Buchen')], [formatMinutes(total), t('Netto im Plan')], [String(excluded.length), t('ausgelassene Tage')]];
   $('preview-summary').replaceChildren(...summaryItems.map(([value, label]) => {
     const item = node('div'); item.append(node('strong', value), node('span', label)); return item;
@@ -332,7 +581,7 @@ function renderPreview(): void {
     $('conflicts').hidden = false;
     const unresolved = conflictDays.filter((day) => !choices[day.date]).length;
     $('conflicts').textContent = unresolved ? unresolved === 1 ? t('1 vorhandene Buchung prüfen') : t('{count} vorhandene Buchungen prüfen', { count: unresolved }) : t('Entscheidungen zu vorhandenen Buchungen ändern');
-    $<HTMLButtonElement>('conflicts').disabled = running;
+    $<HTMLButtonElement>('conflicts').disabled = running || updating() || rebuilding || Boolean(pendingDraft);
   }
   if (plan.errors.length) {
     const list = node('ul');
@@ -369,20 +618,22 @@ function renderDay(day: DayPlan): HTMLElement {
   const head = node('div', undefined, 'day-head');
   const label = node('label', undefined, 'day-check');
   const checkbox = node('input');
+  checkbox.id = `include-${day.date}`;
   checkbox.type = 'checkbox';
   checkbox.checked = !settings.excludedDates.includes(day.date);
   const snapshot = (state.snapshot ?? plan?.snapshot)?.days.find((item) => item.date === day.date);
   const weekday = new Date(`${day.date}T12:00:00Z`).getUTCDay();
-  checkbox.disabled = isRunning() || weekday === 0 || weekday === 6 || Boolean(day.holiday || snapshot?.absence || snapshot?.nonWorking || !snapshot?.editable);
-  if (checkbox.disabled && !isRunning() && !settings.excludedDates.includes(day.date)) checkbox.checked = false;
+  checkbox.disabled = isRunning() || updating() || weekday === 0 || weekday === 6 || Boolean(day.holiday || snapshot?.absence || snapshot?.nonWorking || !snapshot?.editable);
+  if (checkbox.disabled && !isRunning() && !updating() && !settings.excludedDates.includes(day.date)) checkbox.checked = false;
   checkbox.setAttribute('aria-label', t('{date} berücksichtigen', { date: dateLabel(day.date) }));
   checkbox.addEventListener('change', () => {
+    if (isRunning() || updating()) return;
     settings.excludedDates = checkbox.checked ? settings.excludedDates.filter((date) => date !== day.date) : [...new Set([...settings.excludedDates, day.date])].sort();
     $<HTMLTextAreaElement>('excludedDates').value = settings.excludedDates.join('\n');
     settingsChanged();
   });
   label.append(checkbox, node('span', dateLabel(day.date), 'day-date'));
-  const labels: Record<DayPlan['action'], string> = { create: t('Neu'), overwrite: t('Ersetzen'), skip: t('Ausgelassen'), conflict: t('Entscheidung offen'), unchanged: t('Unverändert') };
+  const labels: Record<DayPlan['action'], string> = { create: t('Neu'), overwrite: t('Ersetzen'), skip: t('Ausgelassen'), conflict: t('Entscheidung offen'), unchanged: t('Unverändert'), blocked: t('Prüfung erforderlich') };
   head.append(label, node('span', labels[day.action], `status ${day.action}`));
   article.append(head);
   const list = node('dl', undefined, 'day-lines');
@@ -409,17 +660,11 @@ function renderRun(): void {
 }
 
 function settingsChanged(): void {
-  // Close the gap between the native change event and asynchronous local storage.
-  rebuilding = true;
-  renderState();
-  void persistSettings().then(() => rebuild(true)).catch((error) => {
-    rebuilding = false;
-    showError(errorText(error));
-  });
+  void rebuild(true);
 }
 
 function openConflicts(): void {
-  if (!plan) return;
+  if (!plan || updating()) return;
   $('conflict-error').hidden = true;
   $('conflict-items').replaceChildren();
   for (const day of plan.days.filter((item) => item.eligible && item.existing.length > 0)) {
@@ -462,6 +707,7 @@ function chooseAll(value: string): void {
 }
 
 async function saveChoices(): Promise<void> {
+  if (!conflictDialog.open || !plan || isRunning() || updating()) return;
   const next: ConflictChoices = { ...choices };
   for (const element of document.querySelectorAll<HTMLSelectElement>('[data-conflict-choice]')) {
     const date = element.dataset.conflictChoice!;
@@ -482,38 +728,57 @@ async function saveChoices(): Promise<void> {
 }
 
 async function scanMonth(): Promise<void> {
+  if (isRunning() || updating() || rebuilding) return;
   if (!$<HTMLFormElement>('settings-form').reportValidity()) return;
   settings = readSettings();
-  busy = true; demoCancelled = false; localError = ''; state.error = undefined; plan = undefined; choices = {};
-  state.run = undefined;
-  state.progress = { phase: 'scan', completed: 0, total: 1, message: t('HiBob-Monat wird geprüft …') };
+  busy = true; demoCancelled = false; localError = ''; plan = undefined; choices = {};
+  if (isDemo) {
+    state.run = undefined;
+    state.progress = { phase: 'scan', completed: 0, total: 1, message: t('HiBob-Monat wird geprüft …') };
+  }
+  const month = settings.month;
+  const tabId = state.tabId;
+  const draft = beginDraft(true);
+  plan = undefined;
   renderState();
   try {
-    await persistSettings();
+    await processDraft(draft, true);
+    if (draft.version !== buildVersion || pendingDraft || activeJob()) return;
     if (isDemo) {
       await new Promise((resolve) => setTimeout(resolve, 120));
       if (demoCancelled) throw new Error(t('Einlesen abgebrochen.'));
-      if (!demoSnapshot || demoSnapshot.month !== settings.month) demoSnapshot = createDemoSnapshot(settings);
+      if (!demoSnapshot || demoSnapshot.month !== month) demoSnapshot = createDemoSnapshot(settings);
       state.snapshot = structuredClone(demoSnapshot);
       state.progress = undefined;
-    } else state = await message({ type: 'PANEL_SCAN', month: settings.month });
-    seed = freshSeed();
+    } else {
+      const scanned = await message({ type: 'PANEL_SCAN', month });
+      if (!sameJsonValue(scanned, state) || state.tabId !== tabId || state.snapshot?.month !== month || activeJob()) return;
+    }
     await rebuild();
   } catch (error) { localError = errorText(error); }
-  finally { busy = false; state.progress = undefined; renderState(); persistDemo(); }
+  finally { busy = false; if (isDemo) state.progress = undefined; renderState(); persistDemo(); }
 }
 
 function openApply(): void {
-  if (!plan?.canApply || isRunning() || rebuilding) return;
-  const days = plan.days.filter((day) => day.action === 'create' || day.action === 'overwrite');
+  if (!approved() || !plan || isRunning() || rebuilding) return;
+  confirmed = { plan: structuredClone(plan), planRevision: planRevision(), contextFingerprint: contextFingerprint(plan.snapshot.context) };
+  const reviewed = confirmed.plan;
+  const manual = needsAccountConfirmation(reviewed);
+  $('account-confirmation-field').hidden = !manual;
+  input('account-confirmation').checked = false;
+  input('account-confirmation').required = manual;
+  input('account-confirmation').disabled = !manual;
+  $('account-confirmation-label').textContent = t('Ich bestätige, dass links meine eigenen HiBob-Anwesenheiten für {month} im richtigen Firmenkonto angezeigt werden.', { month: monthLabel(reviewed.settings.month) });
+  const days = reviewed.days.filter((day) => day.action === 'create' || day.action === 'overwrite');
   const overwriteCount = days.filter((day) => day.action === 'overwrite').length;
-  $('apply-description').textContent = isDemo ? t('Du startest eine lokale Simulation. Dein echtes HiBob-Konto wird nicht verändert.') : t('Die folgenden Änderungen werden in deinem HiBob-Konto „{employee}“ gespeichert.', { employee: plan.snapshot.employeeLabel });
+  $('apply-description').textContent = isDemo ? t('Du startest eine lokale Simulation. Dein echtes HiBob-Konto wird nicht verändert.') : manual ? t('Prüfe links, ob deine eigenen Anwesenheiten im richtigen HiBob-Firmenkonto angezeigt werden. Diese Bestätigung gilt nur für diesen Plan.') : t('Die folgenden Änderungen werden in deinem HiBob-Konto „{employee}“ gespeichert.', { employee: reviewed.snapshot.employeeLabel });
   const list = $('apply-details'); list.replaceChildren();
-  detailsLine(list, t('Monat'), monthLabel(settings.month));
+  detailsLine(list, t('Monat'), monthLabel(reviewed.settings.month));
   detailsLine(list, t('Tage zum Buchen'), String(days.length));
   detailsLine(list, t('Davon überschreiben'), String(overwriteCount));
-  detailsLine(list, t('Bundesland'), t(GERMAN_STATES.find((item) => item.code === settings.state)?.name || settings.state));
+  detailsLine(list, t('Bundesland'), t(GERMAN_STATES.find((item) => item.code === reviewed.settings.state)?.name || reviewed.settings.state));
   applyDialog.showModal();
+  updateConfirmationButton();
 }
 
 async function demoApply(activePlan: BookingPlan): Promise<void> {
@@ -538,20 +803,24 @@ async function demoApply(activePlan: BookingPlan): Promise<void> {
   state.run.status = demoCancelled ? 'stopped' : 'complete';
   state.run.updatedAt = new Date().toISOString();
   state.snapshot = undefined;
-  plan = { ...activePlan, canApply: false };
+  plan = { ...activePlan, canReview: false };
   state.plan = plan;
 }
 
 async function applyPlan(): Promise<void> {
-  applyDialog.close();
-  if (!plan?.canApply || isRunning() || rebuilding) return;
-  const activePlan = plan;
+  const review = confirmed;
+  if (!review || !applyDialog.open || !currentConfirmation() || (needsAccountConfirmation(review.plan) && !input('account-confirmation').checked)) return;
+  const confirmation: AccountConfirmation | undefined = needsAccountConfirmation(review.plan) ? {
+    planId: review.plan.id, planRevision: review.planRevision, contextFingerprint: review.contextFingerprint, confirmed: true,
+  } : undefined;
+  closeConfirmation();
+  const activePlan = review.plan;
+  approvedPlanRevision = undefined;
   applying = true; localError = ''; renderState();
   try {
     if (isDemo) await demoApply(activePlan);
     else {
-      state = await message({ type: 'PANEL_APPLY', plan: activePlan });
-      plan = state.plan;
+      await message({ type: 'PANEL_APPLY', plan: activePlan, expectedPlanRevision: review.planRevision, ...(confirmation ? { confirmation } : {}) });
     }
   } catch (error) { localError = errorText(error); }
   finally { applying = false; renderState(); persistDemo(); }
@@ -560,59 +829,152 @@ async function applyPlan(): Promise<void> {
 async function cancelRun(): Promise<void> {
   try {
     if (isDemo) demoCancelled = true;
-    else state = await message({ type: 'PANEL_CANCEL' });
+    else {
+      const job = activeJob();
+      if (!job) return;
+      await message({ type: 'PANEL_CANCEL', jobId: job.id });
+    }
     renderState();
   } catch (error) { showError(errorText(error)); }
 }
 
-async function initialize(): Promise<void> {
+function transferStatus(text: string): void {
+  $('transfer-status').textContent = text;
+  $('transfer-status').hidden = !text;
+}
+
+function exportSettings(): void {
+  if (transferBlocked()) return;
+  try {
+    const contents = serializeSettingsBackup(readSettings());
+    const url = URL.createObjectURL(new Blob([contents], { type: 'application/json' }));
+    const link = node('a');
+    link.href = url;
+    link.download = `hibob-settings-${settings.month}.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    // Keep the URL alive long enough for the browser to begin the download.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    transferStatus(t('Die Einstellungssicherung wurde zum Download vorbereitet.'));
+  } catch (error) { showError(errorText(error)); }
+}
+
+async function reviewSettingsFile(file: File): Promise<void> {
+  if (transferBlocked()) return;
+  const generation = ++importGeneration;
+  transferStatus('');
+  try {
+    if (file.size > MAX_SETTINGS_BACKUP_BYTES) throw new Error(t('Die Einstellungsdatei darf höchstens 64 KB groß sein.'));
+    const candidate = parseSettingsBackup(await file.text());
+    if (generation !== importGeneration) return;
+    if (transferBlocked()) throw new Error(t('Während eines Vorgangs können keine Einstellungen importiert werden.'));
+    importCandidate = candidate;
+    const list = $('import-details');
+    list.replaceChildren();
+    detailsLine(list, t('Monat'), monthLabel(candidate.month));
+    detailsLine(list, t('Bundesland'), t(GERMAN_STATES.find(item => item.code === candidate.state)!.name));
+    detailsLine(list, t('Arbeitszeit'), `${candidate.start}–${candidate.end}`);
+    detailsLine(list, t('Pause'), candidate.useBreak ? `${candidate.breakStart}–${candidate.breakEnd}` : t('Keine Pause'));
+    detailsLine(list, t('Variable Zeiten'), candidate.variable ? t('±{minutes} Min.', { minutes: candidate.variationMinutes }) : t('Nein'));
+    detailsLine(list, t('Zusätzliche Tage ausschließen'), candidate.excludedDates.length ? candidate.excludedDates.join(', ') : t('Keine'));
+    const holidayAnswer = (value: boolean | null) => value === null ? t('Nicht festgelegt') : value ? t('Ja') : t('Nein');
+    detailsLine(list, t('Arbeitsort in der Stadt Augsburg?'), holidayAnswer(candidate.localHolidays.augsburg));
+    detailsLine(list, t('Mariä Himmelfahrt am Arbeitsort Feiertag?'), holidayAnswer(candidate.localHolidays.assumption));
+    detailsLine(list, t('Fronleichnam am Arbeitsort Feiertag?'), holidayAnswer(candidate.localHolidays.corpusChristi));
+    importDialog.showModal();
+  } catch (error) {
+    if (generation === importGeneration) { importCandidate = undefined; showError(errorText(error)); }
+  }
+}
+
+async function importSettings(): Promise<void> {
+  if (!importCandidate || !importDialog.open || transferBlocked()) return;
+  const next = importCandidate;
+  importCandidate = undefined;
+  importGeneration++;
+  importDialog.close();
+  settings = structuredClone(next);
+  choices = {};
+  fillSettings();
+  // Use the same invalidation, storage and acknowledged-plan path as any
+  // ordinary settings edit. Importing can never initiate a scan or a booking.
+  await rebuild(true);
+  if (!pendingDraft) transferStatus(t('Einstellungen übernommen. Prüfe vor dem Buchen die Monatsvorschau.'));
+}
+
+async function activateUpdate(): Promise<void> {
+  if (!hasExtension || !state.update?.pendingVersion || transferBlocked() || state.job) return;
+  updateRequested = true;
+  revokeApproval();
+  renderState();
+  try { await message({ type: 'PANEL_ACTIVATE_UPDATE' }); }
+  catch (error) { updateRequested = false; showError(errorText(error)); }
+}
+
+async function initialize(retry = false): Promise<void> {
   // The action opens the panel before its tab binding finishes. Subscribe first so
   // neither that binding nor a later reset can be lost during asynchronous boot.
-  if (hasExtension) chrome.storage.onChanged.addListener((changes, area) => {
+  if (hasExtension && !retry) chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'session' || !changes.sessionState) return;
     sessionRevision++;
-    state = changes.sessionState.newValue as SessionState ?? {};
-    if (state.plan && !rebuilding && state.plan.id === plan?.id) {
-      plan = state.plan; choices = plan.choices; seed = plan.seed;
-    } else if (!state.plan && !busy && !rebuilding) {
-      plan = undefined;
-      choices = {};
-      if (applyDialog.open) applyDialog.close();
-      if (conflictDialog.open) conflictDialog.close();
+    receiveState(changes.sessionState.newValue as SessionState ?? {});
+    if (!initializing && !initializationFailed && !pendingDraft && !busy && !applying && !activeJob() && !updating()) {
+      if (state.plan && approvedPlanRevision === undefined && !refreshScheduled) {
+        // A storage event alone never grants approval. Verify the newest
+        // canonical record through an acknowledged controller request first.
+        refreshScheduled = true;
+        void refreshApproval().finally(() => { refreshScheduled = false; });
+      }
     }
-    renderState();
   });
-  for (const state of GERMAN_STATES) { const option = node('option', t(state.name)); option.value = state.code; select('state').append(option); }
+  if (!retry) for (const state of GERMAN_STATES) { const option = node('option', t(state.name)); option.value = state.code; select('state').append(option); }
+  initializing = true;
+  initializationFailed = false;
+  connectionRetryAvailable = false;
+  localError = '';
+  revokeApproval();
   renderState();
+  let initialResponse: SessionState | undefined;
   try {
     if (hasExtension) {
-      const stored = await chrome.storage.local.get('settings') as { settings?: unknown };
-      settings = storedSettings(stored.settings);
-      const requestedAtRevision = sessionRevision;
-      const initialState = await message({ type: 'PANEL_GET_STATE' });
-      if (requestedAtRevision === sessionRevision) state = initialState;
+      if (!preferencesLoaded) {
+        const stored = await chrome.storage.local.get('settings') as { settings?: unknown };
+        settings = storedSettings(stored.settings);
+        preferencesLoaded = true;
+      }
+      initialResponse = await message({ type: 'PANEL_GET_STATE' });
     } else if (isDemo) {
       const savedSettings = localStorage.getItem('hibob-demo-settings');
       if (savedSettings) settings = storedSettings(JSON.parse(savedSettings));
       const savedState = sessionStorage.getItem('hibob-demo-session');
-      if (savedState) { const parsed = JSON.parse(savedState); demoSnapshot = parsed.demoSnapshot; state = parsed; }
+      if (savedState) { const parsed = JSON.parse(savedState); demoSnapshot = parsed.demoSnapshot; receiveState(parsed); }
     }
-    if (state.plan && state.plan.settings.month === settings.month) { plan = state.plan; settings = plan.settings; choices = plan.choices; seed = plan.seed; }
+    if (state.plan && state.plan.settings.month === settings.month && renderablePlan(state.plan)) {
+      plan = state.plan; settings = storedSettings(plan.settings); choices = structuredClone(plan.choices); seed = plan.seed;
+      if (isDemo || sameJsonValue(initialResponse, state)) approvedPlanRevision = planRevision();
+    }
     if (isDemo && state.run?.status === 'running') {
       state.run.status = 'stopped';
       state.snapshot = undefined;
-      if (plan) { plan = { ...plan, canApply: false }; state.plan = plan; }
+      if (plan) { plan = { ...plan, canReview: false }; state.plan = plan; }
     }
-  } catch (error) { localError = errorText(error); }
+  } catch (error) { localError = errorText(error); initializationFailed = true; }
+  initializing = false;
   fillSettings(); renderState();
+  if (hasExtension && !initializationFailed && plan && approvedPlanRevision === undefined && !activeJob()) void refreshApproval();
 }
 
 $<HTMLFormElement>('settings-form').addEventListener('submit', (event) => event.preventDefault());
-$('settings-form').addEventListener('change', () => {
-  settings = readSettings(); updateConditionalFields();
+function settingsInput(): void {
+  if (isRunning() || updating()) return;
+  const next = readSettings();
+  if (sameJsonValue(next, settings)) return;
+  settings = next; updateConditionalFields();
   settingsChanged();
-});
-input('variationMinutes').addEventListener('input', () => { $('variation-value').textContent = t('±{minutes} Min.', { minutes: input('variationMinutes').value }); });
+}
+$('settings-form').addEventListener('input', settingsInput);
+$('settings-form').addEventListener('change', settingsInput);
 $('scan').addEventListener('click', () => { void scanMonth(); });
 $('redistribute').addEventListener('click', () => { void rebuild(true); });
 $('conflicts').addEventListener('click', openConflicts);
@@ -621,8 +983,27 @@ $('overwrite-all').addEventListener('click', () => chooseAll('overwrite'));
 $('skip-all').addEventListener('click', () => chooseAll('skip'));
 $('save-conflicts').addEventListener('click', () => { void saveChoices(); });
 $('apply').addEventListener('click', openApply);
-$('close-apply').addEventListener('click', () => applyDialog.close());
+$('close-apply').addEventListener('click', closeConfirmation);
+applyDialog.addEventListener('cancel', closeConfirmation);
+input('account-confirmation').addEventListener('change', updateConfirmationButton);
 $('confirm-apply').addEventListener('click', () => { void applyPlan(); });
 $('cancel-run').addEventListener('click', () => { void cancelRun(); });
+$('retry-plan').addEventListener('click', () => { if (pendingDraft && !rebuilding && !isRunning() && !updating()) void processDraft(pendingDraft); });
+$('retry-connection').addEventListener('click', () => { if (updating()) return; if (initializationFailed) void initialize(true); else { connectionRetryAvailable = false; void refreshApproval(); } });
+$('build-preview').addEventListener('click', () => { if (!isRunning() && !updating() && !pendingDraft && state.snapshot?.month === settings.month) void rebuild(); });
+$('export-settings').addEventListener('click', exportSettings);
+$('import-settings').addEventListener('click', () => {
+  if (transferBlocked()) return;
+  input('settings-file').value = '';
+  input('settings-file').click();
+});
+$('settings-file').addEventListener('change', () => {
+  const file = input('settings-file').files?.[0];
+  if (file) void reviewSettingsFile(file);
+});
+$('cancel-import').addEventListener('click', () => { importCandidate = undefined; importGeneration++; importDialog.close(); });
+importDialog.addEventListener('cancel', () => { importCandidate = undefined; importGeneration++; });
+$('confirm-import').addEventListener('click', () => { void importSettings(); });
+$('activate-update').addEventListener('click', () => { void activateUpdate(); });
 
 void initialize();
