@@ -25,7 +25,9 @@ export function createDemoSnapshot(settings: Settings): MonthSnapshot {
     day.entries = [
       { type: 'work', start: '08:00', end: '12:00', ...(index === 0 ? { note: t('Beispielnotiz aus der Testoberfläche') } : {}) },
       { type: 'break', start: '12:00', end: '12:30' },
-      { type: 'work', start: '12:30', end: '16:30' },
+      // Deliberately outside the default ±5-minute window so the local fixture
+      // still exercises explicit conflict decisions. Their weekly total balances.
+      { type: 'work', start: '12:30', end: index === 0 ? '16:20' : '16:40' },
     ];
     day.fingerprint = fingerprint(date, day.entries);
   }

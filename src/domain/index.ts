@@ -81,6 +81,17 @@ function canonical(entries: AttendanceEntry[]): string {
   })).sort((a, b) => a.start.localeCompare(b.start) || a.end.localeCompare(b.end) || a.type.localeCompare(b.type)));
 }
 
+/** Known notes are retained; unknown metadata never becomes an automatic no-op. */
+function compatibleEntries(settings: Settings, entries: AttendanceEntry[]): boolean {
+  if (entries.length !== (settings.useBreak ? 3 : 1) || netMinutes(entries) === null) return false;
+  const ordered = [...entries].sort((a, b) => a.start.localeCompare(b.start));
+  const start = parseTime(ordered[0].start), end = parseTime(ordered.at(-1)!.end);
+  const range = settings.variable ? settings.variationMinutes : 0;
+  if (start === null || end === null || Math.abs(start - parseTime(settings.start)!) > range || Math.abs(end - parseTime(settings.end)!) > range) return false;
+  const expected = entriesFor(settings, { start, end, minutes: netMinutes(entries)! });
+  return ordered.every((entry, index) => entry.type === expected[index].type && entry.start === expected[index].start && entry.end === expected[index].end);
+}
+
 function hash(value: string): number {
   let result = 2166136261;
   for (const char of value) result = Math.imul(result ^ char.charCodeAt(0), 16777619);
@@ -125,7 +136,54 @@ function allocateDurations(count: number, target: number, durations: number[], r
   return allocated;
 }
 
-export function buildMonthPlan(settings: Settings, snapshot: MonthSnapshot, choices: ConflictChoices = {}, seed = 73129): BookingPlan {
+interface Allocation { minutes: number; retain: boolean }
+
+/** Minimise changed dates, then choose reproducibly among equally small repairs. */
+function allocateMinimumChanges(days: DayPlan[], target: number, durations: number[], compatible: Set<string>, random: () => number): Allocation[] | null {
+  // If only missing/incompatible dates need writing, that is already the
+  // absolute minimum. Most normal previews finish here without a DP table.
+  const retained = days.filter(day => compatible.has(day.date));
+  const required = days.filter(day => !compatible.has(day.date));
+  const requiredMinutes = target - retained.reduce((sum, day) => sum + day.existingNetMinutes!, 0);
+  const direct = allocateDurations(required.length, requiredMinutes, durations, random);
+  if (direct) {
+    let next = 0;
+    return days.map(day => compatible.has(day.date) ? { minutes: day.existingNetMinutes!, retain: true } : { minutes: direct[next++], retain: false });
+  }
+  const options = days.map(day => [
+    ...(compatible.has(day.date) ? [{ minutes: day.existingNetMinutes!, retain: true }] : []),
+    ...durations.map(minutes => ({ minutes, retain: false })),
+  ]);
+  const layers: Map<number, number>[] = [new Map([[0, 0]])];
+  for (const choices of options) {
+    const next = new Map<number, number>();
+    for (const [sum, cost] of layers.at(-1)!) for (const choice of choices) {
+      const total = sum + choice.minutes;
+      if (total > target) continue;
+      const changed = cost + (choice.retain ? 0 : 1);
+      if (changed < (next.get(total) ?? Infinity)) next.set(total, changed);
+    }
+    layers.push(next);
+  }
+  if (!layers.at(-1)!.has(target)) return null;
+  const allocated: Allocation[] = [];
+  const used = new Set(days.filter(day => compatible.has(day.date)).map(day => day.existingNetMinutes!));
+  let remaining = target;
+  for (let index = days.length - 1; index >= 0; index--) {
+    const cost = layers[index + 1].get(remaining)!;
+    const valid = options[index].filter(choice => layers[index].get(remaining - choice.minutes) === cost - (choice.retain ? 0 : 1));
+    const distinct = valid.filter(choice => !used.has(choice.minutes));
+    const pool = distinct.length ? distinct : valid;
+    const chosen = pool[Math.floor(random() * pool.length)];
+    allocated[index] = chosen;
+    used.add(chosen.minutes);
+    remaining -= chosen.minutes;
+  }
+  return allocated;
+}
+
+export function buildMonthPlan(settings: Settings, snapshot: MonthSnapshot, choices: ConflictChoices = {}, seed = 73129, options: { redistributeAll?: boolean } = {}): BookingPlan {
+  const redistributeAll = options.redistributeAll === true;
   const safeSettings: Settings = { ...settings, excludedDates: [...settings.excludedDates], localHolidays: { ...settings.localHolidays } };
   const errors = validateSettings(settings);
   if (snapshot.source === 'hibob' && !isReviewableContext(snapshot.context)) {
@@ -166,7 +224,9 @@ export function buildMonthPlan(settings: Settings, snapshot: MonthSnapshot, choi
     const reported = existingDay.reportedMinutes;
     const hoursIssue = snapshot.source === 'hibob' && (typeof reported !== 'number' || !Number.isInteger(reported) || reported < 0 || reported !== existingNetMinutes)
       ? t('Die gemeldeten HiBob-Stunden stimmen nicht mit den vollständigen Einträgen überein.') : undefined;
-    const issue = existingDay.unsupportedReason || hoursIssue;
+    const metadataIssue = existing.some(entry => entry.reason !== undefined && entry.reason !== '' || entry.metadata !== undefined && (!Array.isArray(entry.metadata) || entry.metadata.length > 0) || entry.note !== undefined && typeof entry.note !== 'string')
+      ? t('Ein HiBob-Eintrag enthält nicht unterstützte Zusatzdaten.') : undefined;
+    const issue = existingDay.unsupportedReason || hoursIssue || metadataIssue;
     if (issue) {
       result.eligible = true;
       result.action = 'blocked';
@@ -196,6 +256,7 @@ export function buildMonthPlan(settings: Settings, snapshot: MonthSnapshot, choi
     const eligible = weekDays.filter(day => day.eligible);
     const targetMinutes = eligible.length * (settings.variable ? 480 : baseCandidate?.minutes ?? 0);
     const weekErrors: string[] = [];
+    const compatible = new Set(eligible.filter(day => compatibleEntries(settings, day.existing)).map(day => day.date));
     if (settings.variable && settingsValid) {
       const retained = eligible.filter(day => day.action === 'skip');
       const editable = eligible.filter(day => day.action !== 'skip' && day.action !== 'blocked');
@@ -204,14 +265,33 @@ export function buildMonthPlan(settings: Settings, snapshot: MonthSnapshot, choi
       } else {
         const retainedMinutes = retained.reduce((sum, day) => sum + (day.existingNetMinutes ?? 0), 0);
         const durations = [...new Set(candidates.map(candidate => candidate.minutes))].sort((a, b) => a - b);
-        const assigned = durations.length ? allocateDurations(editable.length, targetMinutes - retainedMinutes, durations, random) : null;
+        // Preserve the established varied allocation for empty weeks and explicit
+        // redistribution. Otherwise every compatible existing date costs zero.
+        const fresh = redistributeAll || editable.every(day => day.existing.length === 0);
+        const assigned = durations.length ? fresh
+          ? allocateDurations(editable.length, targetMinutes - retainedMinutes, durations, random)?.map(minutes => ({ minutes, retain: false })) ?? null
+          : allocateMinimumChanges(editable, targetMinutes - retainedMinutes, durations, compatible, random) : null;
         if (!assigned) weekErrors.push(t('Das Ziel von {target} ist mit diesen Zeitgrenzen und beibehaltenen Buchungen nicht erreichbar.', { target: formatMinutes(targetMinutes) }));
         else editable.forEach((day, index) => {
-          const matching = candidates.filter(candidate => candidate.minutes === assigned[index]);
+          if (assigned[index].retain) {
+            day.proposed = day.existing.map(entry => ({ ...entry, ...(entry.metadata ? { metadata: [...entry.metadata] } : {}) }));
+            day.netMinutes = day.existingNetMinutes;
+            day.action = 'unchanged';
+            day.reason = t('Vorhandene Buchung entspricht bereits den vorgesehenen Zeiten');
+            return;
+          }
+          const matching = candidates.filter(candidate => candidate.minutes === assigned[index].minutes);
           const candidate = matching[Math.floor(random() * matching.length)];
           day.proposed = entriesFor(settings, candidate);
           day.netMinutes = candidate.minutes;
         });
+      }
+    } else if (settingsValid && !redistributeAll) {
+      for (const day of eligible) if (day.action !== 'skip' && day.action !== 'blocked' && compatible.has(day.date)) {
+        day.proposed = day.existing.map(entry => ({ ...entry, ...(entry.metadata ? { metadata: [...entry.metadata] } : {}) }));
+        day.netMinutes = day.existingNetMinutes;
+        day.action = 'unchanged';
+        day.reason = t('Vorhandene Buchung entspricht bereits den vorgesehenen Zeiten');
       }
     }
     for (const day of eligible) {
@@ -227,6 +307,6 @@ export function buildMonthPlan(settings: Settings, snapshot: MonthSnapshot, choi
   if (days.some(day => day.action === 'conflict')) errors.push(t('Bitte für alle vorhandenen Buchungen Überschreiben oder Überspringen wählen.'));
   if (!days.some(day => day.eligible)) errors.push(t('In diesem Monat stehen keine bearbeitbaren Arbeitstage zur Verfügung.'));
   const uniqueErrors = [...new Set(errors)];
-  const id = `plan-${hash(canonicalJson({ settings: safeSettings, context: snapshot.context ?? null, fingerprints: days.map(day => [day.date, day.fingerprint]), choices, seed })!)}`;
-  return { id, seed, settings: safeSettings, snapshot, choices: { ...choices }, days, weeks, errors: uniqueErrors, canReview: uniqueErrors.length === 0 && days.some(day => day.action === 'create' || day.action === 'overwrite') };
+  const id = `plan-${hash(canonicalJson({ settings: safeSettings, context: snapshot.context ?? null, fingerprints: days.map(day => [day.date, day.fingerprint]), choices, seed, redistributeAll })!)}`;
+  return { id, seed, ...(redistributeAll ? { redistributeAll: true } : {}), settings: safeSettings, snapshot, choices: { ...choices }, days, weeks, errors: uniqueErrors, canReview: uniqueErrors.length === 0 && days.some(day => day.action === 'create' || day.action === 'overwrite') };
 }

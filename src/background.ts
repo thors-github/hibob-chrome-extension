@@ -23,6 +23,7 @@ const controller = new BookingController({
   connect: () => adapter.connect(),
   disconnect: () => adapter.disconnect(),
   scan: (connection, month, jobId) => operation(jobId, (signal, progress) => adapter.scanMonth(connection, month, progress, signal)),
+  applyMonth: (connection, plan, authorization, jobId, hooks) => operation(jobId, (signal, progress) => adapter.applyMonth(connection, plan, authorization, hooks, progress, signal)),
   applyDay: (connection, day, context, jobId, authorization) => operation(jobId, (signal, progress) => adapter.applyDay(connection, day, context, authorization, progress, signal)),
   preflightDay: (connection, day, context, jobId, authorization) => operation(jobId, (signal, progress) => adapter.preflightDay(connection, day, context, authorization, progress, signal)),
   cancel: async (_connection, jobId) => { const abort = activeJobs.get(jobId); if (abort) { abort.abort(); adapter.cancel(); } },

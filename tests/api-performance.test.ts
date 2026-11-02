@@ -84,7 +84,7 @@ function authorization(plan: BookingPlan): ApplyAuthorization {
   const common = { planId: plan.id, planRevision: 1, contextFingerprint: contextFingerprint(plan.snapshot.context) };
   return { ...common, confirmation: { ...common, confirmed: true } };
 }
-async function app(server = new HttpLedger(), choices: ConflictChoices = {}) {
+async function app(server = new HttpLedger(), choices: ConflictChoices = {}, redistributeAll = false) {
   vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-02T18:00:00Z'));
   vi.stubGlobal('fetch', server.fetch);
   // Direct-mode success must never open or inject into a real browser page.
@@ -94,7 +94,7 @@ async function app(server = new HttpLedger(), choices: ConflictChoices = {}) {
   const connection = await finish(adapter.connect());
   const snapshot = await finish(adapter.scanMonth(connection, '2026-11'));
   const settings = { ...defaultSettings('2026-11'), variable: true, variationMinutes: 15, excludedDates: [] };
-  const plan = buildMonthPlan(settings, snapshot, choices, 73191);
+  const plan = buildMonthPlan(settings, snapshot, choices, 73191, { redistributeAll });
   expect(plan.canReview).toBe(true);
   server.calls.length = 0;
   // Separate setup traffic from the measured run while preserving client pacing.
@@ -150,7 +150,7 @@ describe('production API transport request budget and unchanged safety checks', 
       { id: 'kept-break', employeeId: server.user.id, entryType: 'break', start: '2026-11-03T12:00', end: '2026-11-03T12:30' },
       { id: 'kept-work-b', employeeId: server.user.id, entryType: 'work', start: '2026-11-03T12:30', end: '2026-11-03T16:30' },
     ]);
-    const a = await app(server, { '2026-11-03': 'overwrite' });
+    const a = await app(server, { '2026-11-03': 'overwrite' }, true);
     const day = a.plan.days.find(item => item.date === '2026-11-03')!;
     expect(day.action).toBe('overwrite'); expect(day.existing[0].note).toBe('Private fixture note');
     const [actual] = await finish(a.run([day]));

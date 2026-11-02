@@ -3,9 +3,9 @@ import { buildMonthPlan } from './domain/index';
 import { assertWritablePlan } from './shared/validation';
 import { sameJsonValue } from './shared/json';
 import { netMinutes } from './shared/entries';
-import { assertApplyAuthorization, contextFingerprint } from './shared/context';
+import { assertApplyAuthorization, contextFingerprint, executionFingerprint } from './shared/context';
 import { isExtensionVersion, isNewerExtensionVersion } from './shared/updates';
-import type { AccountConfirmation, AdapterProgress, ApiConnection, ApplyAuthorization, AttendanceContext, BookingPlan, DayPlan, DaySnapshot, PreflightResult, JobState, MonthSnapshot, PlanEditLease, RunOptions, RunState, SessionState } from './shared/types';
+import type { AccountConfirmation, AdapterProgress, ApiConnection, ApplyAuthorization, AttendanceContext, BookingPlan, DayPlan, DaySnapshot, PreflightResult, JobState, MonthSnapshot, PlanEditLease, RunOptions, RunState, SessionState, MonthApplyHooks, MonthApplyResult } from './shared/types';
 
 export interface ControllerBridge {
   load(): Promise<SessionState | undefined>;
@@ -13,6 +13,7 @@ export interface ControllerBridge {
   connect?(): Promise<ApiConnection>;
   disconnect?(): Promise<void>;
   scan(connection: ApiConnection, month: string, jobId: string): Promise<MonthSnapshot>;
+  applyMonth?(connection: ApiConnection, plan: BookingPlan, authorization: ApplyAuthorization, jobId: string, hooks: MonthApplyHooks): Promise<MonthApplyResult>;
   applyDay(connection: ApiConnection, day: DayPlan, context: AttendanceContext | undefined, jobId: string, authorization: ApplyAuthorization): Promise<DaySnapshot>;
   preflightDay(connection: ApiConnection, day: DayPlan, context: AttendanceContext | undefined, jobId: string, authorization: ApplyAuthorization): Promise<PreflightResult>;
   cancel(connection: ApiConnection, jobId: string): Promise<void>;
@@ -46,6 +47,7 @@ interface RunCheckpoint {
   job: JobState;
   run: RunState;
   dates: string[];
+  options: RunOptions;
 }
 function validateStoredState(state: SessionState): void {
   const invalid = () => { throw new Error(t('Der gespeicherte Sitzungszustand ist ungültig. Bitte die Erweiterung neu laden.')); };
@@ -53,8 +55,11 @@ function validateStoredState(state: SessionState): void {
   if (state.tabId !== undefined && (!Number.isSafeInteger(state.tabId) || state.tabId < 0)) invalid();
   if (state.connection !== undefined && !validConnection(state.connection)) invalid();
   if (state.error !== undefined && typeof state.error !== 'string') invalid();
-  if (state.run && (!object(state.run) || !['running', 'paused', 'complete', 'stopped', 'failed'].includes(state.run.status) || !Array.isArray(state.run.results) || !state.run.results.every(result => object(result) && typeof result.date === 'string' && ['pending', 'running', 'verified', 'skipped', 'failed', 'uncertain'].includes(result.status) && typeof result.message === 'string'))) invalid();
+  if (state.run && (!object(state.run) || !['running', 'paused', 'complete', 'stopped', 'failed'].includes(state.run.status) || !Array.isArray(state.run.results) || !state.run.results.every(result => object(result) && typeof result.date === 'string' && ['pending', 'running', 'awaiting-verification', 'verified', 'skipped', 'failed', 'uncertain'].includes(result.status) && typeof result.message === 'string'))) invalid();
   if (state.run?.runId !== undefined && !nonempty(state.run.runId) || state.run?.checkpointDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(state.run.checkpointDate)) invalid();
+  if (state.run?.executionProfile !== undefined && !['fast-serial', 'strict'].includes(state.run.executionProfile)) invalid();
+  if (state.run?.executionFingerprint !== undefined && !nonempty(state.run.executionFingerprint)) invalid();
+  if (state.run?.timings !== undefined && (!object(state.run.timings) || ['preparationMs', 'writingMs', 'journalingMs', 'verificationMs', 'totalMs', 'requests', 'writes'].some(key => typeof (state.run!.timings as unknown as Record<string, unknown>)[key] !== 'number' || !Number.isFinite((state.run!.timings as unknown as Record<string, number>)[key]) || (state.run!.timings as unknown as Record<string, number>)[key] < 0))) invalid();
   if (state.progress && (!object(state.progress) || !['scan', 'apply'].includes(state.progress.phase) || !safeCounter(state.progress.completed) || !safeCounter(state.progress.total) || state.progress.completed > state.progress.total || typeof state.progress.message !== 'string')) invalid();
   if (state.job && (!object(state.job) || typeof state.job.id !== 'string' || !state.job.id || !['scan', 'apply'].includes(state.job.kind) || !['running', 'cancelling', 'paused', 'interrupted'].includes(state.job.status) || !(nonempty(state.job.connectionId) || Number.isSafeInteger(state.job.tabId) && Number(state.job.tabId) >= 0) || typeof state.job.month !== 'string' || (state.job.month !== '' && !/^\d{4}-(0[1-9]|1[0-2])$/.test(state.job.month)) || typeof state.job.startedAt !== 'string' || typeof state.job.updatedAt !== 'string')) invalid();
   if (state.job?.checkpointId !== undefined && !nonempty(state.job.checkpointId)) invalid();
@@ -65,7 +70,7 @@ function validateStoredState(state: SessionState): void {
 
 /** Owns the only write queue and the global lease for reviewed configuration. */
 export class BookingController {
-  state: SessionState = { schemaVersion: 5, revision: 0, planRevision: 0 };
+  state: SessionState = { schemaVersion: 6, revision: 0, planRevision: 0 };
   private busy = false;
   private cancelRequested = false;
   private persistence: Promise<void> = Promise.resolve();
@@ -80,7 +85,7 @@ export class BookingController {
   async init(): Promise<void> {
     const loaded: unknown = await this.bridge.load();
     if (loaded !== undefined && !object(loaded)) throw new Error(t('Der gespeicherte Sitzungszustand ist ungültig. Bitte die Erweiterung neu laden.'));
-    if (object(loaded) && loaded.schemaVersion !== undefined && loaded.schemaVersion !== 2 && loaded.schemaVersion !== 3 && loaded.schemaVersion !== 4 && loaded.schemaVersion !== 5) throw new Error(t('Diese Sitzungsversion wird nicht unterstützt. Bitte die Erweiterung neu laden.'));
+    if (object(loaded) && loaded.schemaVersion !== undefined && loaded.schemaVersion !== 2 && loaded.schemaVersion !== 3 && loaded.schemaVersion !== 4 && loaded.schemaVersion !== 5 && loaded.schemaVersion !== 6) throw new Error(t('Diese Sitzungsversion wird nicht unterstützt. Bitte die Erweiterung neu laden.'));
     const restored = clone((loaded ?? {}) as SessionState);
     validateStoredState(restored);
     // Consent is deliberately ephemeral, including when loading unknown extra fields.
@@ -92,10 +97,10 @@ export class BookingController {
     if (restored.plan && (!object(restored.plan) || !Array.isArray(restored.plan.days) || !object(restored.plan.settings))) throw new Error(t('Der gespeicherte Sitzungszustand ist ungültig. Bitte die Erweiterung neu laden.'));
     this.revision = Math.max(this.revision, counter(restored.revision));
     this.planRevision = Math.max(this.planRevision, counter(restored.planRevision));
-    this.state = { ...restored, schemaVersion: 5, revision: this.revision, planRevision: this.planRevision };
+    this.state = { ...restored, schemaVersion: 6, revision: this.revision, planRevision: this.planRevision };
     this.durableLease = undefined; this.approvedPlanRevision = undefined; this.leaseCandidate = undefined; this.checkpoint = undefined;
-    const legacy = object(loaded) && loaded.schemaVersion !== 5;
-    const legacyConnection = object(loaded) && loaded.schemaVersion !== 4 && loaded.schemaVersion !== 5;
+    const legacy = object(loaded) && loaded.schemaVersion !== 6;
+    const legacyConnection = object(loaded) && loaded.schemaVersion !== 4 && loaded.schemaVersion !== 5 && loaded.schemaVersion !== 6;
     delete this.state.tabId;
     if (legacyConnection) { this.state.connection = undefined; this.state.job = undefined; }
     else if (this.state.connection) this.state.connection = connectionValue(this.state.connection);
@@ -110,7 +115,7 @@ export class BookingController {
       this.state.job = connectionId === undefined ? undefined : { id: restored.job?.id || `interrupted-${crypto.randomUUID()}`, kind, status: 'interrupted', connectionId, month: restored.job?.month || restored.snapshot?.month || restored.plan?.settings.month || '', startedAt: restored.job?.startedAt || now, updatedAt: now };
       if (this.state.run?.status === 'running' || this.state.run?.status === 'paused') {
         this.state.run.status = 'stopped';
-        for (const result of this.state.run.results) if (result.status === 'running') { result.status = 'uncertain'; result.message = t('Ausführung unterbrochen. Persistierten Zustand erneut einlesen.'); }
+        for (const result of this.state.run.results) if (result.status === 'running' || result.status === 'awaiting-verification') { result.status = 'uncertain'; result.message = t('Ausführung unterbrochen. Persistierten Zustand erneut einlesen.'); }
       }
       this.state.progress = undefined; this.invalidateScan();
       if (legacy) this.state.plan = undefined;
@@ -121,7 +126,7 @@ export class BookingController {
     } else if (this.state.editLease && this.state.editLease.planRevision === this.planRevision && typeof this.state.editLease.changeId === 'string') {
       this.durableLease = this.state.editLease.changeId;
       if (this.state.snapshot && this.state.plan) {
-        const canonical = buildMonthPlan(this.state.plan.settings, this.state.snapshot, this.state.plan.choices, this.state.plan.seed);
+        const canonical = buildMonthPlan(this.state.plan.settings, this.state.snapshot, this.state.plan.choices, this.state.plan.seed, { redistributeAll: this.state.plan.redistributeAll });
         if (sameJsonValue(this.state.plan.snapshot, this.state.snapshot) && sameJsonValue(this.state.plan, canonical)) {
           this.leaseCandidate = clone(canonical); this.approvedPlanRevision = this.planRevision;
         } else { this.state.plan.canReview = false; this.state.error = t('Die Vorschau wurde geändert. Bitte zuerst die aktuelle Vorschau prüfen.'); }
@@ -237,7 +242,7 @@ export class BookingController {
     const job = this.state.job;
     if (!this.busy || !job || progress.jobId !== job.id || job.status === 'interrupted' || progress.phase !== job.kind) return;
     const run = this.state.run;
-    this.state.progress = progress.phase === 'apply' && run?.status === 'running' ? { ...progress, completed: run.results.filter(r => r.status === 'verified').length, total: run.results.filter(r => r.status !== 'skipped').length } : progress;
+    this.state.progress = progress.phase === 'apply' && run?.status === 'running' ? { ...progress, completed: progress.stage === 'write' ? run.results.filter(r => r.status === 'verified' || r.status === 'awaiting-verification').length : run.results.filter(r => r.status === 'verified').length, total: run.results.filter(r => r.status !== 'skipped').length } : progress;
     job.updatedAt = new Date().toISOString(); await this.persist();
   }
 
@@ -276,7 +281,7 @@ export class BookingController {
     if (!this.currentLease(lease) || this.durableLease !== lease.changeId) throw stalePlan();
     const snapshot = this.state.snapshot;
     if (!snapshot || !sameJsonValue(input.snapshot, snapshot)) throw new Error(t('Die Vorschau gehört nicht zum aktuellen HiBob-Lesestand. Bitte erneut einlesen.'));
-    const candidate = buildMonthPlan(input.settings, snapshot, input.choices, input.seed);
+    const candidate = buildMonthPlan(input.settings, snapshot, input.choices, input.seed, { redistributeAll: input.redistributeAll });
     if (this.leaseCandidate && !sameJsonValue(this.leaseCandidate, candidate)) throw stalePlan();
     this.leaseCandidate = clone(candidate); this.state.plan = candidate; this.approvedPlanRevision = undefined; this.state.error = undefined;
     try { await this.persist(); if (!this.currentLease(lease)) throw stalePlan(); this.approvedPlanRevision = lease.planRevision; }
@@ -295,13 +300,14 @@ export class BookingController {
 
   async apply(input: BookingPlan, expectedPlanRevision: number, confirmation?: AccountConfirmation, options?: RunOptions): Promise<SessionState> {
     if (this.isLocked()) throw new Error(t('Ein Vorgang läuft bereits.'));
-    const { plan, authorization } = this.authorizePlan(input, expectedPlanRevision, confirmation);
-    const dates = this.checkpointDates(options, plan);
+    const selected = this.runOptions(options);
+    const { plan, authorization } = this.authorizePlan(input, expectedPlanRevision, confirmation, true, selected);
+    const dates = this.checkpointDates(selected, plan);
     const connection = this.requireConnection(); this.busy = true; this.cancelRequested = false; this.state.error = undefined;
     const job = this.newJob('apply', connection, plan.settings.month); this.state.job = job;
     const run: RunState = { runId: job.id, planId: plan.id, status: 'running', startedAt: job.startedAt, updatedAt: job.startedAt, results: plan.days.map(day => ({ date: day.date, status: day.action === 'create' || day.action === 'overwrite' ? 'pending' : 'skipped', message: day.reason ?? t('Keine Änderung.') })) };
-    this.state.run = run;
-    return this.executeRun(clone(plan), connection, authorization, job, run, dates);
+    this.state.run = run; run.executionProfile = selected.executionProfile; run.executionFingerprint = executionFingerprint(selected);
+    return selected.executionProfile === 'fast-serial' ? this.executeMonth(clone(plan), connection, authorization, job, run) : this.executeRun(clone(plan), connection, authorization, job, run, dates, selected);
   }
 
   /** Continue only the same in-memory frozen plan, with new consent and a complete read-only reconciliation. */
@@ -313,7 +319,7 @@ export class BookingController {
       || !sameJsonValue(this.state.job, checkpoint.job) || !sameJsonValue(this.state.run, checkpoint.run)
       || !sameJsonValue(this.state.plan, checkpoint.plan) || !sameJsonValue(this.state.connection, checkpoint.connection)) throw stalePlan();
     if (!confirmation || !nonempty(checkpoint.job.checkpointId) || confirmation.checkpointId !== checkpoint.job.checkpointId) throw new Error(t('Bitte das eigene HiBob-Konto für diesen Kontrollpunkt erneut bestätigen.'));
-    const { authorization } = this.authorizePlan(checkpoint.plan, expectedPlanRevision, confirmation);
+    const { authorization } = this.authorizePlan(checkpoint.plan, expectedPlanRevision, confirmation, true, checkpoint.options);
     const job = this.state.job, run = this.state.run;
     this.busy = true; this.cancelRequested = false; this.state.error = undefined;
     job.status = 'running'; delete job.checkpointId; run.status = 'running'; delete run.checkpointDate;
@@ -333,12 +339,21 @@ export class BookingController {
       throw new Error(this.state.error || errorText(error));
     }
     this.checkpoint = undefined;
-    return this.executeRun(checkpoint.plan, checkpoint.connection, authorization, job, run, checkpoint.dates);
+    return this.executeRun(checkpoint.plan, checkpoint.connection, authorization, job, run, checkpoint.dates, checkpoint.options);
+  }
+
+  private runOptions(options?: RunOptions): RunOptions {
+    const raw: unknown = options;
+    if (raw !== undefined && (!object(raw) || Object.keys(raw).some(key => !['checkpointDates', 'executionProfile'].includes(key)) || raw.executionProfile !== undefined && raw.executionProfile !== 'fast-serial' && raw.executionProfile !== 'strict' || raw.checkpointDates !== undefined && (!Array.isArray(raw.checkpointDates) || raw.checkpointDates.some(date => typeof date !== 'string')))) throw stalePlan();
+    const checked = raw as RunOptions | undefined;
+    const executionProfile = checked?.executionProfile ?? (checked?.checkpointDates?.length || !this.bridge.applyMonth ? 'strict' : 'fast-serial');
+    if (executionProfile === 'fast-serial' && (checked?.checkpointDates?.length || !this.bridge.applyMonth)) throw stalePlan();
+    return { executionProfile, ...(checked?.checkpointDates ? { checkpointDates: [...checked.checkpointDates].sort() } : {}) };
   }
 
   private checkpointDates(options: RunOptions | undefined, plan: BookingPlan): string[] {
     if (options === undefined) return [];
-    if (!object(options) || Object.keys(options).some(key => key !== 'checkpointDates') || options.checkpointDates !== undefined && (!Array.isArray(options.checkpointDates) || options.checkpointDates.some(date => typeof date !== 'string'))) throw new Error(t('Die Kontrollpunkte gehören nicht zu den freigegebenen Buchungstagen.'));
+    if (!object(options) || Object.keys(options).some(key => !['checkpointDates', 'executionProfile'].includes(key)) || options.checkpointDates !== undefined && (!Array.isArray(options.checkpointDates) || options.checkpointDates.some(date => typeof date !== 'string'))) throw new Error(t('Die Kontrollpunkte gehören nicht zu den freigegebenen Buchungstagen.'));
     const dates = options.checkpointDates ?? [];
     if (new Set(dates).size !== dates.length || dates.some(date => !plan.days.some(day => day.date === date && (day.action === 'create' || day.action === 'overwrite')))) throw new Error(t('Die Kontrollpunkte gehören nicht zu den freigegebenen Buchungstagen.'));
     return [...dates].sort();
@@ -366,7 +381,74 @@ export class BookingController {
     }
   }
 
-  private async executeRun(plan: BookingPlan, connection: ApiConnection, authorization: ApplyAuthorization, job: JobState, run: RunState, dates: string[]): Promise<SessionState> {
+  private async executeMonth(plan: BookingPlan, connection: ApiConnection, authorization: ApplyAuthorization, job: JobState, run: RunState): Promise<SessionState> {
+    const started = performance.now();
+    const changes = plan.days.filter(day => day.action === 'create' || day.action === 'overwrite');
+    const resultFor = (date: string) => {
+      const result = run.results.find(item => item.date === date);
+      if (!result || !changes.some(day => day.date === date)) throw stalePlan();
+      return result;
+    };
+    try {
+      this.state.progress = { jobId: job.id, phase: 'apply', stage: 'prepare', completed: 0, total: changes.length, message: t('Monat vor dem Speichern prüfen …') };
+      await this.persist();
+      if (this.cancelRequested) throw new Error(t('Vor dem Schreiben abgebrochen.'));
+      const result = await this.bridge.applyMonth!(connection, plan, authorization, job.id, {
+        beforeDispatch: async date => {
+          if (this.cancelRequested) throw new Error(t('Vor dem Schreiben abgebrochen.'));
+          const current = resultFor(date);
+          if (current.status !== 'pending') throw stalePlan();
+          current.status = 'running'; current.message = t('Buchung wird übertragen …');
+          run.updatedAt = new Date().toISOString();
+          try { await this.persist(); }
+          catch (error) { current.status = 'pending'; this.journalFailure(run, error); throw error; }
+          if (this.cancelRequested) { current.status = 'pending'; throw new Error(t('Vor dem Schreiben abgebrochen.')); }
+        },
+        acknowledged: async date => {
+          const current = resultFor(date);
+          if (current.status !== 'running') throw stalePlan();
+          current.status = 'awaiting-verification'; current.message = t('Übertragen – Abschlussprüfung steht aus.');
+          run.updatedAt = new Date().toISOString();
+          try { await this.persist(); }
+          catch (error) { this.journalFailure(run, error); throw error; }
+        },
+      });
+      this.connectionFailure(result);
+      const seen = new Set<string>();
+      for (const outcome of result.days) {
+        if (seen.has(outcome.date) || !['verified', 'failed', 'uncertain'].includes(outcome.status) || typeof outcome.message !== 'string') throw new Error(t('Die Monatsprüfung hat kein eindeutiges Ergebnis geliefert.'));
+        seen.add(outcome.date);
+        const current = resultFor(outcome.date);
+        if (current.status !== 'running' && current.status !== 'awaiting-verification') throw new Error(t('Die Monatsprüfung hat kein eindeutiges Ergebnis geliefert.'));
+        current.status = outcome.status; current.message = outcome.message;
+      }
+      for (const current of run.results) if (current.status === 'running' || current.status === 'awaiting-verification') {
+        current.status = 'uncertain'; current.message = t('Ausführung unterbrochen. Persistierten Zustand erneut einlesen.');
+      }
+      run.timings = { ...result.timings, totalMs: performance.now() - started };
+      const verified = changes.every(day => resultFor(day.date).status === 'verified');
+      run.status = result.complete && verified && !result.error && !run.journalError && !this.cancelRequested ? 'complete' : result.stopped || this.cancelRequested ? 'stopped' : 'failed';
+      if (result.error) this.state.error = this.state.error ? `${this.state.error} ${result.error}` : result.error;
+      if (run.status === 'failed' && !this.state.error) this.state.error = t('Die Monatsprüfung hat kein eindeutiges Ergebnis geliefert.');
+    } catch (error) {
+      this.connectionFailure(error);
+      for (const current of run.results) if (current.status === 'running' || current.status === 'awaiting-verification') {
+        current.status = 'uncertain'; current.message = t('Ausführung unterbrochen. Persistierten Zustand erneut einlesen.');
+      }
+      run.status = this.cancelRequested ? 'stopped' : 'failed';
+      this.state.error ||= errorText(error);
+    } finally {
+      if (run.status === 'stopped') this.state.error ||= t('Lauf abgebrochen. Bereits bestätigte Buchungen bleiben erhalten. Vor dem Fortsetzen erneut einlesen.');
+      run.updatedAt = new Date().toISOString(); this.state.progress = undefined;
+      this.state.job = undefined; this.checkpoint = undefined; this.invalidateScan();
+      try { await this.persist(); }
+      catch (error) { this.journalFailure(run, error); this.touch(); }
+      finally { this.busy = false; }
+    }
+    return clone(this.state);
+  }
+
+  private async executeRun(plan: BookingPlan, connection: ApiConnection, authorization: ApplyAuthorization, job: JobState, run: RunState, dates: string[], options: RunOptions): Promise<SessionState> {
     const changes = plan.days.filter(day => day.action === 'create' || day.action === 'overwrite');
     let failure: unknown; let paused = false;
     try {
@@ -396,7 +478,7 @@ export class BookingController {
           this.state.progress = undefined;
           try { await this.persist(); } catch (error) { this.journalFailure(run, error); break; }
           if (!this.cancelRequested) {
-            this.checkpoint = { plan: clone(plan), planRevision: this.planRevision, connection: clone(connection), job: clone(job), run: clone(run), dates: [...dates] };
+            this.checkpoint = { plan: clone(plan), planRevision: this.planRevision, connection: clone(connection), job: clone(job), run: clone(run), dates: [...dates], options: clone(options) };
             paused = true;
             break;
           }
@@ -449,7 +531,7 @@ export class BookingController {
     return { state: clone(this.state), preflight: result! };
   }
 
-  private authorizePlan(input: BookingPlan, expectedPlanRevision: number, confirmation?: AccountConfirmation, writing = true): { plan: BookingPlan; authorization: ApplyAuthorization } {
+  private authorizePlan(input: BookingPlan, expectedPlanRevision: number, confirmation?: AccountConfirmation, writing = true, options?: RunOptions): { plan: BookingPlan; authorization: ApplyAuthorization } {
     const plan = this.state.plan;
     if (expectedPlanRevision !== this.planRevision || this.approvedPlanRevision !== this.planRevision || !plan || !this.state.snapshot || input.id !== plan.id || !sameJsonValue(input, plan)) throw stalePlan();
     assertWritablePlan(plan);
@@ -457,6 +539,7 @@ export class BookingController {
     this.assertConnectionContext(plan.snapshot.context, connection);
     if (writing && !connection.capabilities?.overwrite && plan.days.some(day => day.action === 'overwrite')) throw new Error(t('Das Überschreiben ist über diese HiBob-Verbindung nicht freigegeben.'));
     const authorization: ApplyAuthorization = { planId: plan.id, planRevision: expectedPlanRevision, contextFingerprint: contextFingerprint(plan.snapshot.context), ...(confirmation ? { confirmation: clone(confirmation) } : {}) };
+    if (writing && (this.bridge.applyMonth || options?.executionProfile === 'fast-serial')) authorization.executionFingerprint = executionFingerprint(options);
     assertApplyAuthorization(plan.snapshot.context, authorization);
     return { plan, authorization };
   }
@@ -521,6 +604,6 @@ export class BookingController {
   private assertConnectionContext(context: AttendanceContext | undefined, connection: ApiConnection): void {
     if (context?.mode !== 'api-session' || context.connectionId !== connection.generation || context.employeeKey !== connection.employeeId || context.tenantKey !== connection.companyId) throw new Error(t('Das HiBob-Konto oder die Sitzung hat sich geändert. Bitte erneut verbinden und den Monat einlesen.'));
   }
-  private touch(): void { this.state.schemaVersion = 5; this.state.revision = ++this.revision; this.state.planRevision = this.planRevision; }
+  private touch(): void { this.state.schemaVersion = 6; this.state.revision = ++this.revision; this.state.planRevision = this.planRevision; }
   private async persist(): Promise<void> { this.touch(); const state = clone(this.state); const operation = this.persistence.then(() => this.bridge.save(state)); this.persistence = operation.catch(() => {}); await operation; }
 }

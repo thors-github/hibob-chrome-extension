@@ -123,15 +123,16 @@ describe('month planning and conflicts', () => {
     expect(overwritten.days.find(day => day.date === '2026-11-02')).toMatchObject({ action: 'overwrite', netMinutes: 480 });
   });
 
-  it('marks an identical entry unchanged only after an explicit overwrite choice', () => {
+  it('retains compatible entries and their notes unless redistribution is explicit', () => {
     const settings = defaultSettings('2026-11');
     const source = snapshot(settings.month);
     const entries = buildMonthPlan(settings, source).days.find(day => day.date === '2026-11-02')!.proposed;
     source.days.find(day => day.date === '2026-11-02')!.entries = entries;
-    expect(buildMonthPlan(settings, source).days.find(day => day.date === '2026-11-02')!.action).toBe('conflict');
+    expect(buildMonthPlan(settings, source).days.find(day => day.date === '2026-11-02')!.action).toBe('unchanged');
     expect(buildMonthPlan(settings, source, { '2026-11-02': 'overwrite' }).days.find(day => day.date === '2026-11-02')!.action).toBe('unchanged');
     source.days.find(day => day.date === '2026-11-02')!.entries = entries.map((entry, i) => i === 0 ? { ...entry, note: 'Important retained note' } : entry);
-    expect(buildMonthPlan(settings, source, { '2026-11-02': 'overwrite' }).days.find(day => day.date === '2026-11-02')!.action).toBe('overwrite');
+    expect(buildMonthPlan(settings, source, { '2026-11-02': 'overwrite' }).days.find(day => day.date === '2026-11-02')!.action).toBe('unchanged');
+    expect(buildMonthPlan(settings, source, { '2026-11-02': 'overwrite' }, 73129, { redistributeAll: true }).days.find(day => day.date === '2026-11-02')!.action).toBe('overwrite');
   });
 
   it('blocks unsupported selected days in both modes without reducing weekly targets', () => {

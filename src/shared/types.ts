@@ -1,6 +1,7 @@
 export type LocalDate = string;
 export type ConflictChoice = 'overwrite' | 'skip';
 export type ConflictChoices = Record<LocalDate, ConflictChoice>;
+export type ExecutionProfile = 'fast-serial' | 'strict';
 
 export type AttendanceContext =
   | { mode: 'api-session'; connectionId: string; employeeKey: string; tenantKey: string }
@@ -35,6 +36,7 @@ export interface AccountConfirmation {
   planRevision: number;
   contextFingerprint: string;
   confirmed: true;
+  executionFingerprint?: string;
   /** Fresh, public scope marker for one paused checkpoint; never reusable consent. */
   checkpointId?: string;
 }
@@ -45,6 +47,7 @@ export interface ApplyAuthorization {
   planRevision: number;
   contextFingerprint: string;
   confirmation?: AccountConfirmation;
+  executionFingerprint?: string;
 }
 
 export interface PlanEditLease {
@@ -153,11 +156,12 @@ export interface BookingPlan {
   weeks: WeekPlan[];
   errors: string[];
   canReview: boolean;
+  redistributeAll?: boolean;
 }
 
 export interface DayResult {
   date: LocalDate;
-  status: 'pending' | 'running' | 'verified' | 'skipped' | 'failed' | 'uncertain';
+  status: 'pending' | 'running' | 'awaiting-verification' | 'verified' | 'skipped' | 'failed' | 'uncertain';
   message: string;
 }
 
@@ -170,11 +174,29 @@ export interface RunState {
   startedAt: string;
   updatedAt: string;
   journalError?: string;
+  executionProfile?: ExecutionProfile;
+  executionFingerprint?: string;
+  timings?: RunTimings;
 }
 
 /** Execution boundaries leave the reviewed monthly allocation unchanged. */
 export interface RunOptions {
   checkpointDates?: LocalDate[];
+  executionProfile?: ExecutionProfile;
+}
+
+export interface RunTimings { preparationMs: number; writingMs: number; journalingMs: number; verificationMs: number; totalMs: number; requests: number; writes: number }
+export interface MonthApplyHooks {
+  beforeDispatch(date: LocalDate): Promise<void>;
+  acknowledged(date: LocalDate): Promise<void>;
+}
+export interface MonthApplyResult {
+  days: Array<{ date: LocalDate; status: 'verified' | 'failed' | 'uncertain'; message: string }>;
+  complete: boolean;
+  stopped: boolean;
+  error?: string;
+  connectionStatus?: 'expired' | 'unsupported';
+  timings: RunTimings;
 }
 
 export interface AdapterProgress {
@@ -184,6 +206,7 @@ export interface AdapterProgress {
   completed: number;
   total: number;
   message: string;
+  stage?: 'prepare' | 'write' | 'verify';
 }
 
 export type AdapterCommand =
@@ -204,7 +227,7 @@ export interface UpdateStatus {
 
 export interface SessionState {
   /** Optional on input only, for migration from older sessions. */
-  schemaVersion?: 2 | 3 | 4 | 5;
+  schemaVersion?: 2 | 3 | 4 | 5 | 6;
   connection?: ApiConnection;
   revision?: number;
   planRevision?: number;
