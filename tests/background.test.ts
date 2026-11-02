@@ -1,9 +1,56 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { buildMonthPlan, defaultSettings, getMonthDates } from '../src/domain/index';
-import type { MonthSnapshot, SessionState } from '../src/shared/types';
+import type { AdapterCommand, DraftCheckResult, MonthSnapshot, SessionState } from '../src/shared/types';
 import { contextFingerprint } from '../src/shared/context';
 
 afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
+
+it.each(['success', 'missing-result', 'legacy-protocol', 'cancel-before-dispatch'] as const)('routes a draft check exclusively through protocol4 CHECK_DAY_DRAFT: %s', async scenario => {
+  type Reply = { ok: boolean; state?: SessionState; error?: string; draftCheck?: DraftCheckResult };
+  let receiver!: (message: unknown, sender: object, respond: (response: Reply) => void) => unknown;
+  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Draft fixture', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02T10:00:00Z', context: { mode: 'user-confirmed-ui', documentId: 'draft-doc', pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: 'self-page' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
+  const settings = { ...defaultSettings('2026-11'), excludedDates: getMonthDates('2026-11').filter(date => date !== '2026-11-03') };
+  const plan = buildMonthPlan(settings, snapshot, {}, 1);
+  const history = { planId: 'previous-failed-run', status: 'failed' as const, startedAt: '2026-11-02', updatedAt: '2026-11-02', results: [{ date: '2026-11-03', status: 'failed' as const, message: 'No real booking saved' }] };
+  let stored: SessionState = { schemaVersion: 3, revision: 5, planRevision: 1, editLease: { planRevision: 1, changeId: 'draft-review' }, tabId: 9, snapshot, plan, run: history, update: { installedVersion: '1.2.3' } };
+  const publications: SessionState[] = []; const sent: AdapterCommand[] = [];
+  let entered!: () => void; let release!: () => void;
+  const held = new Promise<void>(resolve => { entered = resolve; });
+  vi.stubGlobal('chrome', {
+    storage: { session: { get: async () => ({ sessionState: stored }), set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); publications.push(stored); } } },
+    sidePanel: { open: async () => {} }, action: { onClicked: { addListener: () => {} } },
+    runtime: { id: 'test', getManifest: () => ({ version: '1.2.3' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
+    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: AdapterCommand) => {
+      sent.push(structuredClone(message));
+      if (message.type === 'PING') {
+        if (scenario === 'cancel-before-dispatch') { entered(); await new Promise<void>(resolve => { release = resolve; }); }
+        return { ok: true, protocolVersion: scenario === 'legacy-protocol' ? 3 : 4, extensionVersion: '1.2.3' };
+      }
+      if (message.type === 'CHECK_DAY_DRAFT') return scenario === 'missing-result' ? { ok: true } : { ok: true, draftCheck: { date: message.day.date, entries: message.day.proposed, netMinutes: message.day.netMinutes, saved: false, unchanged: true } };
+      if (message.type === 'CANCEL') return { ok: true };
+      throw new Error('Unexpected Save or scan route');
+    } }, scripting: { executeScript: vi.fn() },
+  });
+  await import('../src/background');
+  const rpc = (message: object) => new Promise<Reply>(resolve => receiver(message, { id: 'test', url: 'chrome-extension://test/sidepanel.html' }, resolve));
+  await rpc({ type: 'PANEL_GET_STATE' });
+  const command = { type: 'PANEL_CHECK_DRAFT', plan, expectedPlanRevision: 1, date: '2026-11-03' };
+  expect((await rpc(command)).ok).toBe(false); expect(sent).toEqual([]);
+  const confirmation = { planId: plan.id, planRevision: 1, contextFingerprint: contextFingerprint(plan.snapshot.context), confirmed: true };
+  const checking = rpc({ ...command, confirmation });
+  if (scenario === 'cancel-before-dispatch') { await held; await rpc({ type: 'PANEL_CANCEL', jobId: stored.job!.id }); release(); }
+  const response = await checking;
+  expect(response.ok).toBe(scenario === 'success');
+  expect(sent.filter(message => message.type === 'APPLY_DAY')).toEqual([]);
+  const checks = sent.filter(message => message.type === 'CHECK_DAY_DRAFT');
+  expect(checks).toHaveLength(scenario === 'legacy-protocol' || scenario === 'cancel-before-dispatch' ? 0 : 1);
+  if (scenario === 'success') {
+    expect(response.draftCheck).toMatchObject({ date: '2026-11-03', netMinutes: 480, saved: false, unchanged: true });
+    expect(checks[0]).toMatchObject({ authorization: { planId: plan.id, planRevision: 1, contextFingerprint: confirmation.contextFingerprint, confirmation } });
+  } else expect(response.draftCheck).toBeUndefined();
+  expect(response.state?.run).toEqual(history); expect(response.state?.snapshot).toBeUndefined(); expect(response.state?.plan?.canReview).toBe(false);
+  for (const state of publications) { expect(state.run).toEqual(history); expect((state as SessionState & { draftCheck?: unknown }).draftCheck).toBeUndefined(); }
+});
 
 it('unbinds and discards the preview when opened outside HiBob without scanning automatically', async () => {
   const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Test', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02', context: { documentId: 'doc-review', employeeKey: 'employee-review', tenantKey: 'tenant-review', mode: 'stable-identity' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
@@ -57,7 +104,7 @@ it('cancels a pending transport preparation before APPLY_DAY is dispatched', asy
         if (message.type === 'PING' && holdPing) { entered(); await new Promise<void>(resolve => { release = resolve; }); }
         if (message.type === 'SCAN_MONTH') return { ok: true, snapshot };
         if (message.type === 'APPLY_DAY') writes.push(message);
-        return { ok: true, protocolVersion: 3, extensionVersion: '1.2.0' };
+        return { ok: true, protocolVersion: 4, extensionVersion: '1.2.0' };
       },
     },
     scripting: { executeScript: async () => {} },
@@ -108,7 +155,7 @@ it('retries a failed session read and shares each initialization attempt across 
   expect(reads).toBe(2);
 });
 
-it.each([undefined, 2])('requires protocol 3 before dispatching a scan (received %s)', async protocolVersion => {
+it.each([undefined, 2, 3])('requires protocol 4 before dispatching a scan (received %s)', async protocolVersion => {
   let receiver!: (message: unknown, sender: object, respond: (response: { ok: boolean; state?: SessionState; error?: string }) => void) => unknown;
   const sent: string[] = [];
   const executeScript = vi.fn();
@@ -138,7 +185,7 @@ it('cancels only the persisted interrupted job and waits for idle before startin
     runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
     tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string; jobId?: string }) => {
       sent.push(message);
-      if (message.type === 'PING') return { ok: true, protocolVersion: 3, extensionVersion: '1.2.0', activeJob: active };
+      if (message.type === 'PING') return { ok: true, protocolVersion: 4, extensionVersion: '1.2.0', activeJob: active };
       if (message.type === 'CANCEL') { active = undefined; return { ok: true }; }
       return { ok: true, snapshot };
     } }, scripting: { executeScript: vi.fn() },
@@ -164,7 +211,7 @@ it('returns a newer blocked state and visible error when canonical plan persiste
     } } },
     sidePanel: { open: async () => {} }, action: { onClicked: { addListener: () => {} } },
     runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
-    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string }) => message.type === 'PING' ? { ok: true, protocolVersion: 3, extensionVersion: '1.2.0' } : { ok: true, snapshot } },
+    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string }) => message.type === 'PING' ? { ok: true, protocolVersion: 4, extensionVersion: '1.2.0' } : { ok: true, snapshot } },
     scripting: { executeScript: vi.fn() },
   });
   await import('../src/background');
@@ -194,7 +241,7 @@ it('reopens the same bound tab during a held scan without an error or a second s
     sidePanel: { open: vi.fn(async () => {}) }, action: { onClicked: { addListener: (listener: typeof clicked) => { clicked = listener; } } },
     runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
     tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string }) => {
-      if (message.type === 'PING') return { ok: true, protocolVersion: 3, extensionVersion: '1.2.0' };
+      if (message.type === 'PING') return { ok: true, protocolVersion: 4, extensionVersion: '1.2.0' };
       scanCalls++; entered(); await heldScan; return { ok: true, snapshot };
     } }, scripting: { executeScript: vi.fn() },
   });
@@ -218,7 +265,7 @@ it('reopens the same bound tab during a held scan without an error or a second s
   expect(scanCalls).toBe(1);
 });
 
-it('requires per-plan manual consent and carries canonical authorization through protocol 3', async () => {
+it('requires per-plan manual consent and carries canonical authorization through protocol 4', async () => {
   let receiver!: (message: unknown, sender: object, respond: (response: { ok: boolean; state?: SessionState; error?: string }) => void) => unknown;
   let stored: SessionState = { tabId: 9 };
   const writes: { type: string; jobId?: string; authorization?: unknown }[] = [];
@@ -228,7 +275,7 @@ it('requires per-plan manual consent and carries canonical authorization through
     sidePanel: { open: async () => {} }, action: { onClicked: { addListener: () => {} } },
     runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
     tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string; day?: { date: string; proposed: unknown[] }; jobId?: string; authorization?: unknown }) => {
-      if (message.type === 'PING') return { ok: true, protocolVersion: 3, extensionVersion: '1.2.0' };
+      if (message.type === 'PING') return { ok: true, protocolVersion: 4, extensionVersion: '1.2.0' };
       if (message.type === 'SCAN_MONTH') return { ok: true, snapshot };
       writes.push(structuredClone(message)); return { ok: true, day: { date: message.day!.date, entries: message.day!.proposed, editable: true, fingerprint: 'saved' } };
     } }, scripting: { executeScript: vi.fn() },

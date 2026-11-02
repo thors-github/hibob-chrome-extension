@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.3-beta.1
+
+- Verified the actual automated writer in signed-in Chrome through the dedicated draft-only path: three correct segments, Cancel and unchanged readback. No live save was performed; stable and Store release gates remain closed.
+
+- Focus native hour/minute controls before entering values and use real focus transitions to commit the time-picker state. Synthetic blur events alone did not commit values before Add recreated the work card.
+- Share draft preparation between booking and a new single-day **Test draft — no saving** action. It cancels the prepared draft and verifies unchanged attendance without reaching Save or Submit.
+- Require current plan/account approval for draft tests, invalidate the preview afterwards, and keep test results temporary and distinct from booking history.
+- Add phase and field diagnostics without note contents or account identifiers, and model native focusout-only commits in tests.
+- Upgrade the internal adapter protocol to 4. Keep session format 3 and the existing permissions. Actual saving and future-day acceptance remain unverified.
+
 ## 1.2.2-beta.1
 
 - Fix false failures when HiBob recreates its work and break cards while adding an entry. Match the entry contents instead of relying on the same HTML elements remaining present.

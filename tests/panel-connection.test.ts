@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { buildMonthPlan, defaultSettings, getMonthDates } from '../src/domain/index';
+import { buildMonthPlan, defaultSettings, formatMinutes, getMonthDates } from '../src/domain/index';
 import { contextFingerprint } from '../src/shared/context';
-import type { AccountConfirmation, BookingPlan, MonthSnapshot, PlanEditLease, SessionState, Settings } from '../src/shared/types';
+import type { AccountConfirmation, BookingPlan, DraftCheckResult, MonthSnapshot, PlanEditLease, SessionState, Settings } from '../src/shared/types';
 
 const settings = defaultSettings('2026-11');
 type StorageListener = (changes: Record<string, chrome.storage.StorageChange>, area: string) => void;
@@ -33,8 +33,8 @@ function reviewedState(mode: 'stable-identity' | 'user-confirmed-ui' = 'stable-i
   return { schemaVersion: 3, revision: 1, planRevision: 1, tabId: 9, snapshot: scanned, plan };
 }
 
-type Message = { type: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; plan?: BookingPlan; jobId?: string; confirmation?: AccountConfirmation };
-type Reply = { ok: boolean; state?: SessionState; error?: string };
+type Message = { type: string; date?: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; plan?: BookingPlan; jobId?: string; confirmation?: AccountConfirmation };
+type Reply = { ok: boolean; state?: SessionState; error?: string; draftCheck?: DraftCheckResult };
 
 function mockChrome(options: {
   state?: SessionState;
@@ -57,6 +57,11 @@ function mockChrome(options: {
     if (message.type === 'PANEL_SAVE_PLAN') {
       if (JSON.stringify(message.lease) !== JSON.stringify(backend.editLease)) return { ok: false, state: structuredClone(backend), error: 'Stale edit lease' };
       backend = { ...backend, revision: (backend.revision ?? 0) + 1, plan: structuredClone(message.plan) };
+    }
+    if (message.type === 'PANEL_CHECK_DRAFT') {
+      const day = message.plan!.days.find(day => day.date === message.date)!;
+      backend = { ...backend, revision: (backend.revision ?? 0) + 1, planRevision: (backend.planRevision ?? 0) + 1, snapshot: undefined, plan: undefined, job: undefined };
+      return { ok: true, state: structuredClone(backend), draftCheck: { date: day.date, entries: structuredClone(day.proposed), netMinutes: day.netMinutes!, saved: false, unchanged: true } };
     }
     return { ok: true, state: structuredClone(backend) };
   });
@@ -523,8 +528,10 @@ describe('actual extension panel connection states', () => {
     expect(dialog('apply-dialog').open).toBe(false);
     expect(field('account-confirmation').checked).toBe(false);
     button('confirm-apply').dispatchEvent(new Event('click'));
+    button('check-draft').dispatchEvent(new Event('click'));
     await settleStartup();
     expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_CHECK_DRAFT')).toBe(false);
   });
 
   it('does not require manual account confirmation for a stable identity context', async () => {
@@ -539,5 +546,123 @@ describe('actual extension panel connection states', () => {
     button('confirm-apply').click();
     await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(true));
     expect(chrome.sendMessage.mock.calls.find(([message]) => message.type === 'PANEL_APPLY')![0].confirmation).toBeUndefined();
+  });
+
+  it('checks only a selected writable day with fresh account consent and preserves preferences and history', async () => {
+    const initial = reviewedState('user-confirmed-ui');
+    const preferences = { ...settings, variable: true, variationMinutes: 15, excludedDates: ['2026-11-02'] };
+    initial.plan = buildMonthPlan(preferences, initial.snapshot!, {}, 123);
+    const chrome = mockChrome({ state: initial, getSettings: async () => ({ settings: preferences }) });
+    await mount();
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    button('apply').click();
+    const dates = document.getElementById('draft-check-date') as HTMLSelectElement;
+    expect(dates.value).toBe('2026-11-03');
+    expect([...dates.options].map(option => option.value)).toHaveLength(20);
+    expect([...dates.options].some(option => option.value === '2026-11-02' || option.value === '2026-11-07')).toBe(false);
+    expect(button('check-draft').disabled).toBe(true);
+    button('check-draft').dispatchEvent(new Event('click'));
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_CHECK_DRAFT')).toBe(false);
+    field('account-confirmation').checked = true;
+    field('account-confirmation').dispatchEvent(new Event('change'));
+    expect(button('check-draft').disabled).toBe(false);
+    dates.value = '2026-11-04'; dates.dispatchEvent(new Event('change'));
+    expect(field('account-confirmation').checked).toBe(false);
+    expect(button('check-draft').disabled).toBe(true);
+    expect(button('confirm-apply').disabled).toBe(true);
+    field('account-confirmation').checked = true;
+    field('account-confirmation').dispatchEvent(new Event('change'));
+    button('check-draft').click();
+    await vi.waitFor(() => expect(document.getElementById('draft-check-result')?.hidden).toBe(false));
+    const checked = chrome.sendMessage.mock.calls.filter(([message]) => message.type === 'PANEL_CHECK_DRAFT');
+    expect(checked).toHaveLength(1);
+    expect(checked[0][0]).toMatchObject({ date: '2026-11-04', plan: initial.plan, expectedPlanRevision: 1, confirmation: { planId: initial.plan.id, planRevision: 1, contextFingerprint: contextFingerprint(initial.snapshot!.context), confirmed: true } });
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
+    expect(chrome.setSettings).not.toHaveBeenCalled();
+    expect(field('variationMinutes').value).toBe('15');
+    expect((document.getElementById('excludedDates') as HTMLTextAreaElement).value).toBe('2026-11-02');
+    const checkedDay = initial.plan.days.find(day => day.date === '2026-11-04')!;
+    const resultText = document.getElementById('draft-check-result')!.textContent!;
+    expect(resultText).toContain('nicht gespeichert');
+    expect(resultText).toContain('unverändert');
+    expect(resultText).toContain('04.11.');
+    expect(resultText).toContain(formatMinutes(checkedDay.netMinutes));
+    for (const entry of checkedDay.proposed) expect(resultText).toContain(`${entry.start}–${entry.end}`);
+    expect(field('account-confirmation').checked).toBe(false);
+    expect(button('apply').disabled).toBe(true);
+    expect(button('scan').disabled).toBe(false);
+    expect(document.getElementById('footer-hint')!.textContent).toContain('Monat erneut einlesen');
+    expect(chrome.state.snapshot).toBeUndefined();
+    expect(chrome.state.plan).toBeUndefined();
+    expect(chrome.state.run).toBeUndefined();
+    expect(JSON.stringify(chrome.state)).not.toContain('draftCheck');
+    expect(JSON.stringify(sessionStorage)).not.toContain('draftCheck');
+  });
+
+  it('cancels the active draft-check job and never reports a successful check after cancellation', async () => {
+    const initial = reviewedState('user-confirmed-ui');
+    initial.run = { planId: 'old-plan', status: 'complete', startedAt: 'earlier', updatedAt: 'earlier', results: [{ date: '2026-10-30', status: 'verified', message: 'Old verified result' }] };
+    const held = deferred<Reply>();
+    const chrome = mockChrome({ state: initial, onMessage: async message => message.type === 'PANEL_CHECK_DRAFT' ? held.promise : undefined });
+    await mount();
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    button('apply').click();
+    field('account-confirmation').checked = true; field('account-confirmation').dispatchEvent(new Event('change'));
+    button('check-draft').click();
+    await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_CHECK_DRAFT')).toBe(true));
+    chrome.emit({ ...initial, revision: 2, job: { id: 'draft-check-job', kind: 'apply', status: 'running', tabId: 9, month: '2026-11', startedAt: 'now', updatedAt: 'now' } });
+    expect(button('apply').disabled).toBe(true);
+    expect(button('scan').disabled).toBe(true);
+    expect(button('export-settings').disabled).toBe(true);
+    expect(button('cancel-run').hidden).toBe(false);
+    button('cancel-run').click();
+    await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_CANCEL' && message.jobId === 'draft-check-job')).toBe(true));
+    held.resolve({ ok: false, error: 'Draft check cancelled without saving', state: { ...initial, revision: 3, planRevision: 2, snapshot: undefined, plan: undefined, job: undefined } });
+    await vi.waitFor(() => expect(document.getElementById('main-error')!.textContent).toContain('cancelled without saving'));
+    expect(document.getElementById('draft-check-result')?.hidden).toBe(true);
+    expect(button('apply').disabled).toBe(true);
+    expect(button('scan').disabled).toBe(false);
+    expect(field('account-confirmation').checked).toBe(false);
+    expect(document.getElementById('run-results')!.textContent).toContain('Old verified result');
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
+  });
+
+  it('discards a late draft-check result after another tab replaces the reviewed page', async () => {
+    const initial = reviewedState();
+    const held = deferred<Reply>();
+    const chrome = mockChrome({ state: initial, onMessage: async message => message.type === 'PANEL_CHECK_DRAFT' ? held.promise : undefined });
+    await mount();
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    button('apply').click(); button('check-draft').click();
+    await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_CHECK_DRAFT')).toBe(true));
+    chrome.emit({ schemaVersion: 3, revision: 10, planRevision: 10, tabId: 10 });
+    const day = initial.plan!.days.find(day => day.date === '2026-11-03')!;
+    held.resolve({ ok: true, state: { schemaVersion: 3, revision: 2, planRevision: 2, tabId: 9 }, draftCheck: { date: day.date, entries: day.proposed, netMinutes: day.netMinutes!, saved: false, unchanged: true } });
+    await settleStartup();
+    expect(document.getElementById('draft-check-result')?.hidden).toBe(true);
+    expect(button('apply').disabled).toBe(true);
+    expect(button('scan').disabled).toBe(false);
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
+  });
+
+  it.each(['note', 'reason', 'metadata', 'missing-state', 'unchanged-state'] as const)('rejects a malformed successful draft-check response with %s', async malformed => {
+    const initial = reviewedState();
+    const day = initial.plan!.days.find(day => day.date === '2026-11-03')!;
+    const entries = structuredClone(day.proposed);
+    if (malformed === 'note') entries[0].note = 'Unexpected note';
+    if (malformed === 'reason') entries[0].reason = 'Unexpected reason';
+    if (malformed === 'metadata') entries[0].metadata = ['Unexpected project'];
+    const terminal = { ...initial, revision: 2, planRevision: 2, snapshot: undefined, plan: undefined };
+    const chrome = mockChrome({ state: initial, onMessage: async message => message.type === 'PANEL_CHECK_DRAFT'
+      ? { ok: true, ...(malformed === 'missing-state' ? {} : { state: malformed === 'unchanged-state' ? initial : terminal }), draftCheck: { date: day.date, entries, netMinutes: day.netMinutes!, saved: false, unchanged: true } }
+      : undefined });
+    await mount();
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    button('apply').click(); button('check-draft').click();
+    await vi.waitFor(() => expect(document.getElementById('main-error')!.textContent).toContain('kein eindeutiges Ergebnis'));
+    expect(document.getElementById('draft-check-result')?.hidden).toBe(true);
+    expect(button('apply').disabled).toBe(true);
+    expect(button('scan').disabled).toBe(false);
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
   });
 });

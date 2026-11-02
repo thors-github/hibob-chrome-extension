@@ -162,5 +162,16 @@
   "Version {version} ist bereit. Kläre zuerst den unterbrochenen Vorgang durch erneutes Einlesen.": "Version {version} is ready. Resolve the interrupted operation by reading the month again first.",
   "Prüfe vor dem Speichern links dein HiBob-Konto. Die Zuordnung bestätigst du für diesen Plan im nächsten Schritt.": "Check your HiBob account on the left before saving. You will confirm it for this plan in the next step.",
   "Ich bestätige, dass links meine eigenen HiBob-Anwesenheiten für {month} im richtigen Firmenkonto angezeigt werden.": "I confirm that the page on the left shows my own HiBob attendance for {month} in the correct company account.",
-  "Prüfe links, ob deine eigenen Anwesenheiten im richtigen HiBob-Firmenkonto angezeigt werden. Diese Bestätigung gilt nur für diesen Plan.": "Check that the page on the left shows your own attendance in the correct HiBob company account. This confirmation applies only to this plan."
+  "Prüfe links, ob deine eigenen Anwesenheiten im richtigen HiBob-Firmenkonto angezeigt werden. Diese Bestätigung gilt nur für diesen Plan.": "Check that the page on the left shows your own attendance in the correct HiBob company account. This confirmation applies only to this plan.",
+  "Entwurf geprüft – nicht gespeichert": "Draft checked — not saved",
+  "Der Tag ist unverändert. Lies den Monat erneut ein, um weiterzuarbeiten.": "The day is unchanged. Read the month again to continue.",
+  "Tag für Entwurfsprüfung": "Day to test",
+  "Der ausgewählte Tag wird ausgefüllt, geprüft und wieder verworfen. Es wird nicht gespeichert. Danach den Monat erneut einlesen.": "The selected day’s draft is filled, checked and discarded. Nothing is saved. Read the month again afterwards.",
+  "Entwurf testen – ohne Speichern": "Test draft — no saving",
+  "Entwurfsprüfung": "Draft check",
+  "Nach der Entwurfsprüfung den Monat erneut einlesen.": "Read the month again after the draft check.",
+  "Geprüfter Tag": "Tested day",
+  "Geprüfte Segmente": "Tested entries",
+  "Entwurfsprüfung abgebrochen. Es wurde nicht gespeichert.": "Draft check cancelled. Nothing was saved.",
+  "Die Entwurfsprüfung hat kein eindeutiges Ergebnis geliefert. Bitte den Tag prüfen und den Monat erneut einlesen.": "The draft check did not return a clear result. Please check the day and read the month again."
 }

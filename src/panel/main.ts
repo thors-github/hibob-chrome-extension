@@ -1,6 +1,6 @@
 import './styles.css';
-import { buildMonthPlan, defaultSettings, formatMinutes, GERMAN_STATES } from '../domain/index';
-import type { AccountConfirmation, AttendanceEntry, BookingPlan, ConflictChoices, DayPlan, MonthSnapshot, PlanEditLease, SessionState, Settings } from '../shared/types';
+import { buildMonthPlan, defaultSettings, formatMinutes, GERMAN_STATES, netMinutes } from '../domain/index';
+import type { AccountConfirmation, AttendanceEntry, BookingPlan, ConflictChoices, DayPlan, DraftCheckResult, MonthSnapshot, PlanEditLease, SessionState, Settings } from '../shared/types';
 import { sameJsonValue } from '../shared/json';
 import { contextFingerprint } from '../shared/context';
 import { createDemoSnapshot, demoFingerprint } from './demo';
@@ -21,6 +21,9 @@ let choices: ConflictChoices = {};
 let seed = freshSeed();
 let busy = false;
 let applying = false;
+let checkingDraft = false;
+let draftCheckResult: DraftCheckResult | undefined;
+let draftCheckNeedsScan = false;
 let rebuilding = false;
 let demoCancelled = false;
 let localError = '';
@@ -32,7 +35,7 @@ let initializationFailed = false;
 let preferencesLoaded = !hasExtension;
 let connectionRetryAvailable = false;
 let approvedPlanRevision: number | undefined;
-let confirmed: { plan: BookingPlan; planRevision: number; contextFingerprint: string } | undefined;
+let confirmed: { plan: BookingPlan; planRevision: number; contextFingerprint: string; draftCheckDate: string } | undefined;
 let pendingDraft: Draft | undefined;
 let invalidations: Promise<void> = Promise.resolve();
 let preferenceWrites: Promise<void> = Promise.resolve();
@@ -51,8 +54,8 @@ interface Draft {
   preferencesSaved: boolean;
 }
 
-type PanelMessage = { type: string; month?: string; plan?: BookingPlan; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation };
-type PanelResponse = { ok: boolean; state?: SessionState; error?: string };
+type PanelMessage = { type: string; month?: string; date?: string; plan?: BookingPlan; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation };
+type PanelResponse = { ok: boolean; state?: SessionState; error?: string; draftCheck?: DraftCheckResult };
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
@@ -106,6 +109,7 @@ app.innerHTML = `
       <div class="scan-toolbar"><button id="scan" class="button wide" disabled>${t("Monat einlesen")}</button></div>
     </section>
     <section id="scan-progress" class="notice" role="status" hidden></section>
+    <section id="draft-check-result" class="notice draft-check-result" role="status" aria-labelledby="draft-check-result-title" hidden><h2 id="draft-check-result-title">${t('Entwurf geprüft – nicht gespeichert')}</h2><dl id="draft-check-details" class="confirm-details"></dl><p class="hint">${t('Der Tag ist unverändert. Lies den Monat erneut ein, um weiterzuarbeiten.')}</p></section>
     <section class="preview" aria-labelledby="preview-title">
       <div class="section-title"><div><h2 id="preview-title">${t("Monatsvorschau")}</h2><p id="preview-subtitle" class="preview-subtitle">${t("Vor dem Buchen alle Änderungen prüfen.")}</p></div><button id="redistribute" class="button subtle" hidden>${t("Neu verteilen")}</button></div>
       <div id="preview-empty" class="empty-preview"><strong>${t("Dein Monat auf einen Blick")}</strong><p>${t("Lies zuerst den Monat aus HiBob ein. Feiertage, Abwesenheiten und bestehende Einträge werden berücksichtigt.")}</p></div>
@@ -119,7 +123,7 @@ app.innerHTML = `
     <footer class="footer"><div class="footer-buttons"><button id="cancel-run" class="button danger" hidden>${t("Abbrechen")}</button><button id="apply" class="button primary" disabled>${t("Jetzt buchen")}</button></div><p id="footer-hint" class="hint">${t("Es wird erst nach deiner Bestätigung gespeichert.")}</p></footer>
   </div>
   <dialog id="conflict-dialog" aria-labelledby="conflict-title"><div class="dialog-body"><h2 id="conflict-title">${t("Vorhandene Buchungen prüfen")}</h2><p class="hint">${t("Entscheide für jeden Tag. Beim Überschreiben werden die bisherigen Arbeits- und Pauseneinträge durch die Vorschau ersetzt.")}</p><div class="dialog-toolbar"><button id="overwrite-all" class="button">${t("Alle überschreiben")}</button><button id="skip-all" class="button">${t("Alle überspringen")}</button></div><div id="conflict-error" class="notice error" role="alert" style="margin-top:12px" hidden></div><div id="conflict-items"></div></div><div class="dialog-footer"><button id="close-conflicts" class="button">${t("Zurück")}</button><button id="save-conflicts" class="button primary">${t("Entscheidungen übernehmen")}</button></div></dialog>
-  <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t("Buchungen jetzt speichern?")}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><div id="account-confirmation-field" class="notice account-confirmation" hidden><label class="ack-label" for="account-confirmation"><input id="account-confirmation" type="checkbox" /><span id="account-confirmation-label"></span></label></div><p class="hint">${t("Die Extension kontrolliert jeden gespeicherten Tag. Bei einer Abweichung stoppt der Lauf.")}</p></div><div class="dialog-footer"><button id="close-apply" class="button">${t("Zurück")}</button><button id="confirm-apply" class="button primary" disabled>${t("Buchungen starten")}</button></div></dialog>
+  <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t("Buchungen jetzt speichern?")}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><div id="account-confirmation-field" class="notice account-confirmation" hidden><label class="ack-label" for="account-confirmation"><input id="account-confirmation" type="checkbox" /><span id="account-confirmation-label"></span></label></div><div class="draft-check-controls field"><label for="draft-check-date">${t('Tag für Entwurfsprüfung')}</label><select id="draft-check-date" disabled></select><p class="hint">${t('Der ausgewählte Tag wird ausgefüllt, geprüft und wieder verworfen. Es wird nicht gespeichert. Danach den Monat erneut einlesen.')}</p><button id="check-draft" class="button wide" disabled>${t('Entwurf testen – ohne Speichern')}</button></div><p class="hint">${t("Die Extension kontrolliert jeden gespeicherten Tag. Bei einer Abweichung stoppt der Lauf.")}</p></div><div class="dialog-footer"><button id="close-apply" class="button">${t("Zurück")}</button><button id="confirm-apply" class="button primary" disabled>${t("Buchungen starten")}</button></div></dialog>
   <dialog id="import-dialog" aria-labelledby="import-title"><div class="dialog-body"><h2 id="import-title">${t('Einstellungen importieren?')}</h2><p class="hint">${t('Diese Vorgaben ersetzen deine aktuellen Einstellungen. Der Import startet keine Buchungen; prüfe danach die Monatsvorschau.')}</p><dl id="import-details" class="confirm-details"></dl></div><div class="dialog-footer"><button id="cancel-import" class="button">${t('Abbrechen')}</button><button id="confirm-import" class="button primary">${t('Einstellungen übernehmen')}</button></div></dialog>
 `;
 
@@ -153,12 +157,12 @@ function monthLabel(month: string): string {
   return new Intl.DateTimeFormat(locale(), { month: 'long', year: 'numeric', timeZone: 'Europe/Berlin' }).format(parsed);
 }
 
-function entriesElement(entries: AttendanceEntry[]): HTMLElement {
+function entriesElement(entries: AttendanceEntry[], showType = false): HTMLElement {
   const wrapper = node('span', undefined, 'entry-list');
   if (!entries.length) return node('span', '—', 'muted');
   for (const entry of entries) {
     const interval = `${entry.start || t('offen')}–${entry.end || t('offen')}`;
-    wrapper.append(node('span', entry.type === 'break' ? t('Pause {interval}', { interval }) : interval, `entry ${entry.type}`));
+    wrapper.append(node('span', entry.type === 'break' ? t('Pause {interval}', { interval }) : showType ? `${t('Arbeit')} ${interval}` : interval, `entry ${entry.type}`));
   }
   return wrapper;
 }
@@ -178,7 +182,7 @@ function activeJob(): SessionState['job'] | undefined {
   return state.job && (state.job.status === 'running' || state.job.status === 'cancelling') ? state.job : undefined;
 }
 
-function isRunning(): boolean { return busy || applying || Boolean(activeJob()) || (!state.job && state.run?.status === 'running'); }
+function isRunning(): boolean { return busy || applying || checkingDraft || Boolean(activeJob()) || (!state.job && state.run?.status === 'running'); }
 
 function updating(): boolean { return updateRequested || state.updateApplying === true; }
 
@@ -192,6 +196,9 @@ function closeConfirmation(): void {
   input('account-confirmation').required = false;
   input('account-confirmation').disabled = true;
   $<HTMLButtonElement>('confirm-apply').disabled = true;
+  $<HTMLButtonElement>('check-draft').disabled = true;
+  select('draft-check-date').disabled = true;
+  select('draft-check-date').replaceChildren();
   if (applyDialog.open) applyDialog.close();
 }
 
@@ -201,11 +208,15 @@ function revokeApproval(): void {
 }
 
 function approved(): boolean {
-  return Boolean(!updating() && !initializing && !initializationFailed && preferencesLoaded && plan?.canReview && !pendingDraft && approvedPlanRevision === planRevision() && sameJsonValue(plan, state.plan));
+  return Boolean(!updating() && !initializing && !initializationFailed && preferencesLoaded && !draftCheckNeedsScan && plan?.canReview && !pendingDraft && approvedPlanRevision === planRevision() && sameJsonValue(plan, state.plan));
 }
 
 function needsAccountConfirmation(reviewed: BookingPlan): boolean {
   return reviewed.snapshot.source === 'hibob' && reviewed.snapshot.context?.mode === 'user-confirmed-ui';
+}
+
+function writableDays(reviewed: BookingPlan): DayPlan[] {
+  return reviewed.days.filter(day => day.eligible && !reviewed.settings.excludedDates.includes(day.date) && (day.action === 'create' || day.action === 'overwrite'));
 }
 
 function currentConfirmation(): boolean {
@@ -216,8 +227,13 @@ function currentConfirmation(): boolean {
 }
 
 function updateConfirmationButton(): void {
-  $<HTMLButtonElement>('confirm-apply').disabled = !applyDialog.open || !currentConfirmation()
-    || Boolean(confirmed && needsAccountConfirmation(confirmed.plan) && !input('account-confirmation').checked);
+  const review = confirmed;
+  const ready = applyDialog.open && currentConfirmation();
+  const consent = !review || !needsAccountConfirmation(review.plan) || input('account-confirmation').checked;
+  $<HTMLButtonElement>('confirm-apply').disabled = !ready || !consent;
+  select('draft-check-date').disabled = !ready;
+  $<HTMLButtonElement>('check-draft').disabled = !ready || !consent || !review
+    || select('draft-check-date').value !== review.draftCheckDate || !writableDays(review.plan).some(day => day.date === review.draftCheckDate);
 }
 
 function showError(message: string): void {
@@ -225,13 +241,17 @@ function showError(message: string): void {
   renderState();
 }
 
-async function message(command: PanelMessage): Promise<SessionState> {
+async function request(command: PanelMessage): Promise<PanelResponse> {
   if (!hasExtension) throw new Error(t('Die Erweiterung ist hier nicht aktiv. Lade den Extension-Ordner in Chrome und öffne sie über einem HiBob-Tab.'));
   const requestedAtRevision = sessionRevision;
   const response = await chrome.runtime.sendMessage(command) as PanelResponse;
   if (response?.state && (typeof response.state.revision === 'number' || requestedAtRevision === sessionRevision)) receiveState(response.state);
   if (!response?.ok) throw new Error(response?.error || t('Die HiBob-Verbindung hat nicht geantwortet. Bitte den Tab prüfen.'));
-  return response.state ?? state;
+  return response;
+}
+
+async function message(command: PanelMessage): Promise<SessionState> {
+  return (await request(command)).state ?? state;
 }
 
 function renderablePlan(value: unknown): value is BookingPlan {
@@ -250,6 +270,8 @@ function receiveState(incoming: SessionState): void {
   if (typeof incoming.revision === 'number' && incoming.revision <= (state.revision ?? -1)) return;
   const previous = state;
   state = structuredClone(incoming);
+  if (draftCheckResult && (previous.tabId !== state.tabId || previous.planRevision !== state.planRevision || state.snapshot || activeJob())) draftCheckResult = undefined;
+  if (state.snapshot && !activeJob()) draftCheckNeedsScan = false;
   if (state.plan && !renderablePlan(state.plan)) {
     state.plan = undefined;
     localError = t('Der gespeicherte Plan ist ungültig. Bitte den Monat erneut einlesen.');
@@ -370,6 +392,7 @@ async function rebuild(newSeed = false): Promise<void> {
 }
 
 function beginDraft(newSeed = false): Draft {
+  draftCheckResult = undefined;
   if (newSeed) seed = freshSeed();
   const draft: Draft = {
     version: ++buildVersion, changeId: crypto.randomUUID(), settings: structuredClone(settings),
@@ -538,17 +561,18 @@ function renderState(): void {
     const bar = node('progress');
     bar.max = progress.total || 1;
     bar.value = progress.completed;
-    bar.setAttribute('aria-label', progress.phase === 'scan' ? t('Monat einlesen') : t('Buchungsfortschritt'));
+    bar.setAttribute('aria-label', progress.phase === 'scan' ? t('Monat einlesen') : checkingDraft ? t('Entwurfsprüfung') : t('Buchungsfortschritt'));
     $('scan-progress').replaceChildren(label, bar);
   }
   renderPreview();
   renderRun();
+  renderDraftCheck();
   $('cancel-run').hidden = !running;
   $<HTMLButtonElement>('cancel-run').disabled = hasExtension && (!activeJob() || activeJob()?.status === 'cancelling');
   const finished = state.run?.status === 'complete' && state.run.planId === plan?.id;
   $<HTMLButtonElement>('apply').disabled = !approved() || locked || rebuilding || finished;
   $('apply').textContent = rebuilding ? t('Vorschau wird geprüft …') : running ? t('Bitte warten …') : finished ? t('Buchungen abgeschlossen') : t('Jetzt buchen');
-  $('footer-hint').textContent = isDemo ? t('Testmodus: Auch „Jetzt buchen“ verändert nur lokale Beispieldaten.') : running ? t('Bitte den HiBob-Tab während des Laufs unverändert lassen.') : state.run && !state.snapshot ? t('Für einen weiteren Lauf den Monat erneut einlesen.') : t('Es wird erst nach deiner Bestätigung gespeichert.');
+  $('footer-hint').textContent = running ? t('Bitte den HiBob-Tab während des Laufs unverändert lassen.') : draftCheckNeedsScan ? t('Nach der Entwurfsprüfung den Monat erneut einlesen.') : isDemo ? t('Testmodus: Auch „Jetzt buchen“ verändert nur lokale Beispieldaten.') : state.run && !state.snapshot ? t('Für einen weiteren Lauf den Monat erneut einlesen.') : t('Es wird erst nach deiner Bestätigung gespeichert.');
   updateConfirmationButton();
   if (focusId && focused && !focused.isConnected) document.getElementById(focusId)?.focus({ preventScroll: true });
   scrolling.scrollTop = scrollTop;
@@ -659,6 +683,16 @@ function renderRun(): void {
   }));
 }
 
+function renderDraftCheck(): void {
+  $('draft-check-result').hidden = !draftCheckResult;
+  const list = $('draft-check-details');
+  list.replaceChildren();
+  if (!draftCheckResult) return;
+  detailsLine(list, t('Geprüfter Tag'), dateLabel(draftCheckResult.date));
+  detailsLine(list, t('Geprüfte Segmente'), entriesElement([...draftCheckResult.entries].sort((a, b) => a.start.localeCompare(b.start)), true));
+  detailsLine(list, t('Netto'), formatMinutes(draftCheckResult.netMinutes));
+}
+
 function settingsChanged(): void {
   void rebuild(true);
 }
@@ -731,7 +765,7 @@ async function scanMonth(): Promise<void> {
   if (isRunning() || updating() || rebuilding) return;
   if (!$<HTMLFormElement>('settings-form').reportValidity()) return;
   settings = readSettings();
-  busy = true; demoCancelled = false; localError = ''; plan = undefined; choices = {};
+  busy = true; demoCancelled = false; localError = ''; plan = undefined; choices = {}; draftCheckResult = undefined;
   if (isDemo) {
     state.run = undefined;
     state.progress = { phase: 'scan', completed: 0, total: 1, message: t('HiBob-Monat wird geprüft …') };
@@ -749,6 +783,7 @@ async function scanMonth(): Promise<void> {
       if (demoCancelled) throw new Error(t('Einlesen abgebrochen.'));
       if (!demoSnapshot || demoSnapshot.month !== month) demoSnapshot = createDemoSnapshot(settings);
       state.snapshot = structuredClone(demoSnapshot);
+      draftCheckNeedsScan = false;
       state.progress = undefined;
     } else {
       const scanned = await message({ type: 'PANEL_SCAN', month });
@@ -761,7 +796,9 @@ async function scanMonth(): Promise<void> {
 
 function openApply(): void {
   if (!approved() || !plan || isRunning() || rebuilding) return;
-  confirmed = { plan: structuredClone(plan), planRevision: planRevision(), contextFingerprint: contextFingerprint(plan.snapshot.context) };
+  draftCheckResult = undefined;
+  const days = writableDays(plan);
+  confirmed = { plan: structuredClone(plan), planRevision: planRevision(), contextFingerprint: contextFingerprint(plan.snapshot.context), draftCheckDate: days[0]?.date ?? '' };
   const reviewed = confirmed.plan;
   const manual = needsAccountConfirmation(reviewed);
   $('account-confirmation-field').hidden = !manual;
@@ -769,7 +806,9 @@ function openApply(): void {
   input('account-confirmation').required = manual;
   input('account-confirmation').disabled = !manual;
   $('account-confirmation-label').textContent = t('Ich bestätige, dass links meine eigenen HiBob-Anwesenheiten für {month} im richtigen Firmenkonto angezeigt werden.', { month: monthLabel(reviewed.settings.month) });
-  const days = reviewed.days.filter((day) => day.action === 'create' || day.action === 'overwrite');
+  const dateSelect = select('draft-check-date');
+  dateSelect.replaceChildren(...days.map(day => { const option = node('option', `${dateLabel(day.date)} · ${formatMinutes(day.netMinutes)}`); option.value = day.date; return option; }));
+  dateSelect.value = confirmed.draftCheckDate;
   const overwriteCount = days.filter((day) => day.action === 'overwrite').length;
   $('apply-description').textContent = isDemo ? t('Du startest eine lokale Simulation. Dein echtes HiBob-Konto wird nicht verändert.') : manual ? t('Prüfe links, ob deine eigenen Anwesenheiten im richtigen HiBob-Firmenkonto angezeigt werden. Diese Bestätigung gilt nur für diesen Plan.') : t('Die folgenden Änderungen werden in deinem HiBob-Konto „{employee}“ gespeichert.', { employee: reviewed.snapshot.employeeLabel });
   const list = $('apply-details'); list.replaceChildren();
@@ -779,6 +818,67 @@ function openApply(): void {
   detailsLine(list, t('Bundesland'), t(GERMAN_STATES.find((item) => item.code === reviewed.settings.state)?.name || reviewed.settings.state));
   applyDialog.showModal();
   updateConfirmationButton();
+}
+
+function accountConfirmation(review: NonNullable<typeof confirmed>): AccountConfirmation | undefined {
+  return needsAccountConfirmation(review.plan) ? {
+    planId: review.plan.id, planRevision: review.planRevision, contextFingerprint: review.contextFingerprint, confirmed: true,
+  } : undefined;
+}
+
+function validDraftCheck(result: DraftCheckResult | undefined, day: DayPlan): result is DraftCheckResult {
+  if (!result || result.date !== day.date || result.saved !== false || result.unchanged !== true || !Array.isArray(result.entries)) return false;
+  if (!result.entries.every(entry => entry && (entry.type === 'work' || entry.type === 'break') && typeof entry.start === 'string' && typeof entry.end === 'string')) return false;
+  const ordered = (entries: AttendanceEntry[]) => [...entries].sort((a, b) => a.start.localeCompare(b.start) || a.end.localeCompare(b.end) || a.type.localeCompare(b.type));
+  return Number.isSafeInteger(result.netMinutes) && result.netMinutes === netMinutes(result.entries) && result.netMinutes === day.netMinutes
+    && sameJsonValue(ordered(result.entries), ordered(day.proposed));
+}
+
+async function demoCheckDraft(day: DayPlan): Promise<DraftCheckResult> {
+  demoCancelled = false;
+  state.progress = { phase: 'apply', completed: 0, total: 1, date: day.date, message: t('Tagesentwurf wird ohne Speichern geprüft …') };
+  renderState();
+  await new Promise(resolve => setTimeout(resolve, 160));
+  if (demoCancelled) throw new Error(t('Entwurfsprüfung abgebrochen. Es wurde nicht gespeichert.'));
+  return { date: day.date, entries: structuredClone(day.proposed), netMinutes: netMinutes(day.proposed)!, saved: false, unchanged: true };
+}
+
+async function checkDraft(): Promise<void> {
+  const review = confirmed;
+  if (!review || !applyDialog.open || !currentConfirmation() || select('draft-check-date').value !== review.draftCheckDate || (needsAccountConfirmation(review.plan) && !input('account-confirmation').checked)) return;
+  const day = writableDays(review.plan).find(day => day.date === review.draftCheckDate);
+  if (!day) return;
+  const confirmation = accountConfirmation(review);
+  const tabId = state.tabId;
+  const revision = state.revision ?? 0;
+  const version = buildVersion;
+  closeConfirmation();
+  approvedPlanRevision = undefined;
+  checkingDraft = true; draftCheckNeedsScan = true; draftCheckResult = undefined; localError = ''; renderState();
+  try {
+    const response = isDemo ? undefined : await request({ type: 'PANEL_CHECK_DRAFT', plan: review.plan, expectedPlanRevision: review.planRevision, date: day.date, ...(confirmation ? { confirmation } : {}) });
+    const result = isDemo ? await demoCheckDraft(day) : response?.draftCheck;
+    const completedState = response?.state;
+    const invalidated = isDemo || Boolean(completedState && completedState.schemaVersion === 3 && completedState.tabId === tabId
+      && typeof completedState.revision === 'number' && completedState.revision > revision
+      && typeof completedState.planRevision === 'number' && completedState.planRevision > review.planRevision
+      && completedState.snapshot === undefined && completedState.job === undefined && (!completedState.plan || completedState.plan.canReview === false));
+    if (!validDraftCheck(result, day) || !invalidated) throw new Error(t('Die Entwurfsprüfung hat kein eindeutiges Ergebnis geliefert. Bitte den Tag prüfen und den Monat erneut einlesen.'));
+    // A late result from an older document or a superseded operation must not
+    // claim that the page currently selected by the user was checked.
+    if (buildVersion === version && state.tabId === tabId && !activeJob() && (isDemo || sameJsonValue(completedState, state))) draftCheckResult = structuredClone(result);
+  } catch (error) { localError = errorText(error); }
+  finally {
+    checkingDraft = false;
+    draftCheckNeedsScan = true;
+    revokeApproval();
+    if (isDemo) {
+      state.snapshot = undefined; state.plan = undefined; state.progress = undefined; plan = undefined;
+      state.planRevision = planRevision() + 1;
+      state.revision = (state.revision ?? 0) + 1;
+    }
+    renderState(); persistDemo();
+  }
 }
 
 async function demoApply(activePlan: BookingPlan): Promise<void> {
@@ -810,9 +910,7 @@ async function demoApply(activePlan: BookingPlan): Promise<void> {
 async function applyPlan(): Promise<void> {
   const review = confirmed;
   if (!review || !applyDialog.open || !currentConfirmation() || (needsAccountConfirmation(review.plan) && !input('account-confirmation').checked)) return;
-  const confirmation: AccountConfirmation | undefined = needsAccountConfirmation(review.plan) ? {
-    planId: review.plan.id, planRevision: review.planRevision, contextFingerprint: review.contextFingerprint, confirmed: true,
-  } : undefined;
+  const confirmation = accountConfirmation(review);
   closeConfirmation();
   const activePlan = review.plan;
   approvedPlanRevision = undefined;
@@ -919,7 +1017,7 @@ async function initialize(retry = false): Promise<void> {
     if (area !== 'session' || !changes.sessionState) return;
     sessionRevision++;
     receiveState(changes.sessionState.newValue as SessionState ?? {});
-    if (!initializing && !initializationFailed && !pendingDraft && !busy && !applying && !activeJob() && !updating()) {
+    if (!initializing && !initializationFailed && !pendingDraft && !busy && !applying && !checkingDraft && !activeJob() && !updating()) {
       if (state.plan && approvedPlanRevision === undefined && !refreshScheduled) {
         // A storage event alone never grants approval. Verify the newest
         // canonical record through an acknowledged controller request first.
@@ -986,6 +1084,14 @@ $('apply').addEventListener('click', openApply);
 $('close-apply').addEventListener('click', closeConfirmation);
 applyDialog.addEventListener('cancel', closeConfirmation);
 input('account-confirmation').addEventListener('change', updateConfirmationButton);
+select('draft-check-date').addEventListener('change', () => {
+  if (!confirmed || !currentConfirmation()) return;
+  const date = select('draft-check-date').value;
+  confirmed.draftCheckDate = writableDays(confirmed.plan).some(day => day.date === date) ? date : '';
+  input('account-confirmation').checked = false;
+  updateConfirmationButton();
+});
+$('check-draft').addEventListener('click', () => { void checkDraft(); });
 $('confirm-apply').addEventListener('click', () => { void applyPlan(); });
 $('cancel-run').addEventListener('click', () => { void cancelRun(); });
 $('retry-plan').addEventListener('click', () => { if (pendingDraft && !rebuilding && !isRunning() && !updating()) void processDraft(pendingDraft); });

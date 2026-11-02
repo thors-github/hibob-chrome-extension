@@ -27,3 +27,20 @@ export function subtractInventory(values: EditorValue[], protectedValues: Editor
   }
   return remaining;
 }
+
+/** Diagnostics expose field names, never their contents. */
+export function changedFieldNames(expected: EditorValue[], observed: EditorValue[]): string[] {
+  const names = ['clock-in-hours', 'clock-in-minutes', 'clock-out-hours', 'clock-out-minutes'];
+  const changed = new Set<string>();
+  for (const value of expected) {
+    if (observed.some(candidate => editorKey(candidate) === editorKey(value))) continue;
+    const candidates = observed.filter(candidate => candidate.kind === value.kind);
+    if (candidates.length !== 1) { changed.add('card-identity'); continue; }
+    const candidate = candidates[0];
+    names.forEach((name, index) => { if (candidate.fields[index] !== value.fields[index]) changed.add(name); });
+    if (candidate.note !== value.note) changed.add('note');
+    if (candidate.reason !== value.reason) changed.add('reason');
+    if (JSON.stringify(candidate.metadata) !== JSON.stringify(value.metadata)) changed.add('metadata');
+  }
+  return [...changed].sort();
+}

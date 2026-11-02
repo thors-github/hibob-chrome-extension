@@ -47,6 +47,15 @@ export interface AttendanceEntry {
   metadata?: string[];
 }
 
+/** Transient evidence from staging, cancelling and rereading one unchanged day. */
+export interface DraftCheckResult {
+  date: LocalDate;
+  entries: AttendanceEntry[];
+  netMinutes: number;
+  saved: false;
+  unchanged: true;
+}
+
 export interface DaySnapshot {
   date: LocalDate;
   entries: AttendanceEntry[];
@@ -146,11 +155,12 @@ export interface AdapterProgress {
 export type AdapterCommand =
   | { type: 'SCAN_MONTH'; month: string; jobId: string }
   | { type: 'APPLY_DAY'; day: DayPlan; context?: AttendanceContext; authorization: ApplyAuthorization; jobId: string }
+  | { type: 'CHECK_DAY_DRAFT'; day: DayPlan; context?: AttendanceContext; authorization: ApplyAuthorization; jobId: string }
   | { type: 'CANCEL'; jobId: string }
   | { type: 'PING' };
 
 export type AdapterResponse =
-  | { ok: true; snapshot?: MonthSnapshot; day?: DaySnapshot; protocolVersion?: number; extensionVersion?: string; activeJob?: { id: string; kind: 'scan' | 'apply' } }
+  | { ok: true; snapshot?: MonthSnapshot; day?: DaySnapshot; draftCheck?: DraftCheckResult; protocolVersion?: number; extensionVersion?: string; activeJob?: { id: string; kind: 'scan' | 'apply' } }
   | { ok: false; error: string; uncertain?: boolean };
 
 export interface UpdateStatus {
