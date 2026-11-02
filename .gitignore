@@ -1,0 +1,7 @@
+node_modules/
+dist/
+release/
+test-results/
+test-evidence/
+playwright-report/
+.DS_Store
