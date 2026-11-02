@@ -5,8 +5,8 @@ This guide describes the one-time external setup and the release automation ship
 ## Current status
 
 - The public source repository is `thors-github/hibob-chrome-extension`.
-- The current source is **1.4.0-beta.1**, an API evaluation build. Review is bound to the authenticated employee/company and connection generation, with explicit account confirmation for each plan. Native acceptance covers direct session connection, full-month reading, current/future creation, retained-entry recovery and independent readback. Interactive SSO and the temporary-tab fallback were not exercised natively. `docs/release-readiness.json` blocks a stable 1.4.0 release and every Store submission while the unsupported internal contract and unverified overwrite/authentication paths remain.
-- The first push to `main` may create the explicitly configured **v1.4.0-beta.1** prerelease after tests pass. This bootstrap is prerelease-only, targets that exact tested commit, and does nothing if the tag already exists. Future normal releases use version tags on commits contained in `main`.
+- The current source is **1.4.1-beta.1**, an API evaluation build. Review is bound to the authenticated employee/company and connection generation, with explicit account confirmation for each plan. Earlier 1.4.0 native acceptance covered direct session connection, full-month reading, current/future creation, retained-entry recovery and independent readback. The optimized 1.4.1 write sequence requires separate native acceptance; local fixtures verify its request reduction without real attendance writes. Interactive SSO and the temporary-tab fallback were not exercised natively. `docs/release-readiness.json` blocks a stable 1.4.1 release and every Store submission while the unsupported internal contract and unverified overwrite/authentication paths remain.
+- The first push to `main` may create the explicitly configured **v1.4.1-beta.1** prerelease after tests pass. This bootstrap is prerelease-only, targets that exact tested commit, and does nothing if the tag already exists. Future normal releases use version tags on commits contained in `main`.
 - **No Chrome Web Store developer account or published listing exists yet.** Store submission is disabled. The installation site's Store button remains disabled.
 - **GitHub Pages has not yet been enabled.** The Pages workflow builds an artifact and reports the one-time administrator step instead of claiming a live website or failing a known-unconfigured deployment.
 
@@ -39,7 +39,7 @@ For the exact numeric manifest version, update `docs/release-readiness.json` wit
 - an empty `blockers` array;
 - non-empty `validationEvidence` pointing to reviewable acceptance evidence without personal HiBob data.
 
-A stable tag must equal `v` plus `manifest.version`. A prerelease tag must also match `manifest.version_name`, for example `v1.4.0-beta.1`. The current stable gate remains false. Changing a flag is not a substitute for validation.
+A stable tag must equal `v` plus `manifest.version`. A prerelease tag must also match `manifest.version_name`, for example `v1.4.1-beta.1`. The current stable gate remains false. Changing a flag is not a substitute for validation.
 
 ## 3. Create the real unlisted Store item
 
@@ -120,7 +120,7 @@ The workflow serialises all releases. **It must be the exclusive Store package p
 
 ## Failure and recovery
 
-- **Native validation incomplete:** stable release resolution fails before publishing. The current candidate passed native existing-session/direct connection, full-month reading, current/future creation, retained-entry recovery and independent readback. Interactive SSO, the temporary-tab fallback and live overwriting still need their own native evidence. A successful preflight is not a successful save. Store authentication is never attempted for a prerelease.
+- **Native validation incomplete:** stable release resolution fails before publishing. Earlier 1.4.0 passed native existing-session/direct connection, full-month reading, current/future creation, retained-entry recovery and independent readback. The optimized 1.4.1 writer has not been exercised by automatically repeating real attendance writes. Interactive SSO, the temporary-tab fallback and live overwriting still need their own native evidence. A successful preflight is not a successful save. Store authentication is never attempted for a prerelease.
 - **Bootstrap tag already exists:** a new `main` push skips bootstrap publication. If the first publishing job failed with a draft, rerun that failed job from the original workflow run while its artifact is retained; do not recreate or move the tag.
 - **Tests or checksums fail:** no GitHub release or Store submission is attempted. Repair the source and create a new reviewed version/tag where appropriate.
 - **Asset upload fails:** the GitHub release remains a draft. A rerun accepts matching assets and uploads only missing ones. It stops on a different digest rather than overwriting it.

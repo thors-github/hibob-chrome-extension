@@ -46,9 +46,15 @@ export class HiBobApiAdapter {
   private busy = false;
   private verifying = false;
   private generation?: string;
+  /** Successful transport probe identity, usable once inside this opening only. */
+  private openingIdentity?: ApiIdentity;
   constructor(options: Options = {}) {
     this.now = options.now ?? (() => new Date());
-    this.client = options.client ?? new SessionClient({ rules: ATTENDANCE_API_RULES, allowBackgroundTab: true, probe: async (request, signal) => { await this.identity(request, signal); } });
+    this.client = options.client ?? new SessionClient({ rules: ATTENDANCE_API_RULES, allowBackgroundTab: true, probe: async (request, signal) => {
+      // Each transport attempt must establish its own identity, including fallback.
+      this.openingIdentity = undefined;
+      this.openingIdentity = await this.identity(request, signal);
+    } });
   }
   private check(signal?: AbortSignal) { if (signal?.aborted) throw new ApiAdapterError(t('Vorgang vor dem Schreiben abgebrochen.')); }
   private async identity(request: SessionRequest = (r, s) => this.client.request(r, s), signal?: AbortSignal): Promise<ApiIdentity> {
@@ -57,6 +63,24 @@ export class HiBobApiAdapter {
     const company = await request({ method: 'GET', path: '/api/company' }, signal);
     this.check(signal);
     return parseIdentity(user, company);
+  }
+  private async openOperation(signal?: AbortSignal): Promise<SessionConnection> {
+    this.openingIdentity = undefined;
+    try {
+      const connection = await this.client.openOperation(signal);
+      this.check(signal);
+      return connection;
+    } catch (error) {
+      this.openingIdentity = undefined;
+      throw error;
+    }
+  }
+  private async openingOrFreshIdentity(signal?: AbortSignal): Promise<ApiIdentity> {
+    const identity = this.openingIdentity;
+    this.openingIdentity = undefined;
+    this.check(signal);
+    // Injected clients need not invoke a transport probe; never infer identity.
+    return identity ?? this.identity(undefined, signal);
   }
   private async permissions(signal?: AbortSignal): Promise<boolean> {
     const result = await this.client.request({ method: 'GET', path: '/api/permissions/authorizations/domains/timeAttendance' }, signal);
@@ -70,9 +94,9 @@ export class HiBobApiAdapter {
   private async operation<T>(signal: AbortSignal | undefined, action: () => Promise<T>): Promise<T> {
     if (this.busy) throw new ApiAdapterError(t('Ein Vorgang läuft bereits. Bitte zuerst abbrechen.'));
     this.busy = true;
-    try { const connection = await this.client.openOperation(signal); this.transportMode = connection.mode === 'tab' ? 'temporary-tab' : 'direct'; this.check(signal); return await action(); }
+    try { const connection = await this.openOperation(signal); this.transportMode = connection.mode === 'tab' ? 'temporary-tab' : 'direct'; return await action(); }
     catch (error) { throw this.localized(error); }
-    finally { try { await this.client.closeOperation(); } finally { this.busy = false; this.verifying = false; } }
+    finally { this.openingIdentity = undefined; try { await this.client.closeOperation(); } finally { this.openingIdentity = undefined; this.busy = false; this.verifying = false; } }
   }
   async connect(signal?: AbortSignal): Promise<ApiConnection> {
     if (this.busy) throw new ApiAdapterError(t('Ein Vorgang läuft bereits. Bitte zuerst abbrechen.'));
@@ -85,10 +109,10 @@ export class HiBobApiAdapter {
         this.generation = crypto.randomUUID();
         return { status: 'connected', generation: this.generation, employeeId: identity.employeeId, companyId: identity.companyId, employeeLabel: identity.employeeLabel, companyLabel: identity.companyLabel, transport: this.transportMode, capabilities: { read: true, write: editable, overwrite: editable } };
       });
-    } catch (error) { throw this.localized(error); }
+    } catch (error) { this.openingIdentity = undefined; throw this.localized(error); }
   }
   private transportMode: 'direct' | 'temporary-tab' = 'direct';
-  async disconnect() { if (this.busy) throw new ApiAdapterError(t('Ein Vorgang läuft bereits. Bitte zuerst abbrechen.')); await this.client.disconnect(); this.generation = undefined; }
+  async disconnect() { if (this.busy) throw new ApiAdapterError(t('Ein Vorgang läuft bereits. Bitte zuerst abbrechen.')); this.openingIdentity = undefined; await this.client.disconnect(); this.generation = undefined; }
   cancel() { if (!this.verifying) this.client.cancel(); }
   async assertIdle() { if (this.busy) throw new ApiAdapterError(t('Ein Vorgang läuft bereits. Bitte zuerst abbrechen.')); }
   async recover(_connection: ApiConnection, _jobId: string) { await this.assertIdle(); }
@@ -101,7 +125,7 @@ export class HiBobApiAdapter {
   }
   private async read(connection: ApiConnection, month: string, signal?: AbortSignal): Promise<MonthRead> {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new ApiAdapterError(t('Ungültiger Monat.'));
-    const identity = await this.identity(undefined, signal); this.verifyIdentity(connection, identity);
+    const identity = await this.openingOrFreshIdentity(signal); this.verifyIdentity(connection, identity);
     const periods = parsePeriods(await this.client.request({ method: 'GET', path: `${this.path(identity)}/timesheets` }, signal));
     const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5)), 0)).getUTCDate();
     const candidates = periods.filter(p => p.start === `${month}-01` && p.end === `${month}-${last}`);
@@ -170,14 +194,12 @@ export class HiBobApiAdapter {
   }
   async applyDay(connection: ApiConnection, day: DayPlan, context: AttendanceContext | undefined, authorization: ApplyAuthorization, progress?: (p: AdapterProgress) => void, signal?: AbortSignal): Promise<DaySnapshot> {
     return this.operation(signal, async () => {
-      if (!connection.capabilities?.write || day.action === 'overwrite' && !connection.capabilities.overwrite || !await this.permissions(signal)) throw new ApiAdapterError(t('Das Speichern ist über diese HiBob-Verbindung noch nicht freigegeben. Die Vorprüfung bleibt verfügbar.'));
+      if (!connection.capabilities?.write || day.action === 'overwrite' && !connection.capabilities.overwrite) throw new ApiAdapterError(t('Das Speichern ist über diese HiBob-Verbindung noch nicht freigegeben. Die Vorprüfung bleibt verfügbar.'));
       const read = await this.read(connection, day.date.slice(0, 7), signal);
       const current = this.validateDay(connection, day, context, authorization, read, signal);
       const body = this.payload(day, current, read.identity.timezone);
-      // Revalidate account then day immediately before the single save request.
-      this.verifyIdentity(connection, await this.identity(undefined, signal));
-      const latest = await this.read(connection, day.date.slice(0, 7), signal);
-      this.validateDay(connection, day, context, authorization, latest, signal);
+      // The payload comes from this fresh validated day; recheck authorization and
+      // account immediately before the single save request, with no write retry.
       if (!await this.permissions(signal)) throw new ApiAdapterError(t('Das Speichern ist über diese HiBob-Verbindung noch nicht freigegeben. Die Vorprüfung bleibt verfügbar.'));
       this.verifyIdentity(connection, await this.identity(undefined, signal));
       this.check(signal);
@@ -187,7 +209,7 @@ export class HiBobApiAdapter {
         // The previous operation may be cancelled; it must not poison readback.
         this.verifying = true;
         await this.client.closeOperation();
-        await this.client.openOperation();
+        await this.openOperation();
         const after = await this.read(connection, day.date.slice(0, 7));
         const actual = after.days.find(d => d.snapshot.date === day.date)?.snapshot;
         const normalize = (entries: AttendanceEntry[]) => entries.map(e => ({ type: e.type, start: e.start, end: e.end, note: e.note ?? '', reason: e.reason ?? '', metadata: e.metadata ?? [] })).sort((a, b) => a.start.localeCompare(b.start) || a.type.localeCompare(b.type));

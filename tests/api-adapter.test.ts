@@ -172,6 +172,27 @@ describe('API connection, complete month and read-only preflight', () => {
 });
 
 describe('single-request API writes with independent readback', () => {
+  it('falls back to fresh identity reads for injected clients and keeps one full read on either side of the write', async () => {
+    const app = await setup();
+    await apply(app);
+    expect(app.server.calls.map(call => call.request.path)).toEqual([
+      '/api/user', '/api/company',
+      '/api/attendance/employees/employee-fixture/timesheets',
+      '/api/attendance/employees/employee-fixture/timesheets/0/details',
+      '/api/company/views/search?idsOnly=false',
+      '/api/permissions/authorizations/domains/timeAttendance',
+      '/api/user', '/api/company',
+      `/api/attendance/employees/employee-fixture/attendance/entries?forDate=${target}`,
+      '/api/user', '/api/company',
+      '/api/attendance/employees/employee-fixture/timesheets',
+      '/api/attendance/employees/employee-fixture/timesheets/0/details',
+      '/api/company/views/search?idsOnly=false',
+    ]);
+    const lifecycle = app.server.lifecycle;
+    expect(lifecycle.slice(-4)).toEqual(['open', 'close', 'open', 'close']);
+    expect(app.server.mutations).toHaveLength(1);
+  });
+
   it('verifies a native-shaped readback containing matching ownership and exact manual provenance after one write', async () => {
     const app = await setup();
     app.server.accepted = () => app.server.setEntries(target, observedManualReadback(app.server.data().entries));
@@ -277,16 +298,40 @@ describe('single-request API writes with independent readback', () => {
     expect(app.server.mutations).toHaveLength(0);
   });
 
-  it('rechecks day content immediately before the mutation, including changes after the first report', async () => {
+  it('validates fresh prewrite day content rather than reusing the preview report', async () => {
     const app = await setup(); let reports = 0;
-    app.server.beforeRequest = request => { if (reportSearch(request) && ++reports === 2) app.server.data().alerts = [{ warning: true }]; };
-    await expect(apply(app)).rejects.toThrow('geändert'); expect(reports).toBe(2); expect(app.server.mutations).toHaveLength(0);
+    app.server.beforeRequest = request => { if (reportSearch(request)) { reports++; app.server.data().alerts = [{ warning: true }]; } };
+    await expect(apply(app)).rejects.toThrow('geändert'); expect(reports).toBe(1); expect(app.server.mutations).toHaveLength(0);
   });
 
-  it('detects an account switch during the final day recheck before dispatching a mutation', async () => {
+  it('detects an account switch while reading the fresh prewrite report before dispatching a mutation', async () => {
     const app = await setup(); let reports = 0;
-    app.server.beforeRequest = request => { if (reportSearch(request) && ++reports === 2) app.server.user.id = 'different-employee'; };
-    await expect(apply(app)).rejects.toThrow('Konto'); expect(app.server.mutations).toHaveLength(0);
+    app.server.beforeRequest = request => { if (reportSearch(request)) { reports++; app.server.user.id = 'different-employee'; } };
+    await expect(apply(app)).rejects.toThrow('Konto'); expect(reports).toBe(1); expect(app.server.mutations).toHaveLength(0);
+  });
+
+  it('checks final permissions after fresh day validation and detects account changes during that check', async () => {
+    const app = await setup();
+    app.server.beforeRequest = request => {
+      if (request.path === '/api/permissions/authorizations/domains/timeAttendance') app.server.user.id = 'different-employee';
+    };
+    await expect(apply(app)).rejects.toThrow('Konto');
+    expect(app.server.calls.filter(call => reportSearch(call.request))).toHaveLength(1);
+    expect(app.server.mutations).toHaveLength(0);
+  });
+
+  it.each(['policy', 'metadata'] as const)('reads fresh %s after acknowledgement and keeps a changed result uncertain without retry', async change => {
+    const app = await setup();
+    app.server.accepted = () => {
+      if (change === 'policy') app.server.policy.enforceComment = true;
+      else app.server.data().entries[0].projectId = 'new-project';
+    };
+    await expect(apply(app)).rejects.toMatchObject({ uncertain: true });
+    expect(app.server.mutations).toHaveLength(1);
+    const readback = app.server.calls.slice(app.server.calls.findIndex(call => mutation(call.request)) + 1);
+    expect(readback.some(call => call.request.path.endsWith('/timesheets'))).toBe(true);
+    expect(readback.some(call => call.request.path.endsWith('/details'))).toBe(true);
+    expect(readback.some(call => reportSearch(call.request))).toBe(true);
   });
 
   it.each([false, true])('never retries an unknown mutation result, including acceptance=%s before connection loss', async accepted => {
