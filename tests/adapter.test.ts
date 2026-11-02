@@ -16,6 +16,10 @@ function fixture(options: {
   entries?: AttendanceEntry[]; save?: 'ok' | 'timeout' | 'wrong'; absence?: string; manual?: boolean; onInput?: () => void;
   reported?: string; rowHeights?: number[]; monthDelayMs?: number; neverLoad?: boolean; unverifiedContext?: boolean; contextMode?: 'stable-identity' | 'user-confirmed-ui';
   contextReader?: () => AttendanceContext | AttendanceContextEvidence | Promise<AttendanceContext | AttendanceContextEvidence>;
+  rerenderOnEvent?: boolean; reverseTimeControls?: boolean; reorderCards?: boolean; normalizeHours?: boolean;
+  initialPrefill?: AttendanceEntry; addedPrefill?: AttendanceEntry; addDelayMs?: number; transientUnmountMs?: number;
+  addBehavior?: 'none' | 'multiple' | 'wrong-kind' | 'change-existing' | 'duplicate' | 'extras';
+  onEditorEvent?: (name: string) => void; onAdd?: () => void;
   timing?: { settleMs?: number; timeoutMs?: number; pollMs?: number; stabilityMs?: number; readinessTimeoutMs?: number; rowSeekTimeoutMs?: number };
 } = {}) {
   const identity: Extract<AttendanceContext, { mode: 'stable-identity' }> = { mode: 'stable-identity', documentId: crypto.randomUUID(), employeeKey: 'fixture-profile-A', tenantKey: 'fixture-tenant-A' };
@@ -29,6 +33,7 @@ function fixture(options: {
   let saves = 0;
   let opens = 0;
   let deletes = 0;
+  let additions = 0;
   document.body.innerHTML = `<div role="button" aria-haspopup="true">01/02/2026–28/02/2026 (Running)</div>
     <div class="ag-root-wrapper"><div class="ag-pinned-left-cols-container"></div><div class="ag-body-viewport"><div class="ag-center-cols-container"></div></div></div>
     <sidebar id="attendance-right-panel" aria-hidden="${options.manual ? 'false' : 'true'}"></sidebar>`;
@@ -76,48 +81,76 @@ function fixture(options: {
       <app-attendance-entries-panel><button data-icon-before="clock-add">Add work</button><button data-icon-before="break-add">Add break</button><div class="forms"></div></app-attendance-entries-panel>
       <button>Cancel</button><button>Save</button>`;
     const forms = panel.querySelector('.forms')!;
-    staged.forEach((entry, index) => {
+    const indexes = staged.map((_, index) => index);
+    if (options.reorderCards) indexes.reverse();
+    indexes.forEach(index => {
+      const entry = staged[index];
       const element = document.createElement('div');
       element.className = `entry-panel${!entry.start && !entry.end ? ' new-entry-border' : ''}`;
-      element.innerHTML = `<div class="blv-label">${entry.type === 'work' ? 'Work' : 'Break'}</div>
-        <b-timepicker data-time-format="24h"><input type="tel" class="btmpckr-input-hours"><input type="tel" class="btmpckr-input-minutes"></b-timepicker>
-        <b-timepicker data-time-format="24h"><input type="tel" class="btmpckr-input-hours"><input type="tel" class="btmpckr-input-minutes"></b-timepicker>
-        <details><summary>Add a reason or note</summary><div class="reason-code-list"><span class="trigger-input">${entry.reason ?? ''}</span></div><textarea></textarea></details><button data-icon-before="delete">Delete</button>`;
+      const endpoints = options.reverseTimeControls ? ['end', 'start'] : ['start', 'end'];
+      element.innerHTML = `<div class="blv-label">${entry.type === 'work' ? 'Work' : 'Break'}</div>` + endpoints.map(endpoint => {
+        const parts = options.reverseTimeControls ? ['minutes', 'hours'] : ['hours', 'minutes'];
+        return `<div data-endpoint="${endpoint}"><label>${endpoint === 'start' ? 'Clock in:' : 'Clock out:'}</label><b-timepicker data-time-format="24h">${parts.map(part => `<input type="tel" class="btmpckr-input-${part}">`).join('')}</b-timepicker></div>`;
+      }).join('') + `<details><summary>Add a reason or note</summary><div class="reason-code-list"><span class="trigger-input">${entry.reason ?? ''}</span></div><textarea></textarea></details>${(entry.metadata ?? []).map(value => `<span class="project-name">${value}</span>`).join('')}<button data-icon-before="delete">Delete</button>`;
       forms.append(element);
-      const fields = [...element.querySelectorAll('input')];
+      const fields = ['start', 'end'].flatMap(endpoint => ['hours', 'minutes'].map(part => element.querySelector<HTMLInputElement>(`[data-endpoint="${endpoint}"] .btmpckr-input-${part}`)!));
       const values = [...(entry.start ? entry.start.split(':') : ['', '']), ...(entry.end ? entry.end.split(':') : ['', ''])];
+      const update = () => {
+        staged[index].start = fields[0].value || fields[1].value ? `${fields[0].value}:${fields[1].value}` : '';
+        staged[index].end = fields[2].value || fields[3].value ? `${fields[2].value}:${fields[3].value}` : '';
+      };
       fields.forEach((input, i) => {
-        input.value = values[i];
-        input.addEventListener('input', () => {
-          staged[index].start = `${fields[0].value}:${fields[1].value}`;
-          staged[index].end = `${fields[2].value}:${fields[3].value}`;
-          options.onInput?.();
+        input.value = options.normalizeHours && i % 2 === 0 && values[i] ? String(+values[i]) : values[i];
+        for (const name of ['input', 'change', 'blur']) input.addEventListener(name, () => {
+          update();
+          if (options.rerenderOnEvent !== false) {
+            if (options.transientUnmountMs) { forms.innerHTML = ''; setTimeout(editor, options.transientUnmountMs); } else editor();
+          }
+          if (name === 'input') options.onInput?.();
+          options.onEditorEvent?.(name);
         });
       });
-      element.querySelector('textarea')!.value = entry.note ?? '';
-      element.querySelector('textarea')!.addEventListener('input', event => { staged[index].note = (event.target as HTMLTextAreaElement).value; });
-      element.querySelector('[data-icon-before="delete"]')!.addEventListener('click', () => { if (staged[index].start || staged[index].end) deletes++; staged.splice(index, 1); editor(); });
+      const note = element.querySelector('textarea')!;
+      note.value = entry.note ?? '';
+      for (const name of ['input', 'change', 'blur']) note.addEventListener(name, () => {
+        staged[index].note = note.value;
+        if (options.rerenderOnEvent !== false) editor();
+        options.onEditorEvent?.(name);
+      });
+      element.querySelector('[data-icon-before="delete"]')!.addEventListener('click', () => { if (staged[index].start || staged[index].end) deletes++; staged.splice(index, 1); editor(); options.onEditorEvent?.('delete'); });
     });
-    panel.querySelector('[data-icon-before="clock-add"]')!.addEventListener('click', () => { staged.push({ type: 'work', start: '', end: '' }); appendEntry('work'); });
-    panel.querySelector('[data-icon-before="break-add"]')!.addEventListener('click', () => { staged.push({ type: 'break', start: '', end: '' }); appendEntry('break'); });
+    panel.querySelector('[data-icon-before="clock-add"]')!.addEventListener('click', () => appendEntry('work'));
+    panel.querySelector('[data-icon-before="break-add"]')!.addEventListener('click', () => appendEntry('break'));
     [...panel.querySelectorAll('button')].find(b => b.textContent === 'Cancel')!.addEventListener('click', () => panel.setAttribute('aria-hidden', 'true'));
     [...panel.querySelectorAll('button')].find(b => b.textContent === 'Save')!.addEventListener('click', () => {
       saves++;
       if (options.save === 'timeout') return;
-      persisted = options.save === 'wrong' ? [work('09:00', '17:00')] : structuredClone(staged);
+      persisted = options.save === 'wrong' ? [work('09:00', '17:00')] : structuredClone(staged).map(entry => ({ ...entry, start: entry.start.split(':').map(value => value.padStart(2, '0')).join(':'), end: entry.end.split(':').map(value => value.padStart(2, '0')).join(':') }));
       panel.setAttribute('aria-hidden', 'true');
       renderRows();
     });
   }
 
   function appendEntry(type: 'work' | 'break') {
-    // Native Angular preserves existing nodes when appending a new entry.
-    const old = [...panel.querySelectorAll('.entry-panel')];
-    const holders = old.map(node => ({ node, holder: node.parentElement! }));
-    editor();
-    const current = [...panel.querySelectorAll('.entry-panel')];
-    holders.forEach(({ node }, index) => current[index].replaceWith(node));
-    void type;
+    additions++;
+    options.onAdd?.();
+    if (options.addBehavior === 'none') return;
+    const append = () => {
+      if (panel.getAttribute('aria-hidden') === 'true') return;
+      let added = options.addedPrefill ? { ...options.addedPrefill, type } : { type, start: '', end: '' };
+      if (options.addBehavior === 'wrong-kind') added.type = type === 'work' ? 'break' : 'work';
+      if (options.addBehavior === 'duplicate') added = structuredClone(staged[0]);
+      if (options.addBehavior === 'extras') added = { ...added, note: 'Unexpected native note' } as AttendanceEntry;
+      staged.push(added);
+      if (options.addBehavior === 'multiple') staged.push({ type, start: '', end: '' });
+      if (options.addBehavior === 'change-existing') staged[0].note = 'Unexpected old-card mutation';
+      // Angular may recreate every existing card and its input descendants.
+      editor();
+    };
+    if (options.addDelayMs) {
+      if (options.transientUnmountMs) panel.querySelector('.forms')!.innerHTML = '';
+      setTimeout(append, options.addDelayMs);
+    } else append();
   }
   function open(day: number) {
     if (day !== 2) throw new Error('Nonworking days must never be opened');
@@ -126,7 +159,7 @@ function fixture(options: {
     panel.setAttribute('aria-hidden', 'false');
     panel.innerHTML = `<button id="rpp-close-btn">Close</button><div class="sticky-header"><p class="b-display-3">Mon, 02/02/2026</p></div><app-attendance-entries-panel><button>Add entry</button><div>${persisted.map(entry => `${entry.type} ${entry.start}-${entry.end}`).join('; ')}</div></app-attendance-entries-panel>`;
     panel.querySelector('#rpp-close-btn')!.addEventListener('click', () => panel.setAttribute('aria-hidden', 'true'));
-    panel.querySelector('app-attendance-entries-panel button')!.addEventListener('click', () => { staged.push({ type: 'work', start: '', end: '' }); editor(); });
+    panel.querySelector('app-attendance-entries-panel button')!.addEventListener('click', () => { staged.push(structuredClone((!persisted.length && options.initialPrefill) || { type: 'work', start: '', end: '' })); editor(); });
   }
   function replaceViewport() {
     const next = document.createElement('div');
@@ -154,7 +187,7 @@ function fixture(options: {
     });
   }
   renderRows();
-  return { replaceViewport, get viewport() { return viewport; }, identity, reviewedContext: undefined as AttendanceContext | undefined, reviewedAuthorization: undefined as ApplyAuthorization | undefined, adapter: new HiBobDomAdapter({ document, location: () => 'https://app.hibob.com/attendance/my-attendance', settleMs: 1, timeoutMs: 60, pollMs: 1, stabilityMs: 1, readinessTimeoutMs: 3000, rowSeekTimeoutMs: 1000, documentId: identity.documentId, readContext, ...options.timing }), saves: () => saves, opens: () => opens, deletes: () => deletes, entries: () => persisted, panel };
+  return { replaceViewport, get viewport() { return viewport; }, identity, reviewedContext: undefined as AttendanceContext | undefined, reviewedAuthorization: undefined as ApplyAuthorization | undefined, adapter: new HiBobDomAdapter({ document, location: () => 'https://app.hibob.com/attendance/my-attendance', settleMs: 1, timeoutMs: 60, pollMs: 1, stabilityMs: 1, readinessTimeoutMs: 3000, rowSeekTimeoutMs: 1000, documentId: identity.documentId, readContext, ...options.timing }), saves: () => saves, opens: () => opens, deletes: () => deletes, additions: () => additions, entries: () => persisted, panel };
 }
 
 function toMinutes(time: string) { return +time.slice(0, 2) * 60 + +time.slice(3); }
@@ -589,7 +622,7 @@ describe('explicit approval of one visible UI context', () => {
 });
 
 describe('final draft integrity after asynchronous context hashing', () => {
-  it.each(['time', 'note', 'validation', 'disabled-save'] as const)('rejects %s changed while the final context check awaits', async change => {
+  it.each(['time', 'note', 'validation', 'disabled-save', 'empty-card'] as const)('rejects %s changed while the final context check awaits', async change => {
     let reached!: () => void;
     let release!: () => void;
     const held = new Promise<void>(resolve => { reached = resolve; });
@@ -612,14 +645,131 @@ describe('final draft integrity after asynchronous context hashing', () => {
       input.dispatchEvent(new Event('input', { bubbles: true }));
     } else if (change === 'note') {
       app.panel.querySelector<HTMLTextAreaElement>('textarea')!.value = 'Manual note added while comparing account markers';
+    } else if (change === 'empty-card') {
+      app.panel.querySelector<HTMLButtonElement>('[data-icon-before="clock-add"]')!.click();
     } else if (change === 'validation') {
       const error = document.createElement('div');
       error.setAttribute('role', 'alert'); error.textContent = 'Late validation error';
       app.panel.append(error);
     } else [...app.panel.querySelectorAll('button')].find(button => button.textContent === 'Save')!.disabled = true;
     release();
-    await expect(running).rejects.toThrow(change === 'validation' ? 'Late validation error' : change === 'disabled-save' ? 'nicht verfügbar' : 'nicht mit der Vorschau');
+    await expect(running).rejects.toThrow(change === 'validation' ? 'Late validation error' : change === 'disabled-save' ? 'nicht verfügbar' : 'geprüften Bearbeitungsstand');
     expect(app.saves()).toBe(0);
     expect(app.entries()).toEqual([]);
+  });
+});
+
+
+describe('semantic draft inventory across native rerenders', () => {
+  it('reacquires all cards and logical fields after every input/change/blur and Add', async () => {
+    const app = fixture({ reverseTimeControls: true, reorderCards: true, normalizeHours: true });
+    const plan = await planFor(app);
+    await applyPlan(app, plan);
+    expect(app.entries()).toEqual(planned);
+    expect(app.saves()).toBe(1);
+    expect(app.additions()).toBe(2); // Initial Work is reused; only Break and the second Work are added.
+  });
+  it('reuses a valid prefilled initial Work and overwrites native time prefills', async () => {
+    const app = fixture({ initialPrefill: work('07:45', '11:45'), addedPrefill: work('09:10', '17:10'), reverseTimeControls: true });
+    const plan = await planFor(app);
+    await applyPlan(app, plan);
+    expect(app.entries()).toEqual(planned);
+    expect(app.additions()).toBe(2);
+    expect(app.saves()).toBe(1);
+  });
+  it('waits for a delayed, completely rerendered additional card without retrying Add', async () => {
+    const app = fixture({ addDelayMs: 10 });
+    const plan = await planFor(app);
+    await applyPlan(app, plan);
+    expect(app.entries()).toEqual(planned);
+    expect(app.additions()).toBe(2);
+    expect(app.saves()).toBe(1);
+  });
+  it.each(['none', 'multiple', 'wrong-kind', 'change-existing', 'duplicate', 'extras'] as const)('stops for %s Add results without saving or clicking Add again', async addBehavior => {
+    const app = fixture({ addBehavior });
+    const plan = await planFor(app);
+    await expect(applyPlan(app, plan)).rejects.toThrow('2026-02-02');
+    expect(app.saves()).toBe(0);
+    expect(app.entries()).toEqual([]);
+    expect(app.additions()).toBe(1);
+    expect(app.panel.getAttribute('aria-hidden')).toBe('true');
+  });
+  it('detects a duplicate semantic target even if the requested type matches', async () => {
+    const app = fixture({ entries: [work('08:00', '12:00'), work('08:00', '12:00')] });
+    const plan = await planFor(app);
+    await expect(applyPlan(app, plan)).rejects.toThrow('nicht vollständig bearbeitbar');
+    expect(app.saves()).toBe(0);
+    expect(app.additions()).toBe(0);
+    expect(app.entries()).toEqual([work('08:00', '12:00'), work('08:00', '12:00')]);
+  });
+  it.each(['input', 'change', 'blur', 'delete', 'add'] as const)('honours cancellation immediately after the native %s event', async name => {
+    const controller = new AbortController();
+    const app = fixture({
+      ...(name === 'delete' ? { entries: [work()] } : {}),
+      onEditorEvent: event => { if (event === name) controller.abort(); },
+      onAdd: () => { if (name === 'add') controller.abort(); },
+    });
+    const plan = await planFor(app);
+    await expect(applyPlan(app, plan, undefined, controller.signal)).rejects.toThrow();
+    expect(app.saves()).toBe(0);
+    expect(app.entries()).toEqual(name === 'delete' ? [work()] : []);
+    expect(app.panel.getAttribute('aria-hidden')).toBe('true');
+  });
+});
+
+
+describe('unapproved or ambiguous native prefills', () => {
+  it('does not silently clear an unexpected note on the initial draft', async () => {
+    const app = fixture({ initialPrefill: { ...work('07:45', '11:45'), note: 'Unexpected default note' } });
+    await expect(applyPlan(app, await planFor(app))).rejects.toThrow('Zusatzdaten');
+    expect(app.saves()).toBe(0);
+    expect(app.additions()).toBe(0);
+  });
+  it('rejects a new Work card identical to an already completed Work card', async () => {
+    const app = fixture({ addedPrefill: work('08:00', '12:00') });
+    await expect(applyPlan(app, await planFor(app))).rejects.toThrow('eindeutig');
+    expect(app.saves()).toBe(0);
+    expect(app.entries()).toEqual([]);
+    expect(app.additions()).toBe(2);
+  });
+  it('rejects hour/minute controls sharing the same input node', async () => {
+    const app = fixture();
+    const plan = await planFor(app);
+    await expect(applyPlan(app, plan, progress => {
+      if (progress.phase === 'apply' && progress.completed === 0) {
+        const fields = app.panel.querySelectorAll<HTMLInputElement>('b-timepicker input');
+        fields[0].classList.add('btmpckr-input-minutes');
+        fields[1].classList.remove('btmpckr-input-minutes');
+      }
+    })).rejects.toThrow('Zeitfelder');
+    expect(app.saves()).toBe(0);
+    expect(app.additions()).toBe(0);
+  });
+});
+
+
+describe('note staging cancellation after a native rerender', () => {
+  it('does not dispatch further events or save after clearing a confirmed old note is cancelled', async () => {
+    const controller = new AbortController();
+    const original = [{ ...planned[0], note: 'Reviewed old note' }];
+    const events: string[] = [];
+    const app = fixture({ entries: original, onEditorEvent: name => { events.push(name); if (name === 'input') controller.abort(); } });
+    const plan = await planFor(app);
+    await expect(applyPlan(app, plan, undefined, controller.signal)).rejects.toThrow();
+    expect(events).toEqual(['delete', 'input']);
+    expect(app.saves()).toBe(0);
+    expect(app.entries()).toEqual(original);
+    expect(app.panel.getAttribute('aria-hidden')).toBe('true');
+  });
+});
+
+
+describe('transient native editor mounts', () => {
+  it('waits through empty card mounts on Add and each native time event without reusing detached controls', async () => {
+    const app = fixture({ transientUnmountMs: 3, addDelayMs: 5, reverseTimeControls: true, reorderCards: true });
+    await applyPlan(app, await planFor(app));
+    expect(app.entries()).toEqual(planned);
+    expect(app.saves()).toBe(1);
+    expect(app.additions()).toBe(2);
   });
 });

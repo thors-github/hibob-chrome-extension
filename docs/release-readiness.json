@@ -1,14 +1,16 @@
 {
   "schemaVersion": 1,
-  "version": "1.2.1",
+  "version": "1.2.2",
   "stableReleaseReady": false,
-  "bootstrapTag": "v1.2.1-beta.1",
+  "bootstrapTag": "v1.2.2-beta.1",
   "blockers": [
     "Manual account confirmation is a prerelease assurance mode; live attendance saving and future-day acceptance have not been verified."
   ],
   "validationEvidence": [
-    "npm run check: 265 unit/DOM tests, 15 isolated Chromium tests, TypeScript and 331 translated messages passed.",
-    "Native Chrome 1.2.1-beta.1: November 2026 read all 30 dates; 21 workdays / 168 net hours / nine weekend exclusions; manual account confirmation dialog checked without starting a booking.",
-    "Native dialog starts unchecked, enables Start booking only after consent, and resets consent after closing and reopening. No live attendance was saved."
+    "npm run check: 286 unit/DOM tests, 15 isolated Chromium tests, TypeScript and 338 translated messages passed.",
+    "Local adapter fixtures recreate cards on Add and input/change/blur, reverse controls and reorder cards; ambiguous or changed drafts stop before Save.",
+    "Native draft-only UI check on 02 November 2026: Work08:00\u201312:00, Break12:00\u201312:30 and Work12:30\u201316:30 showed valid 4h / 30m / 4h segments. Cancel and reread preserved the original empty 0h day. No Save or Submit was clicked.",
+    "Native Add Break regenerated earlier Work component identifiers, confirming the unsupported DOM identity assumption. Live automated saving remains unverified.",
+    "Installed native Chrome 1.2.2-beta.1 retained preferences and read November 2026 into 21 workdays / 168 net hours / nine weekend exclusions. The live extension booking queue was not started."
   ]
 }

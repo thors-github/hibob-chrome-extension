@@ -3,6 +3,7 @@ import { netMinutes } from '../shared/entries';
 import { assertApplyAuthorization, contextFingerprint, isReviewableContext } from '../shared/context';
 import type { AdapterProgress, ApplyAuthorization, AttendanceContext, AttendanceEntry, DayPlan, DaySnapshot, MonthSnapshot } from '../shared/types';
 import type { AttendanceContextEvidence } from './context-reader';
+import { editorKey, fieldValue, inventoryKey, sameInventory, subtractInventory, type EditorValue } from './editor-inventory';
 
 const PREFIX = 'time_attendance_employee_timesheet.';
 const PANEL = '#attendance-right-panel';
@@ -13,6 +14,8 @@ class GridChangedError extends Error {}
 export class AdapterError extends Error {
   constructor(message: string, public readonly uncertain = false) { super(message); this.name = 'AdapterError'; }
 }
+class EditorShapeError extends AdapterError {}
+class DraftConflictError extends AdapterError {}
 
 export function isAttendanceLocation(value: string): boolean {
   try {
@@ -60,6 +63,16 @@ interface AdapterOptions {
   stabilityMs?: number;
   documentId?: string;
   readContext?: () => AttendanceContextEvidence | AttendanceContext | Promise<AttendanceContextEvidence | AttendanceContext>;
+}
+
+interface EditorCard { value: EditorValue; element: HTMLElement }
+interface EditTarget {
+  kind: 'work' | 'break';
+  value: EditorValue;
+  protectedValues: EditorValue[];
+  note: string;
+  reason: string;
+  metadata: string[];
 }
 
 export class HiBobDomAdapter {
@@ -415,12 +428,17 @@ export class HiBobDomAdapter {
   private hasSave(panel: Element) { return [...panel.querySelectorAll('button')].some(button => text(button) === 'Save'); }
 
   private async enterEdit(panel: Element, signal?: AbortSignal) {
-    this.assertOwnedPanel();
-    if (this.hasSave(panel)) return;
-    const add = panel.querySelector<HTMLElement>('button[data-icon-before="clock-add"]') ?? this.button(panel, ['Add entry']);
-    this.click(add);
-    await this.waitFor(() => this.hasSave(panel) && panel.querySelector('.entry-panel input[type="tel"]'), t('Der native HiBob-Bearbeitungsmodus konnte nicht geöffnet werden.'), signal);
+    this.guardEdit(signal);
+    if (!this.hasSave(panel)) {
+      const add = panel.querySelector<HTMLElement>('button[data-icon-before="clock-add"]') ?? this.button(panel, ['Add entry']);
+      this.click(add);
+    }
+    await this.waitFor(() => {
+      if (!this.hasSave(panel)) return false;
+      try { return this.readEditorCards(panel).length > 0; } catch { return false; }
+    }, t('Der native HiBob-Bearbeitungsmodus konnte nicht geöffnet werden.'), signal);
     await this.tick(signal);
+    this.readEditorCards(panel);
   }
 
   private async inspectDay(day: GridDay, panel: Element, signal?: AbortSignal): Promise<DaySnapshot> {
@@ -438,10 +456,128 @@ export class HiBobDomAdapter {
     return `${h.padStart(2, '0')}:${m.padStart(2, '0')}`;
   }
 
+  /** Native endpoints are labelled; generated IDs and descendant order are not stable. */
+  private editorFields(entry: Element): HTMLInputElement[] {
+    const pickers = [...entry.querySelectorAll('b-timepicker')];
+    if (pickers.length !== 2 || entry.querySelectorAll('input[type="tel"]').length !== 4 || entry.querySelector('[data-time-format="12h"]')) throw new EditorShapeError(t('HiBob-Zeitfelder haben sich geändert.'));
+    const endpoints = new Map<string, Element>();
+    for (const picker of pickers) {
+      const parent = picker.parentElement;
+      const label = picker.querySelector('label') ?? (parent?.querySelectorAll('b-timepicker').length === 1 ? parent.querySelector('label') : null);
+      const raw = text(label) || (parent && parent !== entry && parent.querySelectorAll('b-timepicker').length === 1 ? text(parent) : '');
+      const name = raw.toLowerCase().replace(/[:*]/g, '').trim();
+      if (!['clock in', 'clock out'].includes(name) || endpoints.has(name)) throw new EditorShapeError(t('HiBob-Zeitfelder haben sich geändert.'));
+      endpoints.set(name, picker);
+    }
+    return ['clock in', 'clock out'].flatMap(name => {
+      const picker = endpoints.get(name)!;
+      const hours = [...picker.querySelectorAll<HTMLInputElement>('input[type="tel"].btmpckr-input-hours')];
+      const minutes = [...picker.querySelectorAll<HTMLInputElement>('input[type="tel"].btmpckr-input-minutes')];
+      if (hours.length !== 1 || minutes.length !== 1 || hours[0] === minutes[0] || picker.querySelectorAll('input[type="tel"]').length !== 2) throw new EditorShapeError(t('HiBob-Zeitfelder haben sich geändert.'));
+      return [hours[0], minutes[0]];
+    });
+  }
+
+  private readEditorCards(panel: Element): EditorCard[] {
+    this.assertOwnedPanel();
+    return [...panel.querySelectorAll<HTMLElement>('.entry-panel')].map(element => ({
+      element,
+      value: {
+        kind: text(element.querySelector('.blv-label')).toLowerCase(),
+        fields: this.editorFields(element).map(input => fieldValue(input.value)) as EditorValue['fields'],
+        note: element.querySelector<HTMLTextAreaElement>('textarea')?.value ?? '',
+        reason: text(element.querySelector('.reason-code-list .trigger-input')),
+        metadata: [...element.querySelectorAll<HTMLElement>('[data-project], .project-name, .task-name')].map(text).filter(Boolean),
+      },
+    }));
+  }
+
+  private draftError(kind: 'work' | 'break', reason: string): AdapterError {
+    return new DraftConflictError(t('HiBob-Tagesentwurf {date} ({type}): {reason}. Es wurde nicht gespeichert.', { date: this.ownedDate ?? '?', type: kind === 'work' ? t('Arbeit') : t('Pause'), reason }));
+  }
+
+  private guardEdit(signal?: AbortSignal) { this.assertPage(signal); this.assertOwnedPanel(); }
+
+  private target(panel: Element, value: EditorValue, protectedValues: EditorValue[]): EditTarget {
+    if (value.kind !== 'work' && value.kind !== 'break') throw new AdapterError(t('Unbekannter HiBob-Eintragstyp.'));
+    const target: EditTarget = { kind: value.kind, value, protectedValues, note: value.note, reason: value.reason, metadata: [...value.metadata] };
+    this.resolveTarget(panel, target);
+    return target;
+  }
+
+  /** The target is the sole semantic remainder after protecting every other card. */
+  private resolveTarget(panel: Element, target: EditTarget): EditorCard {
+    const cards = this.readEditorCards(panel);
+    if (cards.length < target.protectedValues.length + 1) throw new EditorShapeError(t('HiBob-Zeitfelder haben sich geändert.'));
+    const remainder = subtractInventory(cards.map(card => card.value), target.protectedValues);
+    if (!remainder || remainder.length !== 1) throw this.draftError(target.kind, t('Vorhandene Einträge wurden unerwartet verändert'));
+    const value = remainder[0];
+    if (editorKey(value) !== editorKey(target.value)) throw this.draftError(target.kind, t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
+    const candidates = cards.filter(card => editorKey(card.value) === editorKey(value));
+    if (candidates.length !== 1) throw this.draftError(target.kind, t('Der neue Eintrag ist nicht eindeutig zuordenbar'));
+    target.value = value;
+    return candidates[0];
+  }
+
+  private async refreshTarget(panel: Element, target: EditTarget, signal?: AbortSignal): Promise<void> {
+    const deadline = Date.now() + this.timeout;
+    while (Date.now() < deadline) {
+      this.guardEdit(signal);
+      try { this.resolveTarget(panel, target); return; }
+      catch (error) {
+        // A renderer may temporarily unmount its controls. Complete inventories
+        // that alter protected values are genuine conflicts, never retried.
+        if (!(error instanceof EditorShapeError)) throw error;
+      }
+      await sleep(this.poll);
+      this.guardEdit(signal);
+    }
+    throw this.draftError(target.kind, t('Die Eintragsfelder sind nicht vollständig lesbar'));
+  }
+
+  private async dispatchTargetEvent(panel: Element, target: EditTarget, field: number | 'note', name: 'input' | 'change' | 'blur', signal?: AbortSignal) {
+    this.guardEdit(signal);
+    const card = this.resolveTarget(panel, target);
+    const control = field === 'note' ? card.element.querySelector<HTMLTextAreaElement>('textarea') : this.editorFields(card.element)[field];
+    if (!control || control.disabled || control.readOnly) throw new AdapterError(t('HiBob-Zeitfeld ist nicht bearbeitbar.'));
+    const win = this.doc.defaultView!;
+    control.dispatchEvent(name === 'blur' ? new win.FocusEvent('blur', { bubbles: true }) : new win.Event(name, { bubbles: true }));
+    await this.refreshTarget(panel, target, signal);
+    this.guardEdit(signal);
+  }
+
+  private async fillTarget(panel: Element, target: EditTarget, proposed: AttendanceEntry, signal?: AbortSignal) {
+    const values = [...proposed.start.split(':'), ...proposed.end.split(':')].map(fieldValue);
+    for (let index = 0; index < 4; index++) {
+      this.guardEdit(signal);
+      const card = this.resolveTarget(panel, target);
+      const input = this.editorFields(card.element)[index];
+      if (fieldValue(input.value) !== values[index]) {
+        if (!input.isConnected || input.disabled || input.readOnly) throw new AdapterError(t('HiBob-Zeitfeld ist nicht bearbeitbar.'));
+        Object.getOwnPropertyDescriptor(this.doc.defaultView!.HTMLInputElement.prototype, 'value')!.set!.call(input, values[index]);
+        target.value = { ...target.value, fields: target.value.fields.map((value, field) => field === index ? values[index] : value) as EditorValue['fields'] };
+        for (const event of ['input', 'change', 'blur'] as const) await this.dispatchTargetEvent(panel, target, index, event, signal);
+        await this.tick(signal);
+        await this.refreshTarget(panel, target, signal);
+      }
+    }
+    this.guardEdit(signal);
+    const card = this.resolveTarget(panel, target);
+    const note = card.element.querySelector<HTMLTextAreaElement>('textarea');
+    if (note?.value) {
+      if (note.disabled || note.readOnly) throw new AdapterError(t('Eine bestehende Notiz kann nicht sicher entfernt werden.'));
+      target.note = '';
+      Object.getOwnPropertyDescriptor(this.doc.defaultView!.HTMLTextAreaElement.prototype, 'value')!.set!.call(note, '');
+      target.value = { ...target.value, note: '' };
+      for (const event of ['input', 'change', 'blur'] as const) await this.dispatchTargetEvent(panel, target, 'note', event, signal);
+      await this.tick(signal);
+    }
+    await this.refreshTarget(panel, target, signal);
+  }
+
   readPanelEntries(panel: Element): AttendanceEntry[] {
     return [...panel.querySelectorAll<HTMLElement>('.entry-panel')].flatMap(entry => {
-      const inputs = [...entry.querySelectorAll<HTMLInputElement>('input[type="tel"]')];
-      if (inputs.length !== 4 || entry.querySelector('[data-time-format="12h"]')) throw new AdapterError(t('HiBob nutzt ein nicht unterstütztes Zeitformat. Erwartet wird 24-Stunden-Start/Ende.'));
+      const inputs = this.editorFields(entry);
       const start = this.readTime(inputs, 0);
       const end = this.readTime(inputs, 2);
       if (!start && !end && entry.classList.contains('new-entry-border')) return [];
@@ -530,40 +666,55 @@ export class HiBobDomAdapter {
     return { month, employeeLabel, context, periodLabel, scannedAt: new Date().toISOString(), source: 'hibob', days: result };
   }
 
-  private setInput(input: HTMLInputElement, value: string) {
-    this.assertPage();
-    this.assertOwnedPanel();
-    if (!input.isConnected || input.disabled || input.readOnly) throw new AdapterError(t('HiBob-Zeitfeld ist nicht bearbeitbar.'));
-    const win = this.doc.defaultView!;
-    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value')!.set!.call(input, value);
-    input.dispatchEvent(new win.Event('input', { bubbles: true }));
-    input.dispatchEvent(new win.Event('change', { bubbles: true }));
-    input.dispatchEvent(new win.FocusEvent('blur', { bubbles: true }));
-  }
-
-  private clearNote(entry: Element) {
-    this.assertOwnedPanel();
-    const note = entry.querySelector<HTMLTextAreaElement>('textarea');
-    if (!note?.value) return;
-    if (note.disabled || note.readOnly) throw new AdapterError(t('Eine bestehende Notiz kann nicht sicher entfernt werden.'));
-    const win = this.doc.defaultView!;
-    Object.getOwnPropertyDescriptor(win.HTMLTextAreaElement.prototype, 'value')!.set!.call(note, '');
-    note.dispatchEvent(new win.Event('input', { bubbles: true }));
-    note.dispatchEvent(new win.Event('change', { bubbles: true }));
-    note.dispatchEvent(new win.FocusEvent('blur', { bubbles: true }));
-  }
-
-  private async addEntry(panel: Element, type: 'work' | 'break', signal?: AbortSignal): Promise<HTMLElement> {
-    this.assertOwnedPanel();
-    const before = new Set(panel.querySelectorAll<HTMLElement>('.entry-panel'));
+  private async addEntry(panel: Element, type: 'work' | 'break', expected: EditorValue[], signal?: AbortSignal): Promise<EditorValue> {
+    this.guardEdit(signal);
+    if (!sameInventory(this.readEditorCards(panel).map(card => card.value), expected)) throw this.draftError(type, t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
     let control = panel.querySelector<HTMLElement>(`button[data-icon-before="${type === 'work' ? 'clock-add' : 'break-add'}"]`);
-    if (!control && type === 'work' && !before.size) control = this.button(panel, ['Add entry']);
+    if (!control && type === 'work' && !expected.length) control = this.button(panel, ['Add entry']);
     if (!control) throw new AdapterError(type === 'work' ? t('HiBob bietet das Hinzufügen eines Arbeitseintrags nicht an.') : t('HiBob bietet das Hinzufügen eines Pauseneintrags nicht an.'));
     this.click(control);
-    return await this.waitFor(() => {
-      const added = [...panel.querySelectorAll<HTMLElement>('.entry-panel')].filter(entry => !before.has(entry));
-      return added.length === 1 ? added[0] : null;
-    }, t('HiBob hat keinen eindeutigen neuen Eintrag angelegt.'), signal);
+    const deadline = Date.now() + this.timeout;
+    let previous = '';
+    let stableSince = 0;
+    while (Date.now() < deadline) {
+      this.guardEdit(signal);
+      try {
+        const values = this.readEditorCards(panel).map(card => card.value);
+        const signature = inventoryKey(values);
+        if (signature !== previous) { previous = signature; stableSince = Date.now(); }
+        else if (values.length > expected.length && Date.now() - stableSince >= this.settle) {
+          if (values.length !== expected.length + 1) throw this.draftError(type, t('HiBob hat keine einzelne zusätzliche Eintragszeile bereitgestellt'));
+          const added = subtractInventory(values, expected);
+          if (!added || added.length !== 1) throw this.draftError(type, t('Vorhandene Einträge wurden unerwartet verändert'));
+          const value = added[0];
+          if (value.kind !== type) throw this.draftError(type, t('HiBob hat einen anderen Eintragstyp hinzugefügt'));
+          if (value.note || value.reason || value.metadata.length || value.fields.some((field, index) => field && (!/^\d{2}$/.test(field) || +field > (index % 2 ? 59 : 23)))) throw this.draftError(type, t('Der neue Eintrag enthält nicht unterstützte Zusatzdaten'));
+          if (values.filter(candidate => editorKey(candidate) === editorKey(value)).length !== 1) throw this.draftError(type, t('Der neue Eintrag ist nicht eindeutig zuordenbar'));
+          return value;
+        }
+      } catch (error) { if (!(error instanceof EditorShapeError)) throw error; }
+      await sleep(this.poll);
+      this.guardEdit(signal);
+    }
+    throw this.draftError(type, t('HiBob hat keine einzelne zusätzliche Eintragszeile bereitgestellt'));
+  }
+
+  private async removeEmptyDrafts(panel: Element, signal?: AbortSignal): Promise<void> {
+    while (true) {
+      this.guardEdit(signal);
+      const cards = this.readEditorCards(panel);
+      const empty = cards.filter(card => card.element.classList.contains('new-entry-border') && card.value.fields.every(field => !field) && !card.value.note && !card.value.reason && !card.value.metadata.length);
+      if (!empty.length) return;
+      const chosen = empty[0];
+      if (cards.filter(card => editorKey(card.value) === editorKey(chosen.value)).length !== 1) throw this.draftError(chosen.value.kind === 'break' ? 'break' : 'work', t('Der neue Eintrag ist nicht eindeutig zuordenbar'));
+      const expected = subtractInventory(cards.map(card => card.value), [chosen.value])!;
+      const remove = chosen.element.querySelector<HTMLElement>('button[data-icon-before="delete"]');
+      if (!remove) throw new AdapterError(t('Leerer HiBob-Entwurf kann nicht sicher entfernt werden.'));
+      this.click(remove);
+      await this.tick(signal);
+      this.guardEdit(signal);
+      if (!sameInventory(this.readEditorCards(panel).map(card => card.value), expected)) throw this.draftError(chosen.value.kind === 'break' ? 'break' : 'work', t('Vorhandene Einträge wurden unerwartet verändert'));
+    }
   }
 
   private validationError(panel: Element): string | null {
@@ -607,34 +758,32 @@ export class HiBobDomAdapter {
       await this.assertContext(expectedContext, authorization);
       await this.enterEdit(panel, signal);
       // Only empty drafts created by opening the editor may be removed. Saved segments are never deleted.
-      if (before.entries.length) {
-        const emptyDrafts = [...panel.querySelectorAll<HTMLElement>('.entry-panel.new-entry-border')].filter(entry => [...entry.querySelectorAll<HTMLInputElement>('input[type="tel"]')].length === 4 && [...entry.querySelectorAll<HTMLInputElement>('input[type="tel"]')].every(input => !input.value));
-        for (const draft of emptyDrafts) {
-          this.assertPage(signal);
-          const remove = draft.querySelector<HTMLElement>('button[data-icon-before="delete"]');
-          if (!remove) throw new AdapterError(t('Leerer HiBob-Entwurf kann nicht sicher entfernt werden.'));
-          this.click(remove);
-          await this.tick(signal);
-        }
-      }
-      const available = [...panel.querySelectorAll<HTMLElement>('.entry-panel')];
+      if (before.entries.length) await this.removeEmptyDrafts(panel, signal);
+      const available = this.readEditorCards(panel).map(card => card.value);
+      if (available.some(value => value.kind !== 'work' && value.kind !== 'break')) throw new AdapterError(t('Unbekannter HiBob-Eintragstyp.'));
+      if (!before.entries.length && available.some(value => value.note || value.reason || value.metadata.length)) throw this.draftError('work', t('Der neue Eintrag enthält nicht unterstützte Zusatzdaten'));
       for (const type of ['work', 'break'] as const) {
-        const existingCount = available.filter(entry => text(entry.querySelector('.blv-label')).toLowerCase() === type).length;
+        const existingCount = available.filter(entry => entry.kind === type).length;
         if (existingCount > day.proposed.filter(entry => entry.type === type).length) throw new AdapterError(t('Der Austausch würde gespeicherte Segmente einzeln löschen. Diese HiBob-Variante wird vorsichtshalber nicht automatisch überschrieben; bitte den Tag manuell bereinigen und neu einlesen.'));
       }
       onProgress?.({ phase: 'apply', date: day.date, completed: 0, total: 1, message: t('Prüfe und fülle Tagesentwurf') });
+      const completed: EditorValue[] = [];
       for (const proposed of day.proposed) {
-        this.assertPage(signal);
-        let entry = available.find(candidate => text(candidate.querySelector('.blv-label')).toLowerCase() === proposed.type);
-        if (entry) available.splice(available.indexOf(entry), 1);
-        else entry = await this.addEntry(panel, proposed.type, signal);
-        const inputs = [...entry.querySelectorAll<HTMLInputElement>('input[type="tel"]')];
-        if (inputs.length !== 4) throw new AdapterError(t('HiBob-Zeitfelder haben sich geändert.'));
-        const values = [...proposed.start.split(':'), ...proposed.end.split(':')];
-        for (let i = 0; i < 4; i++) { this.assertPage(signal); this.setInput(inputs[i], values[i]); }
-        this.clearNote(entry);
-        await this.tick(signal);
+        this.guardEdit(signal);
+        const ledger = [...completed, ...available];
+        if (!sameInventory(this.readEditorCards(panel).map(card => card.value), ledger)) throw this.draftError(proposed.type, t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
+        const candidates = available.filter(candidate => candidate.kind === proposed.type).sort((a, b) => editorKey(a).localeCompare(editorKey(b)));
+        let value: EditorValue;
+        if (candidates.length) {
+          value = candidates[0];
+          available.splice(available.indexOf(value), 1);
+        } else value = await this.addEntry(panel, proposed.type, ledger, signal);
+        const target = this.target(panel, value, [...completed, ...available]);
+        await this.fillTarget(panel, target, proposed, signal);
+        completed.push(target.value);
       }
+      this.guardEdit(signal);
+      if (available.length || !sameInventory(this.readEditorCards(panel).map(card => card.value), completed)) throw this.draftError('work', t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
       const draft = this.readPanelEntries(panel);
       if (!this.sameEntries(draft, day.proposed)) throw new AdapterError(t('Der HiBob-Entwurf einschließlich Notizen und Gründen stimmt nicht mit der Vorschau überein.'));
       const error = this.validationError(panel);
@@ -646,6 +795,7 @@ export class HiBobDomAdapter {
       this.assertOwnedPanel();
       // Context hashing is asynchronous. Re-read the complete draft after that
       // await so edits made while hashing cannot slip past the final Save gate.
+      if (!sameInventory(this.readEditorCards(panel).map(card => card.value), completed)) throw this.draftError('work', t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
       if (!this.sameEntries(this.readPanelEntries(panel), day.proposed)) throw new AdapterError(t('Der HiBob-Entwurf einschließlich Notizen und Gründen stimmt nicht mit der Vorschau überein.'));
       const finalError = this.validationError(panel);
       if (finalError) throw new AdapterError(t('HiBob lehnt den Entwurf ab: {error}', { error: finalError }));
