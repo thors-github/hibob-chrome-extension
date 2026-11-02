@@ -1,0 +1,5 @@
+{
+  "appName": { "message": "HiBob Monatsbuchung" },
+  "appDescription": { "message": "Eigene HiBob-Anwesenheiten mit Monatsvorschau, Feiertagen und Pausen erfassen." },
+  "actionTitle": { "message": "HiBob Monatsbuchung öffnen" }
+}

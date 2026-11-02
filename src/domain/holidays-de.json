@@ -1,0 +1,1264 @@
+{
+  "version": "2026-10-24",
+  "license": "CC-BY-SA-3",
+  "source": "https://github.com/commenthol/date-holidays/blob/master/data/countries/DE.yaml",
+  "attribution": [
+    "date-holidays, Copyright (c) 2015-present commenthol and contributors",
+    "https://de.wikipedia.org/wiki/Feiertage_in_Deutschland",
+    "https://creativecommons.org/licenses/by-sa/3.0/",
+    "Germany-only extraction; holiday rules unchanged."
+  ],
+  "holidays": {
+    "DE": {
+      "names": {
+        "de": "Deutschland",
+        "en": "Germany"
+      },
+      "dayoff": "sunday",
+      "zones": [
+        "Europe/Berlin"
+      ],
+      "langs": [
+        "de"
+      ],
+      "days": {
+        "01-01": {
+          "_name": "01-01"
+        },
+        "02-14": {
+          "_name": "02-14",
+          "type": "observance"
+        },
+        "easter -52": {
+          "name": {
+            "de": "Weiberfastnacht",
+            "en": "Women's Carnival Day"
+          },
+          "type": "observance"
+        },
+        "easter -48": {
+          "name": {
+            "de": "Rosenmontag",
+            "en": "Shrove Monday"
+          },
+          "type": "observance"
+        },
+        "easter -47 14:00": {
+          "_name": "easter -47",
+          "type": "observance"
+        },
+        "easter -46": {
+          "_name": "easter -46",
+          "type": "observance"
+        },
+        "easter -3": {
+          "_name": "easter -3",
+          "type": "observance"
+        },
+        "easter -2": {
+          "_name": "easter -2"
+        },
+        "easter": {
+          "_name": "easter",
+          "type": "observance"
+        },
+        "easter 1": {
+          "_name": "easter 1"
+        },
+        "05-01": {
+          "_name": "05-01",
+          "name": {
+            "de": "Maifeiertag"
+          }
+        },
+        "2nd sunday in May": {
+          "_name": "Mothers Day",
+          "type": "observance"
+        },
+        "easter 39": {
+          "_name": "easter 39"
+        },
+        "easter 49": {
+          "_name": "easter 49",
+          "type": "observance"
+        },
+        "easter 50": {
+          "_name": "easter 50"
+        },
+        "10-03": {
+          "_name": "National Holiday",
+          "name": {
+            "de": "Tag der Deutschen Einheit"
+          }
+        },
+        "11-01": {
+          "_name": "11-01",
+          "type": "observance"
+        },
+        "11-02": {
+          "_name": "11-02",
+          "type": "observance"
+        },
+        "11-11": {
+          "_name": "11-11",
+          "type": "observance"
+        },
+        "wednesday before 11-23": {
+          "_name": "Buß- und Bettag",
+          "type": "observance"
+        },
+        "6th sunday before 12-25": {
+          "name": {
+            "de": "Volkstrauertag",
+            "en": "Memorial Day"
+          },
+          "type": "observance"
+        },
+        "5th sunday before 12-25": {
+          "name": {
+            "de": "Totensonntag"
+          },
+          "type": "observance"
+        },
+        "4th sunday before 12-25": {
+          "name": {
+            "de": "1. Advent"
+          },
+          "type": "observance"
+        },
+        "3th sunday before 12-25": {
+          "name": {
+            "de": "2. Advent"
+          },
+          "type": "observance"
+        },
+        "2nd sunday before 12-25": {
+          "name": {
+            "de": "3. Advent"
+          },
+          "type": "observance"
+        },
+        "1st sunday before 12-25": {
+          "name": {
+            "de": "4. Advent"
+          },
+          "type": "observance"
+        },
+        "12-24 14:00 if sunday then 00:00": {
+          "_name": "12-24",
+          "type": "bank"
+        },
+        "12-25": {
+          "_name": "12-25",
+          "name": {
+            "de": "1. Weihnachtstag"
+          }
+        },
+        "12-26": {
+          "_name": "12-26"
+        },
+        "12-31 14:00 if sunday then 00:00": {
+          "_name": "12-31",
+          "type": "bank"
+        },
+        "2017-10-31": {
+          "_name": "Reformation Day"
+        }
+      },
+      "states": {
+        "BB": {
+          "name": "Brandenburg",
+          "days": {
+            "easter": {
+              "_name": "easter"
+            },
+            "easter 49": {
+              "_name": "easter 49"
+            },
+            "10-31": {
+              "_name": "Reformation Day"
+            }
+          }
+        },
+        "BE": {
+          "name": "Berlin",
+          "days": {
+            "03-08": {
+              "_name": "03-08",
+              "active": [
+                {
+                  "from": "2019-01-01"
+                }
+              ]
+            },
+            "easter": {
+              "_name": "easter",
+              "type": "observance"
+            },
+            "easter 49": {
+              "_name": "easter 49",
+              "type": "observance"
+            },
+            "2020-05-08": {
+              "name": {
+                "de": "Tag der Befreiung (75. Jahrestag)",
+                "en": "Liberation Day (75th Anniversary)"
+              }
+            },
+            "2025-05-08": {
+              "name": {
+                "de": "Tag der Befreiung (80. Jahrestag)",
+                "en": "Liberation Day (80th Anniversary)"
+              }
+            },
+            "2028-06-17": {
+              "name": {
+                "de": "75-jähriges Jubiläum des Volksaufstands in der DDR",
+                "en": "75th anniversary of the GDR uprising"
+              }
+            }
+          }
+        },
+        "BW": {
+          "name": "Baden-Württemberg",
+          "days": {
+            "01-06": {
+              "_name": "01-06"
+            },
+            "easter -3": {
+              "_name": "easter -3",
+              "type": "school"
+            },
+            "easter 60": {
+              "_name": "easter 60"
+            },
+            "10-31": {
+              "_name": "Reformation Day",
+              "type": "school"
+            },
+            "11-01": {
+              "_name": "11-01"
+            }
+          }
+        },
+        "BY": {
+          "name": "Bayern",
+          "days": {
+            "01-06": {
+              "_name": "01-06"
+            },
+            "02-02": {
+              "_name": "02-02",
+              "type": "observance"
+            },
+            "easter 60": {
+              "_name": "easter 60"
+            },
+            "08-15": {
+              "_name": "08-15",
+              "type": "observance"
+            },
+            "11-01": {
+              "_name": "11-01"
+            },
+            "wednesday before 11-23": {
+              "_name": "Buß- und Bettag",
+              "type": "school"
+            }
+          },
+          "regions": {
+            "A": {
+              "name": "Stadt Augsburg",
+              "_days": [
+                "DE",
+                "states",
+                "BY",
+                "regions",
+                "KATH"
+              ],
+              "days": {
+                "08-08": {
+                  "name": {
+                    "de": "Augsburger Friedensfest",
+                    "en": "Augsburg Peace Festival"
+                  }
+                }
+              }
+            },
+            "KATH": {
+              "names": {
+                "de": "Überwiegend katholische Gemeinden",
+                "en": "Predominantly catholic communities"
+              },
+              "days": {
+                "08-15": {
+                  "_name": "08-15",
+                  "type": "public"
+                }
+              }
+            },
+            "EVANG": {
+              "names": {
+                "de": "Überwiegend evangelische Gemeinden",
+                "en": "Predominantly protestant communities"
+              },
+              "days": {
+                "08-15": {
+                  "_name": "08-15",
+                  "type": "school"
+                }
+              }
+            }
+          }
+        },
+        "HB": {
+          "name": "Hansestadt Bremen",
+          "days": {
+            "10-31": {
+              "_name": "Reformation Day",
+              "active": [
+                {
+                  "from": "2018-01-01"
+                }
+              ]
+            }
+          }
+        },
+        "HE": {
+          "name": "Hessen",
+          "days": {
+            "easter 60": {
+              "_name": "easter 60"
+            }
+          }
+        },
+        "HH": {
+          "name": "Hansestadt Hamburg",
+          "days": {
+            "10-31": {
+              "_name": "Reformation Day",
+              "active": [
+                {
+                  "from": "2018-01-01"
+                }
+              ]
+            }
+          }
+        },
+        "MV": {
+          "name": "Mecklenburg-Vorpommern",
+          "days": {
+            "03-08 since 2023": {
+              "_name": "03-08"
+            },
+            "10-31": {
+              "_name": "Reformation Day"
+            }
+          }
+        },
+        "NI": {
+          "name": "Niedersachsen",
+          "days": {
+            "10-31": {
+              "_name": "Reformation Day",
+              "active": [
+                {
+                  "from": "2018-01-01"
+                }
+              ]
+            }
+          }
+        },
+        "NW": {
+          "name": "Nordrhein-Westfalen",
+          "days": {
+            "easter 60": {
+              "_name": "easter 60"
+            },
+            "11-01": {
+              "_name": "11-01"
+            }
+          }
+        },
+        "RP": {
+          "name": "Rheinland-Pfalz",
+          "days": {
+            "easter 60": {
+              "_name": "easter 60"
+            },
+            "11-01": {
+              "_name": "11-01"
+            }
+          }
+        },
+        "SH": {
+          "name": "Schleswig-Holstein",
+          "days": {
+            "10-31": {
+              "_name": "Reformation Day",
+              "active": [
+                {
+                  "from": "2018-01-01"
+                }
+              ]
+            }
+          }
+        },
+        "SL": {
+          "name": "Saarland",
+          "days": {
+            "easter 60": {
+              "_name": "easter 60"
+            },
+            "08-15": {
+              "_name": "08-15"
+            },
+            "11-01": {
+              "_name": "11-01"
+            }
+          }
+        },
+        "SN": {
+          "name": "Sachsen",
+          "days": {
+            "easter 60": {
+              "_name": "easter 60",
+              "type": "observance"
+            },
+            "10-31": {
+              "_name": "Reformation Day"
+            },
+            "wednesday before 11-23": {
+              "_name": "Buß- und Bettag"
+            }
+          },
+          "regions": {
+            "BZ": {
+              "name": "Landkreis Bautzen",
+              "days": {
+                "easter 60": {
+                  "_name": "easter 60",
+                  "type": "public",
+                  "note": "Bautzen (nur in den Ortsteilen Bolbritz und Salzenforst), Crostwitz, Göda (nur im Ortsteil Prischwitz), Großdubrau (nur im Ortsteil Sdier), Hoyerswerda (nur im Ortsteil Dörgenhausen), Königswartha (nicht im Ortsteil Wartha), Nebelschütz, Neschwitz (nur in den Ortsteilen Neschwitz und Saritsch), Panschwitz-Kuckau, Puschwitz, Räckelwitz, Radibor, Ralbitz-Rosenthal und Wittichenau."
+                }
+              }
+            }
+          }
+        },
+        "ST": {
+          "name": "Sachsen-Anhalt",
+          "days": {
+            "01-06": {
+              "_name": "01-06"
+            },
+            "10-31": {
+              "_name": "Reformation Day"
+            }
+          }
+        },
+        "TH": {
+          "name": "Thüringen",
+          "days": {
+            "easter 60": {
+              "_name": "easter 60",
+              "type": "observance"
+            },
+            "09-20": {
+              "name": {
+                "de": "Weltkindertag",
+                "en": "International Children's Day"
+              },
+              "active": [
+                {
+                  "from": 2019
+                }
+              ]
+            },
+            "10-31": {
+              "_name": "Reformation Day"
+            }
+          },
+          "regions": {
+            "EIC": {
+              "name": "Landkreis Eichfeld",
+              "days": {
+                "easter 60": {
+                  "_name": "easter 60",
+                  "type": "public"
+                }
+              }
+            },
+            "UH": {
+              "name": "Unstrut-Hainich-Kreis",
+              "days": {
+                "easter 60": {
+                  "_name": "easter 60",
+                  "type": "public",
+                  "note": "In Anrode (nur in den Ortsteilen Bickenriede und Zella), Dünwald (nur in den Ortsteilen Beberstedt und Hüpstedt), Rodeberg (nur im Ortsteil Struth), Südeichsfeld"
+                }
+              }
+            },
+            "WAK": {
+              "name": "Wartburgkreis",
+              "days": {
+                "easter 60": {
+                  "_name": "easter 60",
+                  "type": "public",
+                  "note": "In Brunnhartshausen (nur in den Ortsteilen Föhlritz und Steinberg), Buttlar, Geisa, Schleid, Zella/Rhön"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "names": {
+    "substitutes": {
+      "name": {
+        "en": "substitute day",
+        "az": "əvəz gün",
+        "bs": "zamjena dan",
+        "de": "Ersatztag",
+        "es": "día sustituto",
+        "fr": "jour substitut",
+        "hr": "zamjena dan",
+        "jp": "振替休日",
+        "ko": "대체공휴일",
+        "lv": "aizstājējs diena",
+        "mk": "заменет ден",
+        "nl": "substituut",
+        "sq": "ditë zëvendësuese",
+        "sr": "замена дан",
+        "uk": "замінити день",
+        "uz": "koʻchirilgan kun",
+        "vi": "ngày thay thế",
+        "zh": "更换日"
+      }
+    },
+    "01-01": {
+      "name": {
+        "en": "New Year's Day",
+        "am": "እንቁጣጣሽ",
+        "ar": "عيد رأس السنة",
+        "az": "Yeni il",
+        "be": "Новы год",
+        "bg": "Нова Година",
+        "bs": "Novogodisnji dan",
+        "ca": "Any nou",
+        "cz": "Nový rok",
+        "da": "Nytårsdag",
+        "de": "Neujahr",
+        "el": "Πρωτοχρονιά",
+        "es": "Año Nuevo",
+        "et": "uusaasta",
+        "fi": "uudenvuodenpäivä",
+        "fil": "Araw ng Bagong Taon",
+        "fo": "Nýggjársdagur",
+        "fr": "Nouvel An",
+        "ge": "ახალი წელი",
+        "hr": "Nova godina",
+        "hu": "Újév",
+        "hy": "Ամանոր",
+        "id": "Hari tahun baru",
+        "it": "Capodanno",
+        "is": "Nýársdagur",
+        "jp": "元日",
+        "kk": "Жаңа жыл",
+        "kl": "ukiortaaq",
+        "ko": "신정",
+        "lb": "Neijoerschdag",
+        "lt": "Naujieji metai",
+        "lv": "Jaunais Gads",
+        "mg": "Taom-baovao",
+        "mk": "Нова Година",
+        "ms": "Hari Tahun Baru",
+        "mt": "L-Ewwel tas-Sena",
+        "nl": "Nieuwjaar",
+        "no": "Første nyttårsdag",
+        "pap": "Aña Nobo",
+        "pl": "Nowy Rok",
+        "pt": "Ano Novo",
+        "ro": "Anul nou",
+        "ru": "Новый год",
+        "sl": "novo leto",
+        "sq": "Viti i Ri",
+        "sr": "Нова година",
+        "sv": "nyårsdagen",
+        "sw": "Mwaka mpya",
+        "th": "วันขึ้นปีใหม่",
+        "ti": "ሓዲሽ ዓመት",
+        "tr": "Yılbaşı",
+        "uk": "Новий Рік",
+        "vi": "Tết Dương lịch",
+        "zh": "元旦"
+      }
+    },
+    "02-14": {
+      "name": {
+        "en": "Valentine's Day",
+        "de": "Valentinstag",
+        "fr": "Saint-Valentin",
+        "hu": "Valentin nap",
+        "lb": "Vältesdag",
+        "nl": "Valentijnsdag",
+        "no": "Valentinsdag",
+        "pl": "Walentynki",
+        "pt": "Dia dos Namorados",
+        "vi": "Lễ tình nhân"
+      }
+    },
+    "easter -47": {
+      "name": {
+        "en": "Shrove Tuesday",
+        "es": "Carnaval",
+        "de": "Faschingsdienstag",
+        "hr": "Pokladni utorak",
+        "hu": "Húshagyó kedd",
+        "nl": "Vastenavond",
+        "pl": "Ostatki",
+        "pt": "Carnaval",
+        "vi": "Thứ ba mập béo"
+      }
+    },
+    "easter -46": {
+      "name": {
+        "en": "Ash Wednesday",
+        "de": "Aschermittwoch",
+        "es": "Miercoles de Ceniza",
+        "fr": "Mercredi des Cendres",
+        "hu": "Hamvazószerda",
+        "it": "Ceneri",
+        "is": "Öskudagur",
+        "lb": "Äschermëttwoch",
+        "nl": "Aswoensdag",
+        "no": "Askeonsdag",
+        "pl": "Środa Popielcowa",
+        "pt": "Quarta-feira de Cinzas",
+        "sw": "Jumatano ya Majivu",
+        "vi": "Thứ tư Lễ Tro"
+      }
+    },
+    "easter -3": {
+      "name": {
+        "en": "Maundy Thursday",
+        "cz": "Zelený čtvrtek",
+        "da": "Skærtorsdag",
+        "de": "Gründonnerstag",
+        "es": "Jueves Santo",
+        "fil": "Huwebes Santo",
+        "fo": "Skírhósdagur",
+        "fr": "Jeudi saint",
+        "is": "Skírdagur",
+        "it": "Giovedì santo",
+        "kl": "sisamanngortoq illernartoq",
+        "lb": "Gréngen Donneschdeg",
+        "nl": "Witte Donderdag",
+        "no": "Skjærtorsdag",
+        "pl": "Wielki Czwartek",
+        "sv": "skärtorsdagen",
+        "vi": "Thứ năm Tuần Thánh"
+      }
+    },
+    "easter -2": {
+      "name": {
+        "en": "Good Friday",
+        "am": "ስቅለት",
+        "bg": "Разпети петък",
+        "bs": "Dobar petak",
+        "cz": "Velký pátek",
+        "da": "Langfredag",
+        "de": "Karfreitag",
+        "es": "Viernes Santo",
+        "fi": "pitkäperjantai",
+        "fil": "Biyernes Santo",
+        "fo": "Langafríggjadagur",
+        "fr": "Vendredi saint",
+        "el": "Μεγάλη Παρασκευή",
+        "et": "suur reede",
+        "ge": "წითელი პარასკევი",
+        "hi": "गुड फ्राइडे",
+        "hr": "Veliki petak",
+        "hu": "Nagypéntek",
+        "id": "Wafat Yesus Kristus",
+        "it": "Venerdì santo",
+        "is": "Föstudagurinn langi",
+        "kl": "tallimanngornersuaq",
+        "lb": "Karfreideg",
+        "lv": "Lielā Piektdiena",
+        "ms": "Jumat Agung",
+        "mt": "Il-Ġimgħa l-Kbira",
+        "nl": "Goede Vrijdag",
+        "no": "Langfredag",
+        "pap": "Diabierna Santo",
+        "pl": "Wielki Piątek",
+        "pt": "Sexta-Feira Santa",
+        "ro": "Vinerea Mare",
+        "sk": "Veľký piatok",
+        "sq": "E Premtja e Madhe",
+        "sr": "Католички Велики петак",
+        "sv": "långfredagen",
+        "sw": "Ijumaa Kuu",
+        "ta": "புனித வெள்ளி",
+        "vi": "Thứ sáu Tuần Thánh",
+        "zh": "耶穌受難節"
+      }
+    },
+    "easter": {
+      "name": {
+        "en": "Easter Sunday",
+        "am": "ፋሲካ",
+        "bg": "Великден",
+        "bs": "Vaskrs",
+        "cz": "Velikonoční neděle",
+        "da": "Påskedag",
+        "de": "Ostersonntag",
+        "el": "Πάσχα",
+        "es": "Pascua",
+        "et": "lihavõtted",
+        "fi": "pääsiäispäivä",
+        "fil": "Pasko ng Pagkabuhay",
+        "fo": "Páskadagur",
+        "fr": "Pâques",
+        "ge": "აღდგომა",
+        "hr": "Uskrs",
+        "hu": "Húsvétvasárnap",
+        "it": "Domenica di Pasqua",
+        "is": "Páskadagur",
+        "kl": "poorskip-ullua",
+        "lb": "Ouschtersonndeg",
+        "lt": "Velykos",
+        "lv": "Lieldienas",
+        "nl": "Pasen",
+        "no": "Første påskedag",
+        "pap": "Dia Pasco di Resureccion",
+        "pl": "Niedziela Wielkanocna",
+        "pt": "Páscoa",
+        "ro": "Paștele",
+        "sk": "Veľká noc",
+        "sl": "velikonočna nedelja",
+        "sq": "Pashkët Katolike",
+        "sr": "Католички Васкрс",
+        "sv": "påskdagen",
+        "sw": "Pasaka",
+        "vi": "Lễ Phục Sinh",
+        "zh": "复活节"
+      }
+    },
+    "easter 1": {
+      "name": {
+        "en": "Easter Monday",
+        "bg": "Велики понеделник",
+        "bs": "Uskrsni ponedjeljak",
+        "cz": "Velikonoční pondělí",
+        "da": "Anden påskedag",
+        "de": "Ostermontag",
+        "el": "Δευτέρα του Πάσχα",
+        "es": "Lunes de Pascua",
+        "fi": "toinen pääsiäispäivä",
+        "fo": "Annar páskadagur",
+        "fr": "Lundi de Pâques",
+        "ge": "აღდგომის ორშაბათი",
+        "hr": "Uskršnji ponedjeljak",
+        "hu": "Húsvéthétfő",
+        "it": "Lunedì dell’Angelo",
+        "is": "Annar í páskum",
+        "kl": "poorskip-aappaa",
+        "lb": "Ouschterméindeg",
+        "lt": "Velykų pirmadienis",
+        "lv": "Otrās Lieldienas",
+        "mg": "Alatsinain'ny Paska",
+        "mk": "вториот ден на Велигден",
+        "nl": "Tweede paasdag",
+        "no": "Andre påskedag",
+        "pap": "Di dos Dia Pasco di Resureccion",
+        "pl": "Drugi dzień Wielkanocy",
+        "ro": "A doua zi de Paști",
+        "sk": "Veľkonočný pondelok",
+        "sl": "velikonočni ponedeljek",
+        "sr": "Католички Васкрсни понедељак",
+        "sv": "annandag påsk",
+        "sw": "Jumatatu ya Pasaka",
+        "vi": "Thứ hai phục sinh",
+        "zh": "復活節星期一"
+      }
+    },
+    "05-01": {
+      "name": {
+        "en": "Labour Day",
+        "en-us": "Labor Day",
+        "ar": "يوم العمال",
+        "be": "Дзень працы",
+        "bg": "Ден на труда",
+        "bs": "Radni dan",
+        "cz": "Svátek práce",
+        "da": "1. maj",
+        "de": "Tag der Arbeit",
+        "el": "Εργατική Πρωτομαγιά",
+        "es": "Día del Trabajador",
+        "et": "kevadpüha",
+        "fi": "vappu",
+        "fil": "Araw ng mga Manggagawa",
+        "fr": "Fête du travail",
+        "hr": "Praznik rada",
+        "hu": "A munka ünnepe",
+        "hy": "Աշխատանքի օր",
+        "id": "Hari Buruh Internasional",
+        "it": "Festa del lavoro",
+        "is": "Hátíðisdagur Verkamanna",
+        "lb": "Éischte Mee",
+        "lt": "Tarptautinė darbo diena",
+        "lv": "Darba svētki",
+        "nl": "Dag van de Arbeid",
+        "no": "Arbeidernes dag",
+        "mg": "Fetin'ny asa",
+        "mk": "Ден на трудот",
+        "ms": "Hari Pekerja",
+        "mt": "Jum il-Ħaddiem",
+        "pap": "Dia di Obrero",
+        "pl": "Święto Pracy",
+        "pt": "Dia do trabalhador",
+        "ro": "Ziua muncii",
+        "sk": "Sviatok práce",
+        "sl": "praznik dela",
+        "sq": "Dita Ndërkombëtare e Punonjësve",
+        "sr": "Празник рада",
+        "sv": "första maj",
+        "ti": "የላብ አደሮች ቀን",
+        "uk": "День міжнародної солідарності трудящих",
+        "vi": "Quốc tế Lao động",
+        "zh": "劳动节"
+      }
+    },
+    "Mothers Day": {
+      "name": {
+        "en": "Mother's Day",
+        "cz": "Den matek",
+        "da": "Mors Dag",
+        "de": "Muttertag",
+        "el": "Γιορτή της μητέρας",
+        "es": "Día de la Madre",
+        "et": "emadepäev",
+        "fi": "Äitienpäivä",
+        "fr": "Fête des Mères",
+        "hr": "Majčin dan",
+        "hu": "Anyák napja",
+        "hy": "Ցեղասպանության զոհերի հիշատակի օր",
+        "is": "Mæðradagurinn",
+        "it": "Festa della mamma",
+        "lt": "Motinos diena",
+        "lv": "Mātes diena",
+        "nl": "Moederdag",
+        "no": "Morsdag",
+        "pt": "Dia das Mães",
+        "pl": "Dzień Matki",
+        "ro": "Ziua Mamei",
+        "sq": "Dita e Nënës",
+        "sv": "Mors dag",
+        "vi": "Ngày của mẹ"
+      }
+    },
+    "easter 39": {
+      "name": {
+        "en": "Ascension Day",
+        "da": "Kristi Himmelfartsdag",
+        "de": "Christi Himmelfahrt",
+        "es": "La Asunción",
+        "fi": "helatorstai",
+        "fo": "Kristi Himmalsferðardagur",
+        "fr": "Ascension",
+        "id": "Kenaikan Yesus Kristus",
+        "it": "Ascensione",
+        "is": "Uppstigningardagur",
+        "kl": "qilaliarfik",
+        "mg": "Andro niakarana",
+        "lb": "Christi Himmelfaart",
+        "nl": "O.L.H. Hemelvaart",
+        "no": "Kristi himmelfartsdag",
+        "pap": "Dia di Asuncion",
+        "ro": "Ziua Eroilor",
+        "sv": "Kristi himmelsfärdsdag",
+        "vi": "Lễ Thăng Thiên"
+      }
+    },
+    "easter 49": {
+      "name": {
+        "en": "Pentecost",
+        "da": "Pinsedag",
+        "de": "Pfingstsonntag",
+        "el": "Πεντηκοστή",
+        "es": "Pentecostés",
+        "et": "nelipühade 1. püha",
+        "fi": "helluntaipäivä",
+        "fo": "Hvítusunnudagur",
+        "fr": "Pentecôte",
+        "hu": "Pünkösdvasárnap",
+        "it": "Pentecoste",
+        "is": "Hvítasunnudagur",
+        "kl": "piinsip ullua",
+        "lb": "Päischtsonndeg",
+        "nl": "Pinksteren",
+        "no": "Første pinsedag",
+        "mk": "Духовден",
+        "pl": "Zielone Świątki",
+        "ro": "Rusaliile",
+        "sl": "binkošti",
+        "sv": "pingstdagen",
+        "uk": "Трійця",
+        "vi": "Lễ Chúa Thánh Thần Hiện Xuống"
+      }
+    },
+    "easter 50": {
+      "name": {
+        "en": "Whit Monday",
+        "da": "Anden Pinsedag",
+        "de": "Pfingstmontag",
+        "el": "Αγίου Πνεύματος",
+        "es": "Lunes de Pentecostés",
+        "fo": "Annar hvítusunnudagur",
+        "fr": "Lundi de Pentecôte",
+        "hu": "Pünkösdhétfő",
+        "is": "Annar í hvítasunnu",
+        "it": "Lunedì di Pentecoste",
+        "kl": "piinsip aappaa",
+        "mg": "Alatsinain'ny Pentekosta",
+        "lb": "Péngschtméindeg",
+        "nl": "Tweede pinksterdag",
+        "no": "Andre pinsedag",
+        "ro": "A doua zi de Rusalii",
+        "sv": "annandag pingst"
+      }
+    },
+    "National Holiday": {
+      "name": {
+        "en": "National Holiday",
+        "de": "Nationalfeiertag",
+        "es": "Fiesta Nacional",
+        "fr": "Fête nationale",
+        "hu": "Nemzeti ünnep",
+        "el": "εθνική επέτειος",
+        "lb": "Nationalfeierdag",
+        "nl": "Nationale feestdag",
+        "vi": "Quốc Lễ"
+      }
+    },
+    "11-01": {
+      "name": {
+        "en": "All Saints' Day",
+        "bs": "Dita e të gjithë Shenjtorëve",
+        "de": "Allerheiligen",
+        "es": "Todos los Santos",
+        "fi": "pyhäinpäivä",
+        "fil": "Undás; Todos los Santos; Araw ng mga Santo",
+        "fr": "Toussaint",
+        "hr": "Svi sveti",
+        "hu": "Mindenszentek",
+        "it": "Ognissanti",
+        "lb": "Allerhellegen",
+        "lt": "Visų šventųjų diena",
+        "mg": "Fetin'ny olo-masina",
+        "mk": "Празникот на сите светци",
+        "nl": "Allerheiligen",
+        "pl": "Wszystkich Świętych",
+        "pt": "Todos os santos",
+        "sk": "Sviatok všetkých svätých",
+        "sq": "Të gjitha Saints",
+        "sr": "Сви Свети",
+        "sv": "alla helgons dag",
+        "vi": "Lễ Các Thánh"
+      }
+    },
+    "11-02": {
+      "name": {
+        "en": "All Souls' Day",
+        "de": "Allerseelen",
+        "es": "Día de los Difuntos",
+        "et": "hingedepäev",
+        "fil": "Araw ng mga Kaluluwa",
+        "fr": "Fête des morts",
+        "hr": "Dušni dan",
+        "hu": "Halottak napja",
+        "it": "Commemorazione dei defunti",
+        "lb": "Allerséilen",
+        "nl": "Allerzielen",
+        "pt": "Dia de Finados",
+        "vi": "Lễ Các Đẳng",
+        "lt": "Vėlinės"
+      }
+    },
+    "11-11": {
+      "name": {
+        "en": "Saint Martin",
+        "de": "Sankt Martin (Faschingsbeginn)",
+        "hu": "Márton nap",
+        "nl": "Sint-Maarten",
+        "vi": "Lễ thánh Martin"
+      }
+    },
+    "Buß- und Bettag": {
+      "name": {
+        "de": "Buß- und Bettag",
+        "en": "Day of Prayer and Repentance",
+        "nl": "Dag van gebed en bekering"
+      }
+    },
+    "12-24": {
+      "name": {
+        "en": "Christmas Eve",
+        "bg": "Бъдни вечер",
+        "bs": "Badnji dan",
+        "cz": "Štědrý den",
+        "da": "Juleaftensdag",
+        "de": "Heiliger Abend",
+        "es": "Nochebuena",
+        "et": "jõululaupäev",
+        "fo": "Jólaaftan",
+        "fi": "jouluaatto",
+        "fil": "Bisperas ng Pasko",
+        "fr": "Veille de Noël",
+        "hr": "Badnji dan",
+        "hu": "Szenteste",
+        "is": "Aðfangadagur",
+        "kl": "juulliaraq",
+        "lb": "Hellegowend",
+        "lt": "Šv. Kūčios",
+        "lv": "Ziemassvētku vakars",
+        "ms": "Hari Sebelum Krismas",
+        "nl": "Kerstavond",
+        "no": "Julaften",
+        "pl": "Wigilia Bożego Narodzenia",
+        "pt": "Noite de Natal",
+        "sk": "Štedrý deň",
+        "sq": "Nata e Krishtlindjes",
+        "sr": "Бадњи дан",
+        "sv": "julafton",
+        "vi": "Đêm Giáng Sinh"
+      }
+    },
+    "12-25": {
+      "name": {
+        "en": "Christmas Day",
+        "am": "ልደተ-ለእግዚእነ/ ገና",
+        "ar": "عيد الميلاد المجيد",
+        "bg": "Коледа",
+        "bn": "বড়দিন",
+        "bs": "Božić",
+        "de-at": "Christtag",
+        "ca": "Nadal",
+        "cz": "1. svátek vánoční",
+        "da": "Juledag",
+        "de": "Weihnachten",
+        "de-ch": "Weihnachtstag",
+        "el": "Χριστούγεννα",
+        "es": "Navidad",
+        "et": "esimene jõulupüha",
+        "fi": "joulupäivä",
+        "fil": "Araw ng Pasko",
+        "fo": "Fyrsti jóladagur",
+        "fr": "Noël",
+        "hr": "Božić",
+        "hu": "Karácsony",
+        "hy": "Սուրբ Ծնունդ",
+        "id": "Hari Raya Natal",
+        "it": "Natale di Gesù",
+        "is": "Jóladagur",
+        "jp": "クリスマス",
+        "kl": "juullerujussuaq",
+        "ko": "기독탄신일",
+        "lb": "Chrëschtdag",
+        "lt": "Šv. Kalėdos",
+        "lv": "Ziemassvētki",
+        "mg": "Krismasy",
+        "mk": "Католички Божиќ",
+        "ms": "Hari Krismas",
+        "mt": "Il-Milied",
+        "nl": "Kerstmis",
+        "no": "Første juledag",
+        "pap": "Dia Pasco di Nascimento",
+        "pl": "Pierwszy dzień Bożego Narodzenia",
+        "pt": "Natal",
+        "ro": "Crăciunul",
+        "ru": "Рождество Христово",
+        "sk": "Prvý sviatok vianočný",
+        "sl": "božič",
+        "sq": "Krishtlindja",
+        "sr": "Католички Божић",
+        "sv": "juldagen",
+        "sw": "Krismasi",
+        "ti": "ልደት",
+        "uk": "Різдво Христове",
+        "vi": "Lễ Giáng Sinh",
+        "zh": "聖誕節"
+      }
+    },
+    "12-26": {
+      "name": {
+        "en": "Boxing Day",
+        "bg": "2-ри ден на Коледа",
+        "cz": "2. svátek vánoční",
+        "da": "Anden Juledag",
+        "de": "2. Weihnachtstag",
+        "de-at": "Stefanitag",
+        "de-ch": "Stephanstag",
+        "el": "Δεύτερη μέρα των Χριστουγέννων",
+        "es": "San Esteban",
+        "et": "teine jõulupüha",
+        "fi": "tapaninpäivä",
+        "fo": "Fyrsti gerandisdagur eftir jóladag",
+        "fr": "Lendemain de Noël",
+        "hr": "Sveti Stjepan",
+        "hu": "Karácsony másnapja",
+        "it": "Santo Stefano",
+        "is": "Annar í jólum",
+        "kl": "juullip aappaa",
+        "lb": "Stiefesdag",
+        "lt": "2. Kalėdų diena",
+        "lv": "Otrie Ziemassvētki",
+        "nl": "Tweede kerstdag",
+        "no": "Andre juledag",
+        "pap": "Di dos Dia Pasco di Nascimento",
+        "pl": "Drugi dzień Bożego Narodzenia",
+        "ro": "A doua zi de Crăciun",
+        "sk": "Druhý sviatok vianočný",
+        "sv": "annandag jul",
+        "vi": "Ngày tặng quà"
+      }
+    },
+    "12-31": {
+      "name": {
+        "en": "New Year's Eve",
+        "da": "Nytårsaften",
+        "de": "Silvester",
+        "es": "Fin del Año",
+        "fi": "Uudenvuodenaatto",
+        "fil": "Bisperas ng Bagong Taon",
+        "fo": "Nýggjársaftan",
+        "fr": "Saint-Sylvestre",
+        "hu": "Szilveszter",
+        "hy": "Նոր տարվա գիշեր",
+        "is": "Gamlársdagur",
+        "it": "Ultimo dell’anno",
+        "jp": "大晦日",
+        "lb": "Silvester",
+        "lv": "Vecgada vakars",
+        "nl": "Oudejaarsavond",
+        "no": "Nyttårsaften",
+        "pl": "Sylwester",
+        "pt": "Véspera de Ano Novo",
+        "sv": "nyårsafton",
+        "th": "วันสิ้นปี",
+        "vi": "Đêm giao thừa"
+      }
+    },
+    "Reformation Day": {
+      "name": {
+        "en": "Reformation Day",
+        "de": "Reformationstag",
+        "es": "Día Nacional de las Iglesias Evangélicas y Protestantes",
+        "nl": "Hervormingsdag",
+        "vi": "Kháng Cách"
+      }
+    },
+    "03-08": {
+      "name": {
+        "en": "International Women's Day",
+        "az": "Qadınlar günü",
+        "be": "Мiжнародны жаночы дзень",
+        "bg": "Ден на жената",
+        "de": "Internationaler Frauentag",
+        "fr": "Journée internationale des femmes",
+        "ge": "ქალთა საერთაშორისო დღე",
+        "hu": "Nemzetközi nőnap",
+        "hy": "Կանանց տոն",
+        "kk": "Халықаралық әйелдер күні",
+        "lb": "Internationale Fraendag",
+        "nl": "Internationale Vrouwendag",
+        "no": "Kvinnedagen",
+        "pl": "Dzień Kobiet",
+        "pt": "Dia Internacional da Mulher",
+        "ro": "Ziua Internationala a Femeii",
+        "ru": "Международный женский день",
+        "sl": "Mednarodni dan žena",
+        "uk": "Міжнародний жіночий день",
+        "vi": "Quốc tế Phụ nữ",
+        "zh": "国际妇女节",
+        "ti": "መዓልቲ ኣነስቲ",
+        "es": "Día de la Mujer"
+      }
+    },
+    "01-06": {
+      "name": {
+        "en": "Epiphany",
+        "am": "ብርሐነ ጥምቀት",
+        "da": "Åbenbaring",
+        "de": "Heilige Drei Könige",
+        "de-ch": "Dreikönigstag",
+        "es": "Día de los Reyes Magos",
+        "et": "kolmekuningapäev",
+        "fi": "loppiainen",
+        "fr": "l’Épiphanie",
+        "el": "Θεοφάνεια",
+        "hr": "Bogojavljenje ili Sveta tri kralja",
+        "hu": "Vízkereszt",
+        "it": "Epifania",
+        "is": "Þrettándinn",
+        "lb": "Dräikinneksdag",
+        "nl": "Driekoningen",
+        "mk": "Богојавление",
+        "pl": "Święto Trzech Króli",
+        "pt": "Epifania do Senhor",
+        "sk": "Zjavenie Pána",
+        "sv": "trettondedag jul",
+        "ti": "ጥምቀት",
+        "vi": "Lễ Hiển Linh"
+      }
+    },
+    "easter 60": {
+      "name": {
+        "en": "Corpus Christi",
+        "de": "Fronleichnam",
+        "es": "Corpus Christi",
+        "fr": "la Fête-Dieu",
+        "it": "Corpus Domini",
+        "hr": "Tijelovo",
+        "nl": "Sacramentsdag",
+        "pl": "Dzień Bożego Ciała",
+        "pt": "Corpo de Deus",
+        "vi": "Lễ Mình và Máu Thánh Chúa Kitô"
+      }
+    },
+    "02-02": {
+      "name": {
+        "en": "Candlemas",
+        "de": "Lichtmess",
+        "hu": "Gyertyaszentelő Boldogasszony",
+        "lb": "Liichtmëssdag",
+        "nl": "Lichtmis",
+        "vi": "Lễ Đức Mẹ dâng Chúa Giêsu trong đền thánh"
+      }
+    },
+    "08-15": {
+      "name": {
+        "en": "Assumption",
+        "de": "Mariä Himmelfahrt",
+        "es": "Asunción",
+        "fr": "Assomption",
+        "el": "Κοίμηση της Θεοτόκου",
+        "hr": "Velika Gospa",
+        "it": "Assunzione di Maria",
+        "lb": "Léiffrawëschdag",
+        "lt": "Žolinė",
+        "mg": "Asompsiona",
+        "mk": "Успение на Пресвета Богородица",
+        "mt": "Santa Marija",
+        "nl": "O.L.V. Hemelvaart",
+        "pl": "Wniebowzięcie Najświętszej Maryi Panny",
+        "pt": "Assunção de Maria",
+        "ro": "Adormirea Maicii Domnului",
+        "sl": "Marijino vnebovzetje",
+        "sq": "Shën Mëria e Gushtit",
+        "vi": "Đức Mẹ Lên Trời"
+      }
+    }
+  }
+}

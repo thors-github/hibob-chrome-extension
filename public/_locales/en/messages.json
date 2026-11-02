@@ -1,0 +1,5 @@
+{
+  "appName": { "message": "HiBob Monthly Attendance" },
+  "appDescription": { "message": "Fill your own HiBob attendance with a monthly preview, holidays and breaks." },
+  "actionTitle": { "message": "Open HiBob Monthly Attendance" }
+}
