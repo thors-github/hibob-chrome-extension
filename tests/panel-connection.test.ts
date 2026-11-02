@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Blob as NodeBlob } from 'node:buffer';
 import { buildMonthPlan, defaultSettings, formatMinutes, getMonthDates } from '../src/domain/index';
 import { contextFingerprint } from '../src/shared/context';
 import type { AccountConfirmation, BookingPlan, PreflightResult, MonthSnapshot, PlanEditLease, SessionState, Settings } from '../src/shared/types';
@@ -31,10 +32,10 @@ function reviewedState(mode: 'stable-identity' | 'user-confirmed-ui' | 'api-sess
   scanned.days.find(day => day.date === '2026-11-02')!.reportedMinutes = 480;
   const plan = buildMonthPlan(settings, scanned, { '2026-11-02': 'skip' }, 123);
   expect(plan.canReview).toBe(true);
-  return { schemaVersion: 4, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan };
+  return { schemaVersion: 5, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan };
 }
 
-type Message = { type: string; date?: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; plan?: BookingPlan; jobId?: string; confirmation?: AccountConfirmation };
+type Message = { type: string; date?: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; plan?: BookingPlan; planId?: string; jobId?: string; confirmation?: AccountConfirmation; options?: { checkpointDates: string[] } };
 type Reply = { ok: boolean; state?: SessionState; error?: string; preflight?: PreflightResult };
 
 function mockChrome(options: {
@@ -45,7 +46,7 @@ function mockChrome(options: {
   onMessage?: (message: Message, state: SessionState) => Promise<Reply | undefined>;
 } = {}) {
   const listeners = new Set<StorageListener>();
-  let backend: SessionState = { schemaVersion: 4, revision: 0, planRevision: 0, ...structuredClone(options.state ?? {}) };
+  let backend: SessionState = { schemaVersion: 5, revision: 0, planRevision: 0, ...structuredClone(options.state ?? {}) };
   const sendMessage = vi.fn(async (message: Message): Promise<Reply> => {
     const custom = await options.onMessage?.(message, structuredClone(backend));
     if (custom) return custom;
@@ -86,7 +87,7 @@ function mockChrome(options: {
     sendMessage, addListener, setSettings,
     get state() { return structuredClone(backend); },
     emit(state: SessionState) {
-      backend = { schemaVersion: 4, revision: (backend.revision ?? 0) + 1, planRevision: (backend.planRevision ?? 0) + 1, ...structuredClone(state) };
+      backend = { schemaVersion: 5, revision: (backend.revision ?? 0) + 1, planRevision: (backend.planRevision ?? 0) + 1, ...structuredClone(state) };
       for (const listener of listeners) listener({ sessionState: { newValue: structuredClone(backend) } }, 'session');
     },
   };
@@ -116,6 +117,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  window.dispatchEvent(new Event('pagehide'));
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.resetModules();
@@ -130,7 +133,7 @@ describe('actual extension panel connection states', () => {
     button('connect').click();
     await vi.waitFor(() => expect(title()).toBe('Mit HiBob verbunden'));
     expect(detail()).toContain('Thorsten Test · Test Company');
-    expect(detail()).toContain('Direkte API-Verbindung');
+    expect(document.getElementById('connection-technical')?.textContent).toContain('Direkte API-Verbindung');
     expect(button('scan').disabled).toBe(false);
     button('disconnect').click();
     await vi.waitFor(() => expect(title()).toBe('Mit HiBob verbinden'));
@@ -423,13 +426,13 @@ describe('actual extension panel connection states', () => {
   });
 
   it.each(['scan', 'apply'] as const)('restores an active %s job and cancels only its canonical job id', async kind => {
-    const state: SessionState = { schemaVersion: 4, revision: 2, planRevision: 2, connection: connection(),
+    const state: SessionState = { schemaVersion: 5, revision: 2, planRevision: 2, connection: connection(),
       job: { id: `${kind}-job-7`, kind, status: 'running', connectionId: 'test-connection', month: '2026-11', startedAt: '2026-11-02T09:00:00Z', updatedAt: '2026-11-02T09:00:01Z' },
       progress: { phase: kind, completed: 7, total: 30, message: 'Local job fixture' } };
     const chrome = mockChrome({ state });
     await mount();
     await vi.waitFor(() => expect(button('cancel-run').hidden).toBe(false));
-    if (kind === 'scan') expect(button('scan').textContent).toBe('Monat wird eingelesen …');
+    if (kind === 'scan') expect(button('scan').textContent).toBe('Vorschau wird geprüft …');
     expect(button('scan').disabled).toBe(true);
     expect((document.getElementById('settings-fieldset') as HTMLFieldSetElement).disabled).toBe(true);
     expect(document.getElementById('scan-progress')?.hidden).toBe(false);
@@ -444,11 +447,11 @@ describe('actual extension panel connection states', () => {
     await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
     change('month', '2026-12');
     expect(title()).toBe('Mit HiBob verbunden');
-    expect(detail()).toContain('Dezember 2026');
+    expect(field('month').value).toBe('2026-12');
     expect(document.querySelectorAll('#weeks article.day')).toHaveLength(0);
     expect(button('apply').disabled).toBe(true);
     await vi.waitFor(() => expect(button('scan').disabled).toBe(false));
-    expect(button('scan').textContent).toBe('Monat einlesen');
+    expect(button('scan').textContent).toBe('Vorschau erstellen');
   });
 
   it('creates a preview explicitly from a completed scan restored without a plan', async () => {
@@ -682,9 +685,9 @@ describe('actual extension panel connection states', () => {
     await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
     button('apply').click(); button('check-draft').click();
     await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_PREFLIGHT')).toBe(true));
-    chrome.emit({ schemaVersion: 4, revision: 10, planRevision: 10, connection: connection('replacement-connection') });
+    chrome.emit({ schemaVersion: 5, revision: 10, planRevision: 10, connection: connection('replacement-connection') });
     const day = initial.plan!.days.find(day => day.date === '2026-11-03')!;
-    held.resolve({ ok: true, state: { schemaVersion: 4, revision: 2, planRevision: 2, connection: connection() }, preflight: { date: day.date, checked: true, netMinutes: day.netMinutes!, saved: false, serverValidated: false } });
+    held.resolve({ ok: true, state: { schemaVersion: 5, revision: 2, planRevision: 2, connection: connection() }, preflight: { date: day.date, checked: true, netMinutes: day.netMinutes!, saved: false, serverValidated: false } });
     await settleStartup();
     expect(document.getElementById('draft-check-result')?.hidden).toBe(true);
     expect(button('apply').disabled).toBe(true);
@@ -708,5 +711,314 @@ describe('actual extension panel connection states', () => {
     expect(button('apply').disabled).toBe(true);
     expect(button('scan').disabled).toBe(false);
     expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
+  });
+});
+
+function checkpointState(checkpointId = 'checkpoint-one'): SessionState {
+  const scanned = snapshot('api-session');
+  const plan = buildMonthPlan(settings, scanned, {}, 123);
+  const now = '2026-11-02T10:00:00Z';
+  return { schemaVersion: 5, revision: 2, planRevision: 1, connection: connection(), snapshot: scanned, plan,
+    job: { id: 'paused-job', kind: 'apply', status: 'paused', connectionId: 'test-connection', checkpointId, month: settings.month, startedAt: now, updatedAt: now },
+    run: { runId: 'paused-job', planId: plan.id, status: 'paused', checkpointDate: '2026-11-02', startedAt: now, updatedAt: now,
+      results: plan.days.map(day => ({ date: day.date, status: day.date === '2026-11-02' ? 'verified' : day.eligible ? 'pending' : 'skipped', message: day.date === '2026-11-02' ? 'Saved and verified' : 'Pending' })) } };
+}
+
+describe('compact monthly flow and verification checkpoints', () => {
+  it.each([false, true])('polls the worker journal after an early ACK when terminal storage publication fails (alreadyVerified=%s)', async alreadyVerified => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const initial = checkpointState(); delete initial.job; delete initial.run;
+    const active = checkpointState(); active.revision = 3; active.job!.status = 'running'; active.run!.status = 'running';
+    active.run!.results.find(result => result.date === '2026-11-02')!.status = 'running';
+    let rpcState = structuredClone(initial);
+    const chrome = mockChrome({ state: initial, onMessage: async command => {
+      if (command.type === 'PANEL_GET_STATE') return { ok: true, state: structuredClone(rpcState) };
+      if (command.type === 'PANEL_APPLY') { rpcState = structuredClone(active); return { ok: true, state: structuredClone(active) }; }
+    } });
+    await mount(); await vi.advanceTimersByTimeAsync(0);
+    expect(button('apply').disabled).toBe(false); button('apply').click();
+    field('account-confirmation').checked = true; field('account-confirmation').dispatchEvent(new Event('change')); button('confirm-apply').click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(button('scan').disabled).toBe(true); expect(button('cancel-run').hidden).toBe(false);
+    const failed = structuredClone(active); failed.revision = 4; failed.planRevision = 2; failed.job = undefined; failed.snapshot = undefined; failed.plan!.canReview = false; failed.run!.status = 'failed';
+    failed.error = 'Local journal could not be saved. Read the month again.';
+    const first = failed.run!.results.find(result => result.date === '2026-11-02')!;
+    first.status = alreadyVerified ? 'verified' : 'pending'; first.message = alreadyVerified ? 'Saved and verified before journal failure.' : 'Not written: initial journal failed.';
+    rpcState = failed; // Deliberately no chrome.storage.onChanged notification.
+    const gets = () => chrome.sendMessage.mock.calls.filter(([command]) => command.type === 'PANEL_GET_STATE').length;
+    expect(gets()).toBe(1); await vi.advanceTimersByTimeAsync(4999); expect(gets()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(gets()).toBe(2); expect(document.getElementById('main-error')?.textContent).toBe(failed.error);
+    expect(document.getElementById('run-status')?.textContent).toContain(`Lauf mit Fehler angehalten · ${alreadyVerified ? 1 : 0} von 21 Tagen verifiziert`);
+    expect(document.getElementById('run-status')?.textContent).not.toContain('Lauf abgeschlossen');
+    expect(document.querySelector(`[data-status="${alreadyVerified ? 'verified' : 'pending'}"]`)?.textContent).toContain(first.message);
+    expect(button('cancel-run').hidden).toBe(true); expect(button('scan').disabled).toBe(false); expect(button('apply').disabled).toBe(true);
+    expect((document.getElementById('settings-fieldset') as HTMLFieldSetElement).disabled).toBe(false);
+    await vi.advanceTimersByTimeAsync(15_000); expect(gets()).toBe(2);
+    expect(chrome.sendMessage.mock.calls.filter(([command]) => command.type === 'PANEL_APPLY')).toHaveLength(1);
+    expect(chrome.sendMessage.mock.calls.every(([command]) => ['PANEL_GET_STATE', 'PANEL_APPLY'].includes(command.type))).toBe(true);
+  });
+
+  it('bounds polling to one in-flight read and stops when hidden or closed, then reads immediately when shown', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    let visibility: DocumentVisibilityState = 'visible'; vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+    const active = checkpointState(); active.job!.status = 'running'; active.run!.status = 'running';
+    const held = deferred<Reply>(); let gets = 0;
+    const chrome = mockChrome({ state: active, onMessage: async command => {
+      if (command.type === 'PANEL_GET_STATE' && ++gets === 2) return held.promise;
+    } });
+    await mount(); await vi.advanceTimersByTimeAsync(0); expect(gets).toBe(1);
+    await vi.advanceTimersByTimeAsync(5000); expect(gets).toBe(2);
+    await vi.advanceTimersByTimeAsync(15_000); expect(gets).toBe(2);
+    visibility = 'hidden'; document.dispatchEvent(new Event('visibilitychange'));
+    held.resolve({ ok: true, state: active }); await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(15_000); expect(gets).toBe(2);
+    visibility = 'visible'; document.dispatchEvent(new Event('visibilitychange')); await vi.advanceTimersByTimeAsync(0); expect(gets).toBe(3);
+    window.dispatchEvent(new Event('pagehide')); await vi.advanceTimersByTimeAsync(15_000); expect(gets).toBe(3);
+    expect(chrome.sendMessage.mock.calls.every(([command]) => command.type === 'PANEL_GET_STATE')).toBe(true);
+  });
+
+  it('keeps an active booking locked if a status poll fails and stops polling at a later canonical pause', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    const active = checkpointState(); active.job!.status = 'running'; active.run!.status = 'running'; let gets = 0;
+    const paused = checkpointState('later-checkpoint'); paused.revision = 4;
+    mockChrome({ state: active, onMessage: async command => {
+      if (command.type !== 'PANEL_GET_STATE') return;
+      if (++gets === 2) throw new Error('Worker status temporarily unavailable');
+      if (gets >= 3) return { ok: true, state: structuredClone(paused) };
+    } });
+    await mount(); await vi.advanceTimersByTimeAsync(5000);
+    expect(gets).toBe(2); expect(document.getElementById('main-error')?.textContent).toContain('Buchungsstatus konnte nicht gelesen werden');
+    expect(button('scan').disabled).toBe(true); expect(button('apply').disabled).toBe(true); expect(button('cancel-run').hidden).toBe(false);
+    await vi.advanceTimersByTimeAsync(5000); expect(gets).toBe(3);
+    expect(document.getElementById('paused-card')?.hidden).toBe(false); expect(document.getElementById('main-error')?.hidden).toBe(true);
+    expect(button('continue-run').disabled).toBe(false); expect(button('scan').disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(15_000); expect(gets).toBe(3);
+  });
+
+  it.each([false, true])('keeps controls locked after an early booking acknowledgement until canonical storage completion (continue=%s)', async resume => {
+    const initial = checkpointState();
+    if (!resume) { delete initial.job; delete initial.run; }
+    const running = checkpointState(); running.revision = 3; running.job!.status = 'running'; running.run!.status = 'running';
+    if (!resume) for (const result of running.run!.results) if (result.status === 'verified') result.status = 'pending';
+    const commandType = resume ? 'PANEL_CONTINUE' : 'PANEL_APPLY';
+    const chrome = mockChrome({ state: initial, onMessage: async command => {
+      if (command.type === commandType) { chrome.emit(running); return { ok: true, state: structuredClone(running) }; }
+    } });
+    await mount();
+    await vi.waitFor(() => expect(button(resume ? 'continue-run' : 'apply').disabled).toBe(false));
+    button(resume ? 'continue-run' : 'apply').click();
+    await vi.waitFor(() => expect(dialog('apply-dialog').open).toBe(true));
+    field('account-confirmation').checked = true; field('account-confirmation').dispatchEvent(new Event('change'));
+    button('confirm-apply').click();
+    await vi.waitFor(() => expect(button('apply').textContent).toBe('Bitte warten …'));
+    await settleStartup();
+    expect(dialog('apply-dialog').open).toBe(false);
+    expect(button('scan').disabled).toBe(true); expect(button('disconnect').disabled).toBe(true); expect(button('export-plan').disabled).toBe(true);
+    expect((document.getElementById('settings-fieldset') as HTMLFieldSetElement).disabled).toBe(true);
+    expect(button('cancel-run').hidden).toBe(false); expect(button('cancel-run').disabled).toBe(false);
+    expect(document.getElementById('run-status')?.textContent).toContain('Buchungen laufen');
+    expect(document.getElementById('run-status')?.textContent).not.toContain('Lauf abgeschlossen');
+    expect(chrome.sendMessage.mock.calls.filter(([message]) => message.type === commandType)).toHaveLength(1);
+    if (resume) {
+      const paused = checkpointState('checkpoint-next'); paused.revision = 4; paused.run!.checkpointDate = '2026-11-03';
+      paused.run!.results.find(result => result.date === '2026-11-03')!.status = 'verified';
+      chrome.emit(paused);
+      await vi.waitFor(() => expect(button('continue-run').disabled).toBe(false)); button('continue-run').click();
+      await vi.waitFor(() => expect(dialog('apply-dialog').open).toBe(true));
+      expect(field('account-confirmation').checked).toBe(false); expect(button('confirm-apply').disabled).toBe(true);
+      expect(document.getElementById('apply-details')?.textContent).toContain('Bereits gespeichert und geprüft2');
+    } else {
+      const failed = structuredClone(running); failed.revision = 4; failed.job = undefined; failed.snapshot = undefined; failed.plan!.canReview = false;
+      failed.run!.status = 'failed'; failed.run!.results.find(result => result.date === '2026-11-02')!.status = 'uncertain';
+      failed.error = 'Readback failed after the acknowledged write.'; chrome.emit(failed);
+      await vi.waitFor(() => expect(document.getElementById('main-error')?.textContent).toBe(failed.error));
+      expect(document.getElementById('run-uncertain')?.hidden).toBe(false); expect(button('cancel-run').hidden).toBe(true);
+      expect(button('scan').disabled).toBe(false); expect(button('apply').disabled).toBe(true);
+    }
+  });
+
+  it('ignores an older early acknowledgement after newer completion storage arrived', async () => {
+    const initial = checkpointState(); delete initial.job; delete initial.run;
+    const reply = deferred<Reply>();
+    const chrome = mockChrome({ state: initial, onMessage: async command => command.type === 'PANEL_APPLY' ? reply.promise : undefined });
+    await mount(); await vi.waitFor(() => expect(button('apply').disabled).toBe(false)); button('apply').click();
+    field('account-confirmation').checked = true; field('account-confirmation').dispatchEvent(new Event('change')); button('confirm-apply').click();
+    await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([command]) => command.type === 'PANEL_APPLY')).toBe(true));
+    const active = checkpointState(); active.revision = 3; active.job!.status = 'running'; active.run!.status = 'running'; chrome.emit(active);
+    const completed = structuredClone(active); completed.revision = 4; completed.planRevision = 2; completed.job = undefined; completed.snapshot = undefined; completed.plan!.canReview = false;
+    completed.run!.status = 'complete'; for (const result of completed.run!.results) if (result.status !== 'skipped') result.status = 'verified'; chrome.emit(completed);
+    reply.resolve({ ok: true, state: active });
+    await vi.waitFor(() => expect(button('cancel-run').hidden).toBe(true));
+    expect(document.getElementById('run-status')?.textContent).toContain('Lauf abgeschlossen · 21 von 21 Tagen verifiziert');
+    expect(button('scan').disabled).toBe(false); expect(button('apply').disabled).toBe(true);
+    expect(chrome.sendMessage.mock.calls.filter(([command]) => command.type === 'PANEL_APPLY')).toHaveLength(1);
+  });
+
+  it('distinguishes an uncertain saved outcome from remaining days never attempted', async () => {
+    const initial = checkpointState(); initial.run!.status = 'failed'; initial.job = undefined; initial.snapshot = undefined; initial.plan!.canReview = false;
+    const first = initial.run!.results.find(result => result.date === '2026-11-02')!;
+    first.status = 'uncertain'; first.message = 'Saved entries could not be verified: unexpected metadata.';
+    const next = initial.run!.results.find(result => result.date === '2026-11-03')!; next.message = 'Keine Änderung.';
+    const before = structuredClone(initial); const chrome = mockChrome({ state: initial }); await mount();
+    await vi.waitFor(() => expect(document.getElementById('run-uncertain')?.hidden).toBe(false));
+    expect(document.getElementById('run-uncertain')?.textContent).toContain('können bereits in HiBob gespeichert sein');
+    expect(document.getElementById('run-status')?.textContent).toContain('0 von 21 Tagen verifiziert');
+    expect((document.getElementById('run-history') as HTMLDetailsElement).open).toBe(true);
+    expect(document.querySelector('[data-status="uncertain"] .run-outcome')?.textContent).toBe('Speicherstatus unklar');
+    expect(document.querySelector('[data-status="uncertain"]')?.textContent).toContain(first.message);
+    expect(document.querySelector('[data-status="pending"]')?.textContent).toContain('Noch nicht ausgeführt');
+    expect(document.querySelector('[data-status="pending"]')?.textContent).not.toContain('Keine Änderung.');
+    expect(chrome.state.run).toEqual(before.run);
+    expect(chrome.sendMessage.mock.calls.every(([message]) => message.type === 'PANEL_GET_STATE')).toBe(true);
+    expect(chrome.setSettings).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('downloads a private context-free review without changing the plan or consent (paused=%s)', async paused => {
+    const initial = paused ? checkpointState() : reviewedState('api-session');
+    const chrome = mockChrome({ state: initial }); await mount();
+    await vi.waitFor(() => expect(button('export-plan').disabled).toBe(false));
+    const blobs: NodeBlob[] = []; const filenames: string[] = [];
+    vi.stubGlobal('Blob', NodeBlob);
+    const NativeUrl = URL;
+    vi.stubGlobal('URL', class extends NativeUrl { static createObjectURL(blob: Blob | MediaSource) { blobs.push(blob as unknown as NodeBlob); return 'blob:local-review'; } static revokeObjectURL() {} });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function(this: HTMLAnchorElement) { filenames.push(this.download); });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    if (!paused) { button('apply').click(); field('account-confirmation').checked = true; field('account-confirmation').dispatchEvent(new Event('change')); }
+    const before = structuredClone(chrome.state); const calls = chrome.sendMessage.mock.calls.length;
+    button('export-plan').click();
+    const exported = JSON.parse(await blobs[0].text());
+    expect(filenames).toEqual(['hibob-booking-plan-2026-11.json']);
+    expect(exported).toMatchObject({ format: 'hibob-attendance-review', version: 1, planRevision: initial.planRevision });
+    expect(exported.plan.snapshot.context).toBeUndefined();
+    expect(JSON.stringify(exported)).not.toMatch(/test-employee|test-company|test-connection|connectionId|employeeKey|tenantKey/);
+    expect(exported.plan.days.find((day: { date: string }) => day.date === '2026-11-03').proposed).toHaveLength(3);
+    expect(exported.plan.seed).toBe(initial.plan!.seed);
+    expect(exported.run).toEqual(paused ? initial.run : undefined);
+    expect(chrome.state).toEqual(before); expect(chrome.sendMessage.mock.calls).toHaveLength(calls); expect(chrome.setSettings).not.toHaveBeenCalled();
+    if (!paused) { expect(dialog('apply-dialog').open).toBe(true); expect(field('account-confirmation').checked).toBe(true); }
+    vi.runAllTimers(); vi.useRealTimers();
+  });
+
+  it('refuses a forced download click while the current operation is busy', async () => {
+    const initial = reviewedState('api-session'); const chrome = mockChrome({ state: initial }); await mount();
+    await vi.waitFor(() => expect(button('export-plan').disabled).toBe(false));
+    chrome.emit({ ...initial, revision: 3, job: { id: 'busy', kind: 'apply', status: 'running', connectionId: 'test-connection', month: settings.month, startedAt: '2026-11-02T10:00:00Z', updatedAt: '2026-11-02T10:00:00Z' } });
+    expect(button('export-plan').disabled).toBe(true);
+    const clicked = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const before = structuredClone(chrome.state); const calls = chrome.sendMessage.mock.calls.length;
+    button('export-plan').dispatchEvent(new Event('click'));
+    expect(clicked).not.toHaveBeenCalled(); expect(chrome.state).toEqual(before); expect(chrome.sendMessage.mock.calls).toHaveLength(calls); expect(chrome.setSettings).not.toHaveBeenCalled();
+  });
+
+  it('opens configuration and details without changing settings, plan or allocation', async () => {
+    const initial = reviewedState('api-session'); const chrome = mockChrome({ state: initial });
+    await mount(); await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    expect(document.getElementById('settings-options')?.hidden).toBe(true);
+    expect(button('schedule-summary').textContent).toContain('08:00–16:30');
+    const before = structuredClone(chrome.state.plan);
+    button('settings-toggle').click();
+    expect(document.getElementById('settings-options')?.hidden).toBe(false);
+    expect(button('settings-toggle').getAttribute('aria-expanded')).toBe('true');
+    button('schedule-summary').click();
+    expect(document.getElementById('settings-options')?.hidden).toBe(true);
+    const details = document.querySelector<HTMLDetailsElement>('[data-day-details="2026-11-03"]')!; details.open = true;
+    document.getElementById('more-options')!.dispatchEvent(new Event('toggle'));
+    expect(chrome.state.plan).toEqual(before);
+    expect(chrome.setSettings).not.toHaveBeenCalled();
+    expect(chrome.sendMessage.mock.calls.every(([message]) => message.type === 'PANEL_GET_STATE')).toBe(true);
+  });
+
+  it('reveals and focuses an invalid collapsed setting before any month read', async () => {
+    const chrome = mockChrome({ state: { connection: connection() } });
+    await mount(); await vi.waitFor(() => expect(button('scan').disabled).toBe(false));
+    change('start', '');
+    await vi.waitFor(() => expect(button('scan').disabled).toBe(false));
+    button('scan').click();
+    expect(document.getElementById('settings-options')?.hidden).toBe(false);
+    expect(document.activeElement).toBe(field('start'));
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_SCAN')).toBe(false);
+  });
+
+  it('keeps automatic skipped dates unchecked while progress disables every control', async () => {
+    const initial = reviewedState('api-session'); const chrome = mockChrome({ state: initial });
+    await mount(); await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    expect(field('include-2026-11-07').checked).toBe(false);
+    chrome.emit({ ...initial, revision: 3, job: { id: 'running-job', kind: 'apply', status: 'running', connectionId: 'test-connection', month: settings.month, startedAt: '2026-11-02T10:00:00Z', updatedAt: '2026-11-02T10:00:00Z' } });
+    expect(field('include-2026-11-07').checked).toBe(false);
+    expect(field('include-2026-11-07').disabled).toBe(true);
+    expect(field('include-2026-11-03').checked).toBe(true);
+    expect(field('include-2026-11-03').disabled).toBe(true);
+  });
+
+  it('lets an explicitly selected unreadable workday be excluded without silently dropping its target', async () => {
+    const scanned = snapshot('api-session'); const broken = scanned.days.find(day => day.date === '2026-11-03')!;
+    broken.editable = false; broken.unsupportedReason = 'Unsupported local fixture entry';
+    const initial: SessionState = { schemaVersion: 5, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan: buildMonthPlan(settings, scanned, {}, 123) };
+    const chrome = mockChrome({ state: initial }); await mount();
+    await vi.waitFor(() => expect(document.querySelector('[data-date="2026-11-03"]')).not.toBeNull());
+    expect(field('include-2026-11-03').checked).toBe(true);
+    expect(field('include-2026-11-03').disabled).toBe(false);
+    expect(chrome.state.plan!.weeks.find(week => week.week === '2026-11-02')!.targetMinutes).toBe(2400);
+    field('include-2026-11-03').click();
+    await vi.waitFor(() => expect(chrome.state.plan!.days.find(day => day.date === '2026-11-03')!.action).toBe('skip'));
+    expect(chrome.state.plan!.settings.excludedDates).toContain('2026-11-03');
+    expect(chrome.state.plan!.weeks.find(week => week.week === '2026-11-02')!.targetMinutes).toBe(1920);
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
+  });
+
+  it('keeps verification pauses transient and binds initial options to the reviewed dates', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-11-02T08:00:00Z'));
+    const initial = checkpointState(); delete initial.job; delete initial.run;
+    const chrome = mockChrome({ state: initial }); await mount();
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false)); button('apply').click();
+    expect(field('pause-verification').checked).toBe(false);
+    field('account-confirmation').checked = true; field('account-confirmation').dispatchEvent(new Event('change'));
+    field('pause-verification').checked = true; field('pause-verification').dispatchEvent(new Event('change'));
+    expect(field('account-confirmation').checked).toBe(false);
+    expect(button('confirm-apply').disabled).toBe(true);
+    field('account-confirmation').checked = true; field('account-confirmation').dispatchEvent(new Event('change'));
+    button('confirm-apply').click();
+    await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(true));
+    const command = chrome.sendMessage.mock.calls.find(([message]) => message.type === 'PANEL_APPLY')![0];
+    expect(command.options).toEqual({ checkpointDates: ['2026-11-02', '2026-11-03'] });
+    expect(command.confirmation?.checkpointId).toBeUndefined();
+    expect(field('pause-verification').checked).toBe(false);
+    expect(chrome.setSettings).not.toHaveBeenCalled(); vi.useRealTimers();
+  });
+
+  it('requires new checkpoint-bound consent to continue only the remaining frozen days', async () => {
+    const initial = checkpointState(); const chrome = mockChrome({ state: initial }); await mount();
+    await vi.waitFor(() => expect(document.getElementById('paused-card')?.hidden).toBe(false));
+    expect(button('apply').hidden).toBe(true);
+    expect(document.getElementById('preview-summary')?.textContent).toContain('21Tage im Monatsplan');
+    expect((document.getElementById('settings-fieldset') as HTMLFieldSetElement).disabled).toBe(true); expect(button('scan').disabled).toBe(true); expect(button('disconnect').disabled).toBe(true);
+    expect(field('include-2026-11-07').checked).toBe(false);
+    button('continue-run').click(); await vi.waitFor(() => expect(dialog('apply-dialog').open).toBe(true));
+    expect(field('account-confirmation').checked).toBe(false); expect(button('confirm-apply').disabled).toBe(true);
+    expect(button('confirm-apply').textContent).toContain('20');
+    expect(document.getElementById('apply-details')?.textContent).toContain('Bereits gespeichert und geprüft1');
+    button('confirm-apply').dispatchEvent(new Event('click'));
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_CONTINUE')).toBe(false);
+    field('account-confirmation').checked = true; field('account-confirmation').dispatchEvent(new Event('change'));
+    button('confirm-apply').click();
+    await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_CONTINUE')).toBe(true));
+    const command = chrome.sendMessage.mock.calls.find(([message]) => message.type === 'PANEL_CONTINUE')![0];
+    expect(command).toMatchObject({ jobId: 'paused-job', planId: initial.plan!.id, expectedPlanRevision: 1, confirmation: { confirmed: true, checkpointId: 'checkpoint-one' } });
+    expect(chrome.state.plan).toEqual(initial.plan);
+    expect(chrome.sendMessage.mock.calls.some(([message]) => ['PANEL_APPLY', 'PANEL_SCAN', 'PANEL_SAVE_PLAN'].includes(message.type))).toBe(false);
+  });
+
+  it('closes an old pause confirmation when only the checkpoint nonce changes', async () => {
+    const initial = checkpointState(); const chrome = mockChrome({ state: initial }); await mount();
+    await vi.waitFor(() => expect(button('continue-run').disabled).toBe(false)); button('continue-run').click();
+    await vi.waitFor(() => expect(dialog('apply-dialog').open).toBe(true));
+    field('account-confirmation').checked = true; field('account-confirmation').dispatchEvent(new Event('change'));
+    const replacement = structuredClone(initial); replacement.job!.checkpointId = 'checkpoint-two';
+    chrome.emit({ ...replacement, revision: 3, planRevision: 1 });
+    expect(dialog('apply-dialog').open).toBe(false); expect(field('account-confirmation').checked).toBe(false);
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_CONTINUE')).toBe(false);
   });
 });

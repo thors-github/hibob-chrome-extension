@@ -182,13 +182,13 @@ describe('write queue and recovery', () => {
     await review(controller, planFor(controller));
     const original = structuredClone(controller.state.plan!);
     await controller.bindConnection(undefined, 'Bitte HiBob öffnen.');
-    expect(stored()).toMatchObject({ error: 'Bitte HiBob öffnen.', schemaVersion: 4 });
+    expect(stored()).toMatchObject({ error: 'Bitte HiBob öffnen.', schemaVersion: 5 });
     expect(stored()?.tabId).toBeUndefined();
     await expect(controller.scan('2026-11')).rejects.toThrow('anmelden');
     await expect(applyReviewed(controller, original)).rejects.toThrow('Vorschau');
     expect(bridge.applyDay).not.toHaveBeenCalled();
     await controller.bindConnection(connection('connection-99'));
-    expect(controller.state).toMatchObject({ connection: connection('connection-99'), error: undefined, schemaVersion: 4 });
+    expect(controller.state).toMatchObject({ connection: connection('connection-99'), error: undefined, schemaVersion: 5 });
     await controller.scan('2026-11');
     await review(controller, planFor(controller));
     await controller.bindConnection(connection('connection-100'));
@@ -406,7 +406,7 @@ describe('canonical edit leases, journaling, and job recovery', () => {
   });
 
   it('migrates a legacy interrupted scan to explicit recovery and checks adapter idleness before a new scan', async () => {
-    const { controller, bridge } = await setup({ schemaVersion: 4, connection: connection(), progress: { phase: 'scan', completed: 12, total: 30, message: 'Reading' } });
+    const { controller, bridge } = await setup({ schemaVersion: 5, connection: connection(), progress: { phase: 'scan', completed: 12, total: 30, message: 'Reading' } });
     const oldJob = controller.state.job!;
     expect(oldJob.status).toBe('interrupted');
     expect(controller.state.progress).toBeUndefined();
@@ -414,7 +414,7 @@ describe('canonical edit leases, journaling, and job recovery', () => {
     await controller.scan('2026-11');
     expect(bridge.recover).toHaveBeenCalledWith(connection(), oldJob.id);
     expect(controller.state.job).toBeUndefined();
-    expect(controller.state.schemaVersion).toBe(4);
+    expect(controller.state.schemaVersion).toBe(5);
   });
 
   it('persists an active scan, rejects stale progress and cancellation, and ignores progress after completion', async () => {
@@ -447,14 +447,14 @@ describe('canonical edit leases, journaling, and job recovery', () => {
     expect(controller.state.revision).toBeGreaterThan(prior);
     await controller.bindConnection(connection('connection-99'));
     expect(controller.state.revision).toBeGreaterThan(prior + 1);
-    await expect(setup({ schemaVersion: 4, job: { id: 'bad', kind: 'other' } as never })).rejects.toThrow('ungültig');
+    await expect(setup({ schemaVersion: 5, job: { id: 'bad', kind: 'other' } as never })).rejects.toThrow('ungültig');
     await expect(setup({ run: { status: 'unknown', results: [] } as never })).rejects.toThrow('ungültig');
   });
 });
 
 describe('recovery publication and cold canonical state', () => {
   it('publishes a running scan while recovering an old adapter and allows cancellation before scanning', async () => {
-    const { controller, bridge, stored } = await setup({ schemaVersion: 4, connection: connection(), progress: { phase: 'scan', completed: 12, total: 30, message: 'old' } });
+    const { controller, bridge, stored } = await setup({ schemaVersion: 5, connection: connection(), progress: { phase: 'scan', completed: 12, total: 30, message: 'old' } });
     const oldJobId = controller.state.job!.id;
     let entered!: () => void; let release!: () => void;
     const recovering = new Promise<void>(resolve => { entered = resolve; });
@@ -491,7 +491,7 @@ describe('recovery publication and cold canonical state', () => {
   });
 });
 
-describe('per-plan API account confirmation and schema 4', () => {
+describe('per-plan API account confirmation and schema 5', () => {
   async function manualPlan() {
     const fixture = await setup();
     await review(fixture.controller, planFor(fixture.controller));
@@ -549,7 +549,7 @@ describe('per-plan API account confirmation and schema 4', () => {
     expect(bridge.applyDay).not.toHaveBeenCalled();
   });
 
-  it('never restores reusable consent even when unknown consent fields are injected into a schema-4 session', async () => {
+  it('never restores reusable consent even when unknown consent fields are injected into a schema-5 session', async () => {
     const { controller } = await manualPlan();
     const inherited = structuredClone(controller.state) as SessionState & { confirmation?: unknown; authorization?: unknown };
     inherited.confirmation = consent(controller);
@@ -573,7 +573,7 @@ describe('per-plan API account confirmation and schema 4', () => {
     legacy.confirmation = { planId: legacy.plan!.id, confirmed: true };
     legacy.run = { planId: legacy.plan!.id, status: 'complete', startedAt: '2026-11-02T10:00:00Z', updatedAt: '2026-11-02T10:01:00Z', results: [{ date: '2026-11-02', status: 'verified', message: 'Historical verified day' }] };
     const restored = await setup(legacy);
-    expect(restored.controller.state.schemaVersion).toBe(4);
+    expect(restored.controller.state.schemaVersion).toBe(5);
     expect(restored.controller.state.snapshot).toBeUndefined(); expect(restored.controller.state.plan).toBeUndefined(); expect(restored.controller.state.editLease).toBeUndefined();
     expect(restored.controller.state.run).toEqual(legacy.run);
     expect(restored.controller.state.update).toEqual(legacy.update);
@@ -593,7 +593,7 @@ describe('tabless API connection lifecycle and capabilities', () => {
     const revision = app.controller.state.planRevision!;
     const connected = await app.controller.connect();
     expect(app.bridge.connect).toHaveBeenCalledOnce();
-    expect(connected).toMatchObject({ schemaVersion: 4, connection: connection(), run: history });
+    expect(connected).toMatchObject({ schemaVersion: 5, connection: connection(), run: history });
     expect(connected.tabId).toBeUndefined(); expect(connected.snapshot).toBeUndefined(); expect(connected.plan).toBeUndefined();
     expect(connected.planRevision).toBeGreaterThan(revision);
     await app.controller.scan('2026-11');
@@ -665,7 +665,7 @@ describe('tabless API connection lifecycle and capabilities', () => {
     const legacy = structuredClone(app.controller.state); legacy.schemaVersion = 3; legacy.tabId = 42;
     legacy.run = { planId: 'past', status: 'complete', results: [{ date: '2026-10-30', status: 'verified', message: 'Previously verified' }], startedAt: 'x', updatedAt: 'x' };
     const restored = await setup(legacy);
-    expect(restored.controller.state.schemaVersion).toBe(4);
+    expect(restored.controller.state.schemaVersion).toBe(5);
     expect(restored.controller.state.connection).toBeUndefined(); expect(restored.controller.state.tabId).toBeUndefined();
     expect(restored.controller.state.snapshot).toBeUndefined(); expect(restored.controller.state.plan).toBeUndefined();
     expect(restored.controller.state.run).toEqual(legacy.run);
@@ -723,5 +723,222 @@ describe('explicit API connection failure markers', () => {
       await expect(app.controller.scan('2026-11')).rejects.toThrow();
       expect(app.controller.state.connection).toEqual(original); expect(app.controller.state.snapshot).toBeUndefined();
     }
+  });
+});
+
+describe('frozen monthly queue checkpoints', () => {
+  async function checkpointFixture(dates = ['2026-11-02', '2026-11-03'], retainedDates: string[] = []) {
+    const app = await setup();
+    let actual = structuredClone(app.controller.state.snapshot!);
+    for (const date of retainedDates) {
+      const retained = actual.days.find(day => day.date === date)!;
+      retained.entries = [{ type: 'work', start: '08:00', end: '12:00', note: 'Retained fixture note' }, { type: 'break', start: '12:00', end: '12:30' }, { type: 'work', start: '12:30', end: '16:30' }];
+      retained.reportedMinutes = 480; retained.fingerprint = `retained-${date}`;
+    }
+    app.controller.state.snapshot = structuredClone(actual);
+    vi.mocked(app.bridge.scan).mockImplementation(async () => structuredClone(actual));
+    vi.mocked(app.bridge.applyDay).mockImplementation(async (_connection, day) => {
+      const saved: DaySnapshot = { date: day.date, entries: structuredClone(day.proposed), reportedMinutes: day.netMinutes, editable: true, fingerprint: `saved-${day.date}` };
+      actual.days[actual.days.findIndex(item => item.date === day.date)] = saved;
+      return structuredClone(saved);
+    });
+    const proposed = buildMonthPlan({ ...defaultSettings('2026-11'), variable: true, variationMinutes: 15 }, app.controller.state.snapshot!, Object.fromEntries(retainedDates.map(date => [date, 'skip' as const])), 81723);
+    await review(app.controller, proposed);
+    const plan = structuredClone(app.controller.state.plan!), revision = app.controller.state.planRevision!;
+    const start = () => app.controller.apply(plan, revision, consentFor(plan, revision), { checkpointDates: dates });
+    const consent = () => ({ ...consentFor(plan, revision), checkpointId: app.controller.state.job?.checkpointId });
+    const resume = (confirmation = consent()) => app.controller.continueRun(app.controller.state.job!.id, plan.id, revision, confirmation);
+    return { ...app, plan, revision, start, resume, consent, actual: () => actual, changeActual: (next: MonthSnapshot) => { actual = next; } };
+  }
+
+  it('pauses once after each requested verified day and preserves every original segment through completion', async () => {
+    const app = await checkpointFixture();
+    const first = await app.start();
+    expect(first.schemaVersion).toBe(5);
+    expect(first.run).toMatchObject({ runId: first.job!.id, planId: app.plan.id, status: 'paused', checkpointDate: '2026-11-02' });
+    expect(first.job).toMatchObject({ kind: 'apply', status: 'paused', checkpointId: expect.any(String) });
+    expect(first.plan).toEqual(app.plan); expect(first.planRevision).toBe(app.revision); expect(first.snapshot).toEqual(app.plan.snapshot);
+    expect(app.bridge.applyDay).toHaveBeenCalledTimes(1);
+    const firstNonce = first.job!.checkpointId;
+    const second = await app.resume();
+    expect(second.run).toMatchObject({ status: 'paused', checkpointDate: '2026-11-03' });
+    expect(second.job!.id).toBe(first.job!.id); expect(second.job!.checkpointId).not.toBe(firstNonce);
+    expect(app.bridge.applyDay).toHaveBeenCalledTimes(2); expect(second.plan).toEqual(app.plan);
+    const complete = await app.resume();
+    expect(complete.run?.status).toBe('complete'); expect(complete.job).toBeUndefined(); expect(complete.snapshot).toBeUndefined();
+    const days = app.plan.days.filter(day => day.action === 'create');
+    expect(vi.mocked(app.bridge.applyDay).mock.calls.map(call => call[1])).toEqual(days);
+    expect(app.bridge.applyDay).toHaveBeenCalledTimes(21);
+    expect(complete.run!.results.filter(item => item.status === 'verified')).toHaveLength(21);
+    expect(app.controller.state.plan!.seed).toBe(app.plan.seed);
+    expect(app.actual().days.flatMap(day => day.entries)).toHaveLength(63);
+  });
+
+  it('locks plan edits, scans, connections, preflight, new runs and update activation while paused', async () => {
+    const app = await checkpointFixture(); await app.start();
+    await expect(app.controller.invalidatePlan(app.revision, 'changed')).rejects.toThrow('Vorgangs');
+    await expect(app.controller.savePlan(app.plan, { planRevision: app.revision, changeId: 'changed' })).rejects.toThrow('Vorgangs');
+    await expect(app.controller.scan('2026-11')).rejects.toThrow('läuft');
+    await expect(app.controller.connect()).rejects.toThrow('läuft');
+    await expect(app.controller.disconnect()).rejects.toThrow('läuft');
+    await expect(app.controller.bindConnection(connection())).rejects.toThrow('läuft');
+    await expect(app.start()).rejects.toThrow('läuft');
+    await expect(app.controller.preflight(app.plan, app.revision, '2026-11-03', app.consent())).rejects.toThrow('läuft');
+    await expect(app.controller.activateUpdate()).rejects.toThrow('laufenden Vorgangs');
+    expect(app.bridge.applyDay).toHaveBeenCalledTimes(1);
+    expect((app.stored() as SessionState & { confirmation?: unknown }).confirmation).toBeUndefined();
+    expect((app.stored()!.run as object)).not.toHaveProperty('authorization');
+  });
+
+  it('rejects missing, initial and previous-checkpoint consent before even re-reading', async () => {
+    const app = await checkpointFixture(); await app.start();
+    const reads = vi.mocked(app.bridge.scan).mock.calls.length;
+    const job = app.controller.state.job!;
+    await expect(app.controller.continueRun(job.id, app.plan.id, app.revision)).rejects.toThrow('bestätigen');
+    await expect(app.controller.continueRun(job.id, app.plan.id, app.revision, consentFor(app.plan, app.revision))).rejects.toThrow('bestätigen');
+    const firstConsent = app.consent();
+    await expect(app.resume({ ...firstConsent, confirmed: false } as never)).rejects.toThrow('bestätigen');
+    expect(app.bridge.scan).toHaveBeenCalledTimes(reads); expect(app.bridge.applyDay).toHaveBeenCalledTimes(1);
+    await app.resume(firstConsent);
+    const secondReads = vi.mocked(app.bridge.scan).mock.calls.length;
+    await expect(app.resume(firstConsent)).rejects.toThrow('bestätigen');
+    expect(app.bridge.scan).toHaveBeenCalledTimes(secondReads); expect(app.bridge.applyDay).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['job', 'plan', 'revision', 'state-plan', 'state-run', 'connection'] as const)('rejects forged or stale %s continuation without another read or write', async field => {
+    const app = await checkpointFixture(); await app.start();
+    const jobId = app.controller.state.job!.id, consent = app.consent();
+    const reads = vi.mocked(app.bridge.scan).mock.calls.length;
+    if (field === 'state-plan') app.controller.state.plan!.days[2].proposed[0].start = '00:00';
+    if (field === 'state-run') app.controller.state.run!.results.find(item => item.status === 'verified')!.status = 'pending';
+    if (field === 'connection') app.controller.state.connection!.generation = 'changed-session';
+    await expect(app.controller.continueRun(field === 'job' ? 'forged' : jobId, field === 'plan' ? 'forged' : app.plan.id, field === 'revision' ? app.revision - 1 : app.revision, consent)).rejects.toThrow('Vorschau');
+    expect(app.bridge.scan).toHaveBeenCalledTimes(reads); expect(app.bridge.applyDay).toHaveBeenCalledTimes(1);
+  });
+
+  it('checks the last remaining day before writing the next day', async () => {
+    const app = await checkpointFixture(); await app.start();
+    app.actual().days.find(day => day.date === '2026-11-30')!.fingerprint = 'changed-last-day';
+    await expect(app.resume()).rejects.toThrow('2026-11-30');
+    expect(app.bridge.applyDay).toHaveBeenCalledTimes(1);
+    expect(app.controller.state.run?.status).toBe('failed'); expect(app.controller.state.job).toBeUndefined();
+    expect(app.controller.state.snapshot).toBeUndefined(); expect(app.controller.state.plan?.canReview).toBe(false);
+  });
+
+  it('preserves unchanged retained entries and includes their actual hours in the frozen month after checkpoints', async () => {
+    const app = await checkpointFixture(undefined, ['2026-11-30']);
+    const retained = structuredClone(app.actual().days.find(day => day.date === '2026-11-30')!);
+    expect(app.plan.weeks.reduce((sum, week) => sum + week.plannedMinutes!, 0)).toBe(168 * 60);
+    expect(app.plan.days.find(day => day.date === retained.date)).toMatchObject({ action: 'skip', eligible: true, existingNetMinutes: 480 });
+    await app.start(); await app.resume();
+    expect((await app.resume()).run?.status).toBe('complete');
+    expect(app.bridge.applyDay).toHaveBeenCalledTimes(20);
+    expect(vi.mocked(app.bridge.applyDay).mock.calls.some(call => call[1].date === retained.date)).toBe(false);
+    expect(app.actual().days.find(day => day.date === retained.date)).toEqual(retained);
+  });
+
+  it.each(['entries', 'hours', 'metadata', 'policy', 'context'] as const)('checks retained %s before any further write at a checkpoint', async field => {
+    const app = await checkpointFixture(undefined, ['2026-11-30']); await app.start();
+    const retained = app.actual().days.find(day => day.date === '2026-11-30')!;
+    if (field === 'entries') { retained.entries[0].start = '07:59'; retained.reportedMinutes = 481; retained.fingerprint = 'changed-retained-entries'; }
+    if (field === 'hours') retained.reportedMinutes = 481;
+    if (field === 'metadata') retained.entries[0].note = 'Private changed retained note';
+    if (field === 'policy') retained.fingerprint = 'changed-retained-policy';
+    if (field === 'context') app.actual().context = { mode: 'api-session', connectionId: 'changed-account-session', employeeKey: connection().employeeId!, tenantKey: connection().companyId! };
+    await expect(app.resume()).rejects.toThrow(field === 'context' ? 'Sitzung' : '2026-11-30');
+    expect(app.bridge.applyDay).toHaveBeenCalledTimes(1);
+    expect(app.controller.state.run?.status).toBe('failed'); expect(app.controller.state.job).toBeUndefined();
+    expect(app.controller.state.run!.results.filter(result => result.status === 'verified')).toHaveLength(1);
+    expect(app.controller.state.run!.results.find(result => result.date === retained.date)?.status).toBe('skipped');
+    expect(app.controller.state.snapshot).toBeUndefined(); expect(app.controller.state.plan?.canReview).toBe(false);
+    expect(app.controller.state.error).not.toContain('Private changed retained note');
+  });
+
+  it.each(['time', 'reported', 'note', 'reason', 'metadata', 'absence'] as const)('checks already verified %s before writing any remaining day', async field => {
+    const app = await checkpointFixture(); await app.start();
+    const day = app.actual().days.find(item => item.date === '2026-11-02')!;
+    if (field === 'time') day.entries[0].start = '07:00';
+    if (field === 'reported') day.reportedMinutes!++;
+    if (field === 'note') day.entries[0].note = 'Private note that must not be logged';
+    if (field === 'reason') day.entries[0].reason = 'changed';
+    if (field === 'metadata') day.entries[0].metadata = ['changed'];
+    if (field === 'absence') day.absence = 'changed';
+    await expect(app.resume()).rejects.toThrow('2026-11-02');
+    expect(app.controller.state.error).not.toContain('Private note');
+    expect(app.bridge.applyDay).toHaveBeenCalledTimes(1);
+    expect(app.controller.state.run!.results.filter(item => item.status === 'verified')).toHaveLength(1);
+  });
+
+  it.each(['missing', 'duplicate', 'context'] as const)('rejects an incomplete or changed %s month at the checkpoint', async field => {
+    const app = await checkpointFixture(); await app.start();
+    if (field === 'missing') app.actual().days.pop();
+    if (field === 'duplicate') app.actual().days[29] = structuredClone(app.actual().days[28]);
+    if (field === 'context') app.actual().context = { mode: 'api-session', connectionId: connection().generation, employeeKey: 'other-employee', tenantKey: connection().companyId! };
+    await expect(app.resume()).rejects.toThrow(); expect(app.bridge.applyDay).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks a restarted paused run interrupted, preserves verified history and rejects old consent', async () => {
+    const app = await checkpointFixture(); await app.start();
+    const old = structuredClone(app.controller.state), consent = app.consent();
+    const restarted = await setup(old);
+    expect(restarted.controller.state.job?.status).toBe('interrupted');
+    expect(restarted.controller.state.run?.status).toBe('stopped');
+    expect(restarted.controller.state.run!.results.filter(item => item.status === 'verified')).toHaveLength(1);
+    expect(restarted.controller.state.snapshot).toBeUndefined(); expect(restarted.controller.state.plan?.canReview).toBe(false);
+    await expect(restarted.controller.continueRun(old.job!.id, app.plan.id, app.revision, consent)).rejects.toThrow('Vorschau');
+    expect(restarted.bridge.applyDay).not.toHaveBeenCalled(); expect(restarted.bridge.scan).not.toHaveBeenCalled();
+  });
+
+  it('cancels a paused queue without holding or cancelling a transport operation', async () => {
+    const app = await checkpointFixture(); await app.start();
+    const jobId = app.controller.state.job!.id;
+    await expect(app.controller.cancel('forged')).rejects.toThrow('geändert');
+    await app.controller.cancel(jobId);
+    expect(app.bridge.cancel).not.toHaveBeenCalled(); expect(app.bridge.applyDay).toHaveBeenCalledTimes(1);
+    expect(app.controller.state.run?.status).toBe('stopped'); expect(app.controller.state.job).toBeUndefined();
+    expect(app.controller.state.snapshot).toBeUndefined(); expect(app.actual().days.flatMap(day => day.entries)).toHaveLength(3);
+    await expect(app.controller.continueRun(jobId, app.plan.id, app.revision, app.consent())).rejects.toThrow('Vorschau');
+    await app.controller.scan('2026-11');
+  });
+
+  it('stops if cancelling while checkpoint reconciliation is reading, without writing another day', async () => {
+    const app = await checkpointFixture(); await app.start();
+    let release!: () => void; let entered!: () => void;
+    const ready = new Promise<void>(resolve => { entered = resolve; });
+    vi.mocked(app.bridge.scan).mockImplementationOnce(async () => { entered(); await new Promise<void>(resolve => { release = resolve; }); return structuredClone(app.actual()); });
+    const resuming = app.resume(); await ready;
+    await app.controller.cancel(app.controller.state.job!.id); release();
+    await expect(resuming).rejects.toThrow('abgebrochen');
+    expect(app.bridge.applyDay).toHaveBeenCalledTimes(1); expect(app.controller.state.run?.status).toBe('stopped');
+  });
+
+  it('retains a verified day if checkpoint journaling fails and never exposes a resumable pause', async () => {
+    const app = await checkpointFixture();
+    vi.mocked(app.bridge.save).mockImplementation(async state => { if (state.run?.status === 'paused') throw new Error('Fixture checkpoint journal unavailable'); });
+    const result = await app.start();
+    expect(result.run?.status).toBe('failed'); expect(result.run?.journalError).toContain('checkpoint journal');
+    expect(result.run!.results.filter(item => item.status === 'verified')).toHaveLength(1);
+    expect(result.job).toBeUndefined(); expect(result.snapshot).toBeUndefined(); expect(app.bridge.applyDay).toHaveBeenCalledTimes(1);
+    await expect(app.controller.continueRun('old-job', app.plan.id, app.revision, app.consent())).rejects.toThrow('Vorschau');
+  });
+
+  it('does not pause after the final day, and rejects non-booking checkpoints before writing', async () => {
+    const last = await checkpointFixture(['2026-11-30']);
+    expect((await last.start()).run?.status).toBe('complete'); expect(last.controller.state.job).toBeUndefined();
+    for (const dates of [['2026-11-01'], ['2026-12-01'], ['2026-11-02', '2026-11-02']]) {
+      const app = await checkpointFixture(dates);
+      await expect(app.start()).rejects.toThrow('Kontrollpunkte'); expect(app.bridge.applyDay).not.toHaveBeenCalled(); expect(app.controller.state.job).toBeUndefined();
+    }
+  });
+
+  it('migrates schema-4 previews without losing historical results or the API connection', async () => {
+    const app = await setup(); await review(app.controller, planFor(app.controller));
+    const old = structuredClone(app.controller.state); old.schemaVersion = 4;
+    old.run = { planId: 'old-plan', status: 'complete', startedAt: 'x', updatedAt: 'x', results: [{ date: '2026-10-30', status: 'verified', message: 'Historical outcome' }] };
+    const restored = await setup(old);
+    expect(restored.controller.state.schemaVersion).toBe(5);
+    expect(restored.controller.state.run).toEqual(old.run); expect(restored.controller.state.connection).toEqual(old.connection);
+    expect(restored.controller.state.plan).toBeUndefined(); expect(restored.controller.state.snapshot).toBeUndefined(); expect(restored.controller.state.editLease).toBeUndefined();
+    expect(restored.bridge.applyDay).not.toHaveBeenCalled();
   });
 });

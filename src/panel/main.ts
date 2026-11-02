@@ -29,6 +29,7 @@ let rebuilding = false;
 let demoCancelled = false;
 let localError = '';
 let demoSnapshot: MonthSnapshot | undefined;
+let demoCheckpointDates: string[] = [];
 let buildVersion = 0;
 let sessionRevision = 0;
 let initializing = true;
@@ -36,7 +37,7 @@ let initializationFailed = false;
 let preferencesLoaded = !hasExtension;
 let connectionRetryAvailable = false;
 let approvedPlanRevision: number | undefined;
-let confirmed: { plan: BookingPlan; planRevision: number; contextFingerprint: string; preflightDate: string } | undefined;
+let confirmed: { plan: BookingPlan; planRevision: number; contextFingerprint: string; preflightDate: string; resumeJobId?: string; checkpointId?: string } | undefined;
 let pendingDraft: Draft | undefined;
 let invalidations: Promise<void> = Promise.resolve();
 let preferenceWrites: Promise<void> = Promise.resolve();
@@ -44,6 +45,11 @@ let refreshScheduled = false;
 let importCandidate: Settings | undefined;
 let importGeneration = 0;
 let updateRequested = false;
+let announcedCheckpointId: string | undefined;
+let statePollTimer: ReturnType<typeof setTimeout> | undefined;
+let statePollInFlight = false;
+let statePollError = '';
+let panelClosed = false;
 
 interface Draft {
   version: number;
@@ -55,7 +61,7 @@ interface Draft {
   preferencesSaved: boolean;
 }
 
-type PanelMessage = { type: string; month?: string; date?: string; plan?: BookingPlan; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation };
+type PanelMessage = { type: string; month?: string; date?: string; plan?: BookingPlan; planId?: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation; options?: { checkpointDates: string[] } };
 type PanelResponse = { ok: boolean; state?: SessionState; error?: string; preflight?: PreflightResult };
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -64,24 +70,27 @@ app.innerHTML = `
     <header class="app-header">
       <div class="app-mark" aria-hidden="true"><img src="/icons/app-icon.svg" alt="" width="40" height="40" /></div>
       <div><h1>${t("Monatsbuchung")}</h1><p>${t("Deine Anwesenheit in HiBob")}</p></div>
+      <button id="settings-toggle" class="icon-button" type="button" aria-label="${t('Zeiten und Feiertage anpassen')}" aria-controls="settings-options" aria-expanded="false"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m9.5 3-.7 2.2-2 .9-2.1-.5-2.1 3.7 1.5 1.7v2l-1.5 1.7 2.1 3.7 2.2-.5 2 .9.6 2.2h4.3l.7-2.2 1.9-.9 2.2.5 2.1-3.7-1.5-1.7v-2l1.5-1.7-2.1-3.7-2.2.5-1.9-.9-.7-2.2z"/><circle cx="11.7" cy="12" r="3.2"/></svg></button>
     </header>
-    <div class="version-bar"><span id="installed-version"></span><button id="activate-update" class="button subtle" hidden>${t('Jetzt aktualisieren')}</button></div>
     <div id="update-notice" class="notice" role="status" hidden></div>
     <div id="demo-banner" class="demo-banner" hidden><strong>${t("Lokaler Testmodus")}</strong>${t("Diese Vorschau verwendet Beispieldaten. Es werden keine Daten an HiBob gesendet.")}</div>
     <div id="connection" class="connection"><span class="connection-dot" aria-hidden="true"></span><div><p id="connection-title">${t("Mit HiBob verbinden")}</p><p id="connection-detail" class="muted">${t("Melde dich über HiBob an, um deine Anwesenheiten einzulesen.")}</p></div></div>
-    <div class="connection-actions"><button id="connect" class="button wide">${t("Mit HiBob anmelden")}</button><button id="disconnect" class="button subtle" hidden>${t("Verbindung trennen")}</button></div>
+    <div class="connection-actions"><button id="connect" class="button primary wide">${t("Mit HiBob anmelden")}</button><button id="disconnect" class="button subtle" hidden>${t("Verbindung trennen")}</button></div>
     <div id="api-capability-notice" class="notice" role="status" hidden></div>
     <div id="account-context-notice" class="notice" role="status" hidden>${t('Prüfe vor dem Speichern das angezeigte HiBob-Konto und die Firma. Die Zuordnung bestätigst du für diesen Plan im nächsten Schritt.')}</div>
     <div id="main-error" class="notice error" role="alert" hidden></div>
     <button id="retry-plan" class="button wide" hidden>${t('Vorschau erneut prüfen')}</button>
     <button id="retry-connection" class="button wide" hidden>${t('Verbindung erneut prüfen')}</button>
     <section aria-labelledby="settings-title">
-      <div class="section-title"><h2 id="settings-title">${t("Zeiten festlegen")}</h2><small>${t("Montag bis Freitag")}</small></div>
+      <h2 id="settings-title" class="visually-hidden">${t("Zeiten festlegen")}</h2>
       <form id="settings-form">
         <fieldset id="settings-fieldset">
+          <div class="field month-field"><label for="month">${t("Monat")}</label><input id="month" name="month" type="month" required /></div>
+          <button id="schedule-summary" class="schedule-summary" type="button" aria-controls="settings-options" aria-expanded="false"><strong id="schedule-hours"></strong><span id="schedule-details"></span><span class="summary-edit">${t('Anpassen')}</span></button>
+          <div id="settings-options" hidden>
+          <div class="section-title"><h2>${t('Zeiten und Feiertage')}</h2><small>${t("Montag bis Freitag")}</small></div>
           <div class="fields">
-            <div class="field"><label for="month">${t("Monat")}</label><input id="month" name="month" type="month" required /></div>
-            <div class="field"><label for="state">${t("Bundesland")}</label><select id="state" name="state" required></select></div>
+            <div class="field state-field"><label for="state">${t("Bundesland")}</label><select id="state" name="state" required></select></div>
             <div class="field"><label for="start">${t("Arbeitsbeginn")}</label><input id="start" name="start" type="time" required /></div>
             <div class="field"><label for="end">${t("Arbeitsende")}</label><input id="end" name="end" type="time" required /></div>
           </div>
@@ -106,15 +115,16 @@ app.innerHTML = `
             <div id="corpus-field" class="field" hidden><label for="corpusChristi">${t("Fronleichnam am Arbeitsort Feiertag?")}</label><select id="corpusChristi"><option value="">${t("Bitte auswählen")}</option><option value="yes">${t("Ja")}</option><option value="no">${t("Nein")}</option></select></div>
           </div>
           <details><summary>${t("Zusätzliche Tage ausschließen")}</summary><div class="field"><label for="excludedDates">${t("Datumsangaben")}</label><textarea id="excludedDates" rows="2" placeholder="2026-11-05&#10;2026-11-18"></textarea><p class="hint">${t("Ein Datum pro Zeile im Format JJJJ-MM-TT. Tage lassen sich auch direkt in der Vorschau abwählen.")}</p></div></details>
+          </div>
         </fieldset>
       </form>
-      <details class="settings-transfer"><summary>${t('Einstellungen übertragen')}</summary><p class="hint">${t('Übertrage deine Vorgaben zwischen Installationen. HiBob-Daten und Buchungsverläufe werden nicht exportiert.')}</p><div class="transfer-actions"><button id="export-settings" class="button">${t('Einstellungen exportieren')}</button><button id="import-settings" class="button">${t('Einstellungen importieren')}</button></div><input id="settings-file" type="file" accept="application/json,.json" hidden /><p id="transfer-status" class="hint" role="status" hidden></p></details>
-      <div class="scan-toolbar"><button id="scan" class="button wide" disabled>${t("Monat einlesen")}</button></div>
+      <details id="more-options" class="more-options"><summary>${t('Weitere Optionen')}</summary><button id="refresh-month" class="button wide" hidden>${t('Monat erneut einlesen')}</button><button id="redistribute" class="button wide" hidden>${t("Neu verteilen")}</button><details class="settings-transfer"><summary>${t('Einstellungen übertragen')}</summary><p class="hint">${t('Übertrage deine Vorgaben zwischen Installationen. HiBob-Daten und Buchungsverläufe werden nicht exportiert.')}</p><div class="transfer-actions"><button id="export-settings" class="button">${t('Einstellungen exportieren')}</button><button id="import-settings" class="button">${t('Einstellungen importieren')}</button></div><input id="settings-file" type="file" accept="application/json,.json" hidden /><p id="transfer-status" class="hint" role="status" hidden></p></details><div class="version-bar"><span id="installed-version"></span><button id="activate-update" class="button subtle" hidden>${t('Jetzt aktualisieren')}</button></div><p id="connection-technical" class="hint"></p></details>
+      <div id="scan-toolbar" class="scan-toolbar"><button id="scan" class="button primary wide" disabled>${t("Monat einlesen")}</button></div>
     </section>
     <section id="scan-progress" class="notice" role="status" hidden></section>
     <section id="draft-check-result" class="notice draft-check-result" role="status" aria-labelledby="draft-check-result-title" hidden><h2 id="draft-check-result-title">${t('Plan geprüft – nicht gespeichert')}</h2><dl id="draft-check-details" class="confirm-details"></dl><p class="hint">${t('Kontozuordnung und Tagesdaten wurden lesend geprüft. Die Speicherung wurde nicht getestet. Lies den Monat erneut ein, um weiterzuarbeiten.')}</p></section>
     <section class="preview" aria-labelledby="preview-title">
-      <div class="section-title"><div><h2 id="preview-title">${t("Monatsvorschau")}</h2><p id="preview-subtitle" class="preview-subtitle">${t("Vor dem Buchen alle Änderungen prüfen.")}</p></div><button id="redistribute" class="button subtle" hidden>${t("Neu verteilen")}</button></div>
+      <div class="section-title"><div><h2 id="preview-title">${t("Monatsvorschau")}</h2><p id="preview-subtitle" class="preview-subtitle">${t("Vor dem Buchen alle Änderungen prüfen.")}</p></div></div>
       <div id="preview-empty" class="empty-preview"><strong>${t("Dein Monat auf einen Blick")}</strong><p>${t("Lies zuerst den Monat aus HiBob ein. Feiertage, Abwesenheiten und bestehende Einträge werden berücksichtigt.")}</p></div>
       <button id="build-preview" class="button wide" hidden>${t('Vorschau erstellen')}</button>
       <div id="preview-summary" class="preview-summary" hidden></div>
@@ -122,11 +132,12 @@ app.innerHTML = `
       <div id="plan-errors" class="notice error" role="alert" hidden></div>
       <div id="weeks"></div>
     </section>
-    <section id="run-panel" class="run-panel" aria-labelledby="run-title" hidden><h2 id="run-title">${t("Buchungsverlauf")}</h2><div id="run-status" class="run-summary" aria-live="polite"></div><ul id="run-results" class="run-results"></ul></section>
-    <footer class="footer"><div class="footer-buttons"><button id="cancel-run" class="button danger" hidden>${t("Abbrechen")}</button><button id="apply" class="button primary" disabled>${t("Jetzt buchen")}</button></div><p id="footer-hint" class="hint">${t("Es wird erst nach deiner Bestätigung gespeichert.")}</p></footer>
+    <section id="paused-card" class="notice paused-card" hidden aria-labelledby="paused-title"><h2 id="paused-title">${t('Für Kontrolle pausiert')}</h2><p id="paused-description"></p><button id="continue-run" class="button primary wide">${t('Restliche Tage fortsetzen')}</button></section>
+    <section id="run-panel" class="run-panel" aria-labelledby="run-title" hidden><h2 id="run-title">${t("Buchungsverlauf")}</h2><div id="run-status" class="run-summary" aria-live="polite"></div><div id="run-uncertain" class="notice error" role="alert" hidden></div><details id="run-history"><summary>${t('Einzelne Ergebnisse')}</summary><ul id="run-results" class="run-results"></ul></details></section>
+    <footer id="booking-footer" class="footer"><div class="footer-buttons"><button id="cancel-run" class="button danger" hidden>${t('Restliche Tage stoppen')}</button><button id="apply" class="button primary" disabled>${t("Jetzt buchen")}</button></div><p id="footer-hint" class="hint">${t("Es wird erst nach deiner Bestätigung gespeichert.")}</p></footer>
   </div>
   <dialog id="conflict-dialog" aria-labelledby="conflict-title"><div class="dialog-body"><h2 id="conflict-title">${t("Vorhandene Buchungen prüfen")}</h2><p class="hint">${t("Entscheide für jeden Tag. Beim Überschreiben werden die bisherigen Arbeits- und Pauseneinträge durch die Vorschau ersetzt.")}</p><div class="dialog-toolbar"><button id="overwrite-all" class="button">${t("Alle überschreiben")}</button><button id="skip-all" class="button">${t("Alle überspringen")}</button></div><div id="conflict-error" class="notice error" role="alert" style="margin-top:12px" hidden></div><div id="conflict-items"></div></div><div class="dialog-footer"><button id="close-conflicts" class="button">${t("Zurück")}</button><button id="save-conflicts" class="button primary">${t("Entscheidungen übernehmen")}</button></div></dialog>
-  <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t("Buchungen jetzt speichern?")}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><div id="account-confirmation-field" class="notice account-confirmation" hidden><label class="ack-label" for="account-confirmation"><input id="account-confirmation" type="checkbox" /><span id="account-confirmation-label"></span></label></div><div class="draft-check-controls field"><label for="draft-check-date">${t('Tag für Planprüfung')}</label><select id="draft-check-date" disabled></select><p class="hint">${t('Der ausgewählte Tag und die geplanten Daten werden ohne Änderungen geprüft. Das bestätigt keine serverseitige Speicherung. Danach den Monat erneut einlesen.')}</p><button id="check-draft" class="button wide" disabled>${t('Plan prüfen – ohne Speichern')}</button></div><p class="hint">${t("Die Extension kontrolliert jeden gespeicherten Tag. Bei einer Abweichung stoppt der Lauf.")}</p></div><div class="dialog-footer"><button id="close-apply" class="button">${t("Zurück")}</button><button id="confirm-apply" class="button primary" disabled>${t("Buchungen starten")}</button></div></dialog>
+  <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t("Buchungen jetzt speichern?")}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><div id="account-confirmation-field" class="notice account-confirmation" hidden><label class="ack-label" for="account-confirmation"><input id="account-confirmation" type="checkbox" /><span id="account-confirmation-label"></span></label></div><details id="additional-checks" class="additional-checks"><summary>${t('Zusätzliche Prüfungen')}</summary><div id="checkpoint-field" class="checkpoint-field"><label class="ack-label" for="pause-verification"><input id="pause-verification" type="checkbox" /><span>${t('Für Kontrolle pausieren')}</span></label><p id="checkpoint-description" class="hint"></p></div><div id="preflight-controls" class="draft-check-controls field"><label for="draft-check-date">${t('Tag für Planprüfung')}</label><select id="draft-check-date" disabled></select><p class="hint">${t('Der ausgewählte Tag und die geplanten Daten werden ohne Änderungen geprüft. Das bestätigt keine serverseitige Speicherung. Danach den Monat erneut einlesen.')}</p><button id="check-draft" class="button wide" disabled>${t('Plan prüfen – ohne Speichern')}</button></div></details><p class="hint">${t("Die Extension kontrolliert jeden gespeicherten Tag. Bei einer Abweichung stoppt der Lauf.")}</p></div><div class="dialog-footer"><button id="close-apply" class="button">${t("Zurück")}</button><button id="confirm-apply" class="button primary" disabled>${t("Buchungen starten")}</button></div></dialog>
   <dialog id="import-dialog" aria-labelledby="import-title"><div class="dialog-body"><h2 id="import-title">${t('Einstellungen importieren?')}</h2><p class="hint">${t('Diese Vorgaben ersetzen deine aktuellen Einstellungen. Der Import startet keine Buchungen; prüfe danach die Monatsvorschau.')}</p><dl id="import-details" class="confirm-details"></dl></div><div class="dialog-footer"><button id="cancel-import" class="button">${t('Abbrechen')}</button><button id="confirm-import" class="button primary">${t('Einstellungen übernehmen')}</button></div></dialog>
 `;
 
@@ -136,6 +147,30 @@ const select = (id: string) => $<HTMLSelectElement>(id);
 const conflictDialog = $<HTMLDialogElement>('conflict-dialog');
 const applyDialog = $<HTMLDialogElement>('apply-dialog');
 const importDialog = $<HTMLDialogElement>('import-dialog');
+$('more-options').append($('disconnect'));
+const exportPlanButton = node('button', t('Buchungsplan herunterladen'), 'button wide');
+exportPlanButton.id = 'export-plan'; exportPlanButton.type = 'button'; exportPlanButton.hidden = true;
+const exportPlanHint = node('p', t('Enthält private Anwesenheitsdaten. Nur lokal und vertraulich verwenden.'), 'hint');
+exportPlanHint.id = 'export-plan-hint'; exportPlanHint.hidden = true;
+const exportPlanStatus = node('p', undefined, 'hint'); exportPlanStatus.id = 'export-plan-status'; exportPlanStatus.hidden = true; exportPlanStatus.setAttribute('role', 'status');
+$('more-options').append(exportPlanButton, exportPlanHint, exportPlanStatus);
+document.querySelector('.preview')!.before($('paused-card'));
+
+function setSettingsOpen(open: boolean): void {
+  $('settings-options').hidden = !open;
+  for (const id of ['settings-toggle', 'schedule-summary']) $(id).setAttribute('aria-expanded', String(open));
+}
+
+function revealInvalidSettings(): boolean {
+  const form = $<HTMLFormElement>('settings-form');
+  const invalid = form.querySelector<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('input:invalid, select:invalid, textarea:invalid');
+  if (invalid) {
+    setSettingsOpen(true);
+    for (let parent = invalid.parentElement; parent; parent = parent.parentElement) if (parent instanceof HTMLDetailsElement) parent.open = true;
+    invalid.focus();
+  }
+  return form.reportValidity();
+}
 
 function node<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, className?: string): HTMLElementTagNameMap[K] {
   const element = document.createElement(tag);
@@ -185,11 +220,51 @@ function activeJob(): SessionState['job'] | undefined {
   return state.job && (state.job.status === 'running' || state.job.status === 'cancelling') ? state.job : undefined;
 }
 
+function pausedJob(): SessionState['job'] | undefined { return state.job?.status === 'paused' && state.run?.status === 'paused' ? state.job : undefined; }
+function isPaused(): boolean { return Boolean(pausedJob()); }
+
 function isRunning(): boolean { return busy || applying || checkingPreflight || connecting || Boolean(activeJob()) || (!state.job && state.run?.status === 'running'); }
+
+function shouldPollState(): boolean {
+  return hasExtension && !panelClosed && app.isConnected && document.visibilityState !== 'hidden' && !initializing && !initializationFailed
+    && connected() && !updating() && Boolean(activeJob() || state.run?.status === 'running');
+}
+
+function synchronizeStatePolling(immediate = false): void {
+  if (!shouldPollState()) {
+    if (statePollTimer !== undefined) clearTimeout(statePollTimer);
+    statePollTimer = undefined;
+    return;
+  }
+  if (statePollTimer !== undefined || statePollInFlight) return;
+  statePollTimer = setTimeout(() => {
+    statePollTimer = undefined;
+    if (!shouldPollState()) return;
+    statePollInFlight = true;
+    // Session storage may fail after an early booking acknowledgement. Read
+    // the worker's newer in-memory journal; never replay a booking command.
+    void message({ type: 'PANEL_GET_STATE' }).then(() => {
+      statePollError = '';
+    }).catch(() => {
+      statePollError = t('Der aktuelle Buchungsstatus konnte nicht gelesen werden. Keine Buchung erneut starten; bitte die Verbindung prüfen.');
+    }).finally(() => {
+      statePollInFlight = false;
+      renderState();
+    });
+  }, immediate ? 0 : 5000);
+}
+
+const statePollingVisibility = () => synchronizeStatePolling(true);
+document.addEventListener('visibilitychange', statePollingVisibility);
+window.addEventListener('pagehide', () => {
+  panelClosed = true;
+  synchronizeStatePolling();
+  document.removeEventListener('visibilitychange', statePollingVisibility);
+}, { once: true });
 
 function updating(): boolean { return updateRequested || state.updateApplying === true; }
 
-function transferBlocked(): boolean { return isRunning() || updating() || initializing || initializationFailed || !preferencesLoaded || rebuilding || Boolean(pendingDraft); }
+function transferBlocked(): boolean { return isRunning() || isPaused() || updating() || initializing || initializationFailed || !preferencesLoaded || rebuilding || Boolean(pendingDraft); }
 
 function planRevision(): number { return state.planRevision ?? 0; }
 
@@ -202,6 +277,7 @@ function closeConfirmation(): void {
   $<HTMLButtonElement>('check-draft').disabled = true;
   select('draft-check-date').disabled = true;
   select('draft-check-date').replaceChildren();
+  input('pause-verification').checked = false;
   if (applyDialog.open) applyDialog.close();
 }
 
@@ -212,6 +288,12 @@ function revokeApproval(): void {
 
 function approved(): boolean {
   return Boolean(connected() && !updating() && !initializing && !initializationFailed && preferencesLoaded && !preflightNeedsScan && plan?.canReview && !pendingDraft && approvedPlanRevision === planRevision() && sameJsonValue(plan, state.plan));
+}
+
+function canExportPlan(): boolean {
+  const frozen = isPaused() && plan?.id === state.run?.planId && state.job?.connectionId === state.connection?.generation;
+  return Boolean(!isRunning() && !updating() && !initializing && !initializationFailed && preferencesLoaded && !rebuilding && !pendingDraft && connected()
+    && plan && state.snapshot && sameJsonValue(plan, state.plan) && sameJsonValue(plan.snapshot, state.snapshot) && (frozen || approved()));
 }
 
 function needsAccountConfirmation(reviewed: BookingPlan): boolean {
@@ -238,6 +320,7 @@ function writableDays(reviewed: BookingPlan): DayPlan[] {
 
 function currentConfirmation(): boolean {
   return Boolean(confirmed && approved() && !isRunning() && !rebuilding
+    && (confirmed.resumeJobId ? pausedJob()?.id === confirmed.resumeJobId && pausedJob()?.checkpointId === confirmed.checkpointId : !isPaused())
     && confirmed.planRevision === planRevision() && sameJsonValue(confirmed.plan, plan)
     && sameJsonValue(confirmed.plan, state.plan) && sameJsonValue(confirmed.plan.snapshot, state.snapshot)
     && confirmed.contextFingerprint === contextFingerprint(state.snapshot?.context));
@@ -248,8 +331,8 @@ function updateConfirmationButton(): void {
   const ready = applyDialog.open && currentConfirmation();
   const consent = !review || !needsAccountConfirmation(review.plan) || input('account-confirmation').checked;
   $<HTMLButtonElement>('confirm-apply').disabled = !ready || !consent || !canWrite();
-  select('draft-check-date').disabled = !ready;
-  $<HTMLButtonElement>('check-draft').disabled = !ready || !consent || !review
+  select('draft-check-date').disabled = !ready || isPaused();
+  $<HTMLButtonElement>('check-draft').disabled = !ready || !consent || !review || isPaused()
     || select('draft-check-date').value !== review.preflightDate || !writableDays(review.plan).some(day => day.date === review.preflightDate);
 }
 
@@ -262,7 +345,7 @@ async function request(command: PanelMessage): Promise<PanelResponse> {
   if (!hasExtension) throw new Error(t('Die Erweiterung ist hier nicht aktiv. Lade den Extension-Ordner in Chrome und öffne sie über das Extension-Symbol.'));
   const requestedAtRevision = sessionRevision;
   const response = await chrome.runtime.sendMessage(command) as PanelResponse;
-  if (response?.state && (typeof response.state.revision === 'number' || requestedAtRevision === sessionRevision)) receiveState(response.state);
+  if (!panelClosed && response?.state && (typeof response.state.revision === 'number' || requestedAtRevision === sessionRevision)) receiveState(response.state);
   if (!response?.ok) throw new Error(response?.error || t('Die HiBob-Verbindung hat nicht geantwortet. Bitte erneut verbinden.'));
   return response;
 }
@@ -300,7 +383,7 @@ function receiveState(incoming: SessionState): void {
     // this dialog. A replacement event may arrive without an invalidation event.
     $('conflict-items').replaceChildren();
   }
-  if (confirmed && (!sameJsonValue(previous.connection, state.connection) || confirmed.planRevision !== planRevision() || !sameJsonValue(confirmed.plan, state.plan) || !sameJsonValue(confirmed.plan.snapshot, state.snapshot) || confirmed.contextFingerprint !== contextFingerprint(state.snapshot?.context) || activeJob())) closeConfirmation();
+  if (confirmed && (!sameJsonValue(previous.connection, state.connection) || confirmed.planRevision !== planRevision() || !sameJsonValue(confirmed.plan, state.plan) || !sameJsonValue(confirmed.plan.snapshot, state.snapshot) || confirmed.contextFingerprint !== contextFingerprint(state.snapshot?.context) || activeJob() || (confirmed.resumeJobId ? pausedJob()?.id !== confirmed.resumeJobId || pausedJob()?.checkpointId !== confirmed.checkpointId : isPaused()))) closeConfirmation();
   if (approvedPlanRevision !== undefined && (approvedPlanRevision !== planRevision() || !sameJsonValue(plan, state.plan))) approvedPlanRevision = undefined;
   if (!initializing && !pendingDraft) {
     if (state.plan && state.snapshot && state.plan.settings.month === settings.month) {
@@ -376,6 +459,7 @@ function updateConditionalFields(): void {
   $('corpus-field').hidden = !corpus;
   select('augsburg').required = bavaria;
   select('assumption').required = bavaria && settings.localHolidays.augsburg !== true;
+  if ((bavaria || corpus) && $('local-holidays').querySelector(':invalid')) setSettingsOpen(true);
   select('corpusChristi').required = corpus;
 }
 
@@ -417,7 +501,7 @@ function persistDemo(): void {
 }
 
 async function rebuild(newSeed = false): Promise<void> {
-  if (updating()) return;
+  if (updating() || isPaused()) return;
   const draft = beginDraft(newSeed);
   await processDraft(draft);
 }
@@ -533,13 +617,16 @@ function storedSettings(value: unknown): Settings {
 }
 
 function renderState(): void {
+  if (!app.isConnected || panelClosed) return;
   const focused = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
   const focusId = focused?.id;
   const scrolling = document.scrollingElement ?? document.documentElement;
   const scrollTop = scrolling.scrollTop;
   const scrollLeft = scrolling.scrollLeft;
   const running = isRunning();
-  const locked = running || updating();
+  const paused = isPaused();
+  if (!activeJob() && state.run?.status !== 'running') statePollError = '';
+  const locked = running || paused || updating();
   const installedVersion = state.update?.installedVersion ?? packageVersion;
   const versionLabel = installedVersion === packageVersion ? (extensionManifest as { version_name?: string }).version_name ?? installedVersion : installedVersion;
   $('installed-version').textContent = t('Version {version}', { version: versionLabel });
@@ -555,6 +642,9 @@ function renderState(): void {
   $<HTMLButtonElement>('import-settings').disabled = transferBlocked();
   $<HTMLInputElement>('settings-file').disabled = transferBlocked();
   $<HTMLButtonElement>('confirm-import').disabled = transferBlocked();
+  $('export-plan').hidden = !plan;
+  $('export-plan-hint').hidden = !plan;
+  $<HTMLButtonElement>('export-plan').disabled = !canExportPlan();
   if ((running || updating()) && importDialog.open) { importCandidate = undefined; importDialog.close(); }
   $('demo-banner').hidden = !isDemo;
   const bound = connected();
@@ -564,11 +654,13 @@ function renderState(): void {
   $('account-context-notice').hidden = isDemo || !scanned || (state.snapshot?.context?.mode !== 'api-session' && state.snapshot?.context?.mode !== 'user-confirmed-ui');
   $('connect').hidden = isDemo || bound;
   $('disconnect').hidden = isDemo || !bound;
+  document.querySelector<HTMLElement>('.connection-actions')!.hidden = isDemo || bound;
   $<HTMLButtonElement>('connect').disabled = transferBlocked();
   $<HTMLButtonElement>('disconnect').disabled = transferBlocked();
   $('connect').textContent = connecting ? t('Verbindung wird hergestellt …') : t('Mit HiBob anmelden');
   $('api-capability-notice').hidden = isDemo || !bound || canWrite();
   $('api-capability-notice').textContent = state.connection?.reason || (state.connection?.capabilities?.write ? t('Das Überschreiben vorhandener Einträge ist für diese API-Verbindung nicht freigegeben.') : t('Lesende API-Verbindung. Vorschau und Planprüfung sind verfügbar; Speichern ist noch nicht freigegeben.'));
+  $('connection-technical').textContent = state.connection?.transport === 'temporary-tab' ? t('API über temporären Hintergrund-Tab') : bound && !isDemo ? t('Direkte API-Verbindung') : '';
   if (state.snapshot && scanned) {
     $('connection-title').textContent = t('Monat eingelesen');
     const time = new Intl.DateTimeFormat(locale(), { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Berlin' }).format(new Date(state.snapshot.scannedAt));
@@ -578,19 +670,25 @@ function renderState(): void {
     $('connection-detail').textContent = t('Alle Funktionen können ohne echte Buchungen geprüft werden.');
   } else if (bound) {
     $('connection-title').textContent = t('Mit HiBob verbunden');
-    $('connection-detail').textContent = [accountLabel(), state.connection?.transport === 'temporary-tab' ? t('API über temporären Hintergrund-Tab') : t('Direkte API-Verbindung'), state.snapshot ? t('Für {month} ist noch kein Monat eingelesen. Bitte „Monat einlesen“ wählen.', { month: monthLabel(settings.month) }) : t('Noch kein Monat eingelesen. Klicke auf „Monat einlesen“.')].filter(Boolean).join(' · ');
+    $('connection-detail').textContent = accountLabel();
   } else {
     $('connection-title').textContent = connecting ? t('Verbindung wird hergestellt …') : state.connection?.status === 'expired' ? t('HiBob-Anmeldung abgelaufen') : state.connection?.status === 'unsupported' ? t('HiBob-Verbindung nicht verfügbar') : t('Mit HiBob verbinden');
     $('connection-detail').textContent = state.connection?.reason || t('Melde dich über HiBob an, um deine Anwesenheiten einzulesen.');
   }
-  const error = localError || state.error || (state.job?.status === 'interrupted' ? t('Der letzte Vorgang wurde unterbrochen. Bitte den Monat erneut einlesen.') : '');
+  const error = localError || state.error || statePollError || (state.job?.status === 'interrupted' ? t('Der letzte Vorgang wurde unterbrochen. Bitte den Monat erneut einlesen.') : '');
   $('main-error').hidden = !error;
   $('main-error').textContent = localizeText(error);
   $('retry-plan').hidden = !pendingDraft || rebuilding || locked;
   $('retry-connection').hidden = !hasExtension || (!initializationFailed && !connectionRetryAvailable) || initializing || locked;
   $<HTMLFieldSetElement>('settings-fieldset').disabled = locked || initializing || initializationFailed;
+  $<HTMLButtonElement>('settings-toggle').disabled = locked || initializing || initializationFailed;
+  $('schedule-hours').textContent = `${settings.start || '—'}–${settings.end || '—'}`;
+  $('schedule-details').textContent = [settings.useBreak ? `${t('Pause')} ${settings.breakStart}–${settings.breakEnd}` : t('Ohne Pause'), settings.variable ? t('±{minutes} Min.', { minutes: settings.variationMinutes }) : t('feste Zeiten'), t(GERMAN_STATES.find(item => item.code === settings.state)?.name || settings.state), settings.excludedDates.length ? t('{count} manuell ausgeschlossene Tage', { count: settings.excludedDates.length }) : ''].filter(Boolean).join(' · ');
   $<HTMLButtonElement>('scan').disabled = locked || initializing || initializationFailed || rebuilding || (!isDemo && !bound);
-  $('scan').textContent = busy || activeJob()?.kind === 'scan' ? t('Monat wird eingelesen …') : scanned ? t('Monat erneut einlesen') : t('Monat einlesen');
+  $<HTMLButtonElement>('refresh-month').disabled = $<HTMLButtonElement>('scan').disabled;
+  $('refresh-month').hidden = !state.snapshot;
+  $('scan-toolbar').hidden = !bound || scanned;
+  $('scan').textContent = busy || activeJob()?.kind === 'scan' ? t('Vorschau wird geprüft …') : scanned ? t('Monat erneut einlesen') : t('Vorschau erstellen');
   const progress = state.progress;
   $('scan-progress').hidden = !running || !progress;
   if (progress && running) {
@@ -605,26 +703,43 @@ function renderState(): void {
   renderPreview();
   renderRun();
   renderPreflight();
-  $('cancel-run').hidden = !running || connecting;
-  $<HTMLButtonElement>('cancel-run').disabled = hasExtension && (!activeJob() || activeJob()?.status === 'cancelling');
+  $('cancel-run').hidden = (!running && !paused) || connecting;
+  $('cancel-run').textContent = paused || state.run?.status === 'running' ? t('Restliche Tage stoppen') : t('Abbrechen');
+  $<HTMLButtonElement>('cancel-run').disabled = hasExtension && (!activeJob() && !pausedJob() || activeJob()?.status === 'cancelling');
+  $('booking-footer').hidden = (!plan || !state.snapshot) && !running && !paused;
+  $('apply').hidden = paused;
   const finished = state.run?.status === 'complete' && state.run.planId === plan?.id;
   $<HTMLButtonElement>('apply').disabled = !approved() || locked || rebuilding || finished;
-  $('apply').textContent = rebuilding ? t('Vorschau wird geprüft …') : running ? t('Bitte warten …') : finished ? t('Buchungen abgeschlossen') : canWrite() ? t('Jetzt buchen') : t('Plan prüfen');
-  $('footer-hint').textContent = running ? t('Bitte das HiBob-Konto während des Laufs nicht wechseln.') : preflightNeedsScan ? t('Nach der Planprüfung den Monat erneut einlesen.') : isDemo ? t('Testmodus: Auch „Jetzt buchen“ verändert nur lokale Beispieldaten.') : state.run && !state.snapshot ? t('Für einen weiteren Lauf den Monat erneut einlesen.') : t('Es wird erst nach deiner Bestätigung gespeichert.');
+  $('apply').textContent = rebuilding ? t('Vorschau wird geprüft …') : running ? t('Bitte warten …') : finished ? t('Buchungen abgeschlossen') : canWrite() ? t('{count} Tage prüfen', { count: plan ? writableDays(plan).length : 0 }) : t('Plan prüfen');
+  $('paused-card').hidden = !paused;
+  $('paused-description').textContent = paused ? t('{date} ist gespeichert und geprüft. {verified} Tage geprüft, {remaining} noch offen. Prüfe die Buchung und bestätige anschließend das Fortsetzen.', { date: dateLabel(state.run?.checkpointDate ?? ''), verified: state.run?.results.filter(item => item.status === 'verified').length ?? 0, remaining: state.run?.results.filter(item => item.status !== 'verified' && item.status !== 'skipped').length ?? 0 }) : '';
+  $<HTMLButtonElement>('continue-run').disabled = !paused || running || updating() || rebuilding;
+  $('footer-hint').textContent = running ? t('Bitte das HiBob-Konto während des Laufs nicht wechseln.') : paused ? t('Bereits geprüfte Buchungen bleiben gespeichert. Fortsetzen benötigt eine neue Bestätigung.') : preflightNeedsScan ? t('Nach der Planprüfung den Monat erneut einlesen.') : isDemo ? t('Testmodus: Auch „Jetzt buchen“ verändert nur lokale Beispieldaten.') : state.run && !state.snapshot ? t('Für einen weiteren Lauf den Monat erneut einlesen.') : t('Es wird erst nach deiner Bestätigung gespeichert.');
   updateConfirmationButton();
   if (focusId && focused && !focused.isConnected) document.getElementById(focusId)?.focus({ preventScroll: true });
   scrolling.scrollTop = scrollTop;
   scrolling.scrollLeft = scrollLeft;
+  const checkpointId = pausedJob()?.checkpointId;
+  if (paused && !running && !updating() && checkpointId && checkpointId !== announcedCheckpointId) {
+    announcedCheckpointId = checkpointId;
+    $('paused-card').scrollIntoView?.({ block: 'center' });
+    $('continue-run').focus({ preventScroll: true });
+  }
+  synchronizeStatePolling();
 }
 
 function renderPreview(): void {
   const running = isRunning();
+  const locked = running || isPaused() || updating();
+  const expanded = new Set([...document.querySelectorAll<HTMLDetailsElement>('details[data-day-details]')].filter(item => item.open).map(item => item.dataset.dayDetails));
+  const skippedOpen = document.querySelector<HTMLDetailsElement>('#skipped-days')?.open ?? false;
+  document.querySelector<HTMLElement>('.preview')!.hidden = !plan && !state.snapshot;
   $('preview-empty').hidden = Boolean(plan);
   $('preview-empty').querySelector('p')!.textContent = !plan && state.snapshot?.month === settings.month ? t('Der Monat ist eingelesen. Erstelle jetzt die prüfbare Vorschau.') : t('Lies zuerst den Monat aus HiBob ein. Feiertage, Abwesenheiten und bestehende Einträge werden berücksichtigt.');
   $('build-preview').hidden = Boolean(plan || pendingDraft || running || updating() || initializing || initializationFailed || state.snapshot?.month !== settings.month);
   $('preview-summary').hidden = !plan;
   $('redistribute').hidden = !plan || !settings.variable;
-  $<HTMLButtonElement>('redistribute').disabled = running || updating();
+  $<HTMLButtonElement>('redistribute').disabled = locked;
   $('weeks').replaceChildren();
   $('plan-errors').replaceChildren();
   $('plan-errors').hidden = !plan?.errors.length;
@@ -635,7 +750,7 @@ function renderPreview(): void {
   const excluded = plan.days.filter((day) => !day.eligible);
   const conflictDays = plan.days.filter((day) => day.eligible && day.existing.length > 0);
   const total = plan.weeks.some(week => week.plannedMinutes === null) ? null : plan.weeks.reduce((minutes, week) => minutes + (week.plannedMinutes ?? 0), 0);
-  const summaryItems = [[String(changed.length), t('Tage zum Buchen')], [formatMinutes(total), t('Netto im Plan')], [String(excluded.length), t('ausgelassene Tage')]];
+  const summaryItems = [[String(changed.length), isPaused() ? t('Tage im Monatsplan') : t('Tage zum Buchen')], [formatMinutes(total), t('Netto im Plan')], [String(excluded.length), t('ausgelassene Tage')]];
   $('preview-summary').replaceChildren(...summaryItems.map(([value, label]) => {
     const item = node('div'); item.append(node('strong', value), node('span', label)); return item;
   }));
@@ -643,7 +758,10 @@ function renderPreview(): void {
     $('conflicts').hidden = false;
     const unresolved = conflictDays.filter((day) => !choices[day.date]).length;
     $('conflicts').textContent = unresolved ? unresolved === 1 ? t('1 vorhandene Buchung prüfen') : t('{count} vorhandene Buchungen prüfen', { count: unresolved }) : t('Entscheidungen zu vorhandenen Buchungen ändern');
-    $<HTMLButtonElement>('conflicts').disabled = running || updating() || rebuilding || Boolean(pendingDraft);
+    $('conflicts').classList.toggle('primary', unresolved > 0);
+    if (unresolved) $('preview-summary').after($('conflicts'));
+    else $('more-options').append($('conflicts'));
+    $<HTMLButtonElement>('conflicts').disabled = locked || rebuilding || Boolean(pendingDraft);
   }
   if (plan.errors.length) {
     const list = node('ul');
@@ -651,6 +769,7 @@ function renderPreview(): void {
     $('plan-errors').append(node('div', t('Der Plan kann noch nicht gebucht werden.'), 'error-heading'), list);
   }
   const shown = new Set<string>();
+  const skipped: DayPlan[] = [];
   for (const week of plan.weeks) {
     const section = node('section', undefined, 'week');
     const header = node('div', undefined, 'week-header');
@@ -660,21 +779,31 @@ function renderPreview(): void {
     totals.append(node('strong', t('{time} geplant', { time: formatMinutes(week.plannedMinutes) })), node('div', t('{time} Ziel', { time: formatMinutes(week.targetMinutes) })));
     header.append(totals);
     section.append(header);
-    for (const day of plan.days.filter((item) => week.dates.includes(item.date))) { section.append(renderDay(day)); shown.add(day.date); }
+    for (const day of plan.days.filter((item) => week.dates.includes(item.date))) {
+      if (!day.eligible && !settings.excludedDates.includes(day.date)) skipped.push(day);
+      else section.append(renderDay(day, expanded.has(day.date)));
+      shown.add(day.date);
+    }
     for (const error of week.errors) section.append(node('p', localizeText(error), 'weekly-error'));
-    $('weeks').append(section);
+    if (section.querySelector('article') || week.errors.length) $('weeks').append(section);
   }
   // Include every date even if a planner only groups eligible dates into weeks.
   const remaining = plan.days.filter((day) => !shown.has(day.date));
   if (remaining.length) {
     const section = node('section', undefined, 'week');
     section.append(node('h3', t('Weitere Tage')));
-    for (const day of remaining) section.append(renderDay(day));
+    for (const day of remaining) section.append(renderDay(day, expanded.has(day.date)));
     $('weeks').append(section);
+  }
+  if (skipped.length) {
+    const disclosure = node('details', undefined, 'skipped-days'); disclosure.id = 'skipped-days'; disclosure.open = skippedOpen;
+    disclosure.append(node('summary', t('{count} arbeitsfreie Tage', { count: skipped.length })));
+    for (const day of skipped) disclosure.append(renderDay(day, expanded.has(day.date)));
+    $('weeks').append(disclosure);
   }
 }
 
-function renderDay(day: DayPlan): HTMLElement {
+function renderDay(day: DayPlan, expanded = false): HTMLElement {
   const article = node('article', undefined, `day${!day.eligible ? ' inactive' : ''}`);
   article.dataset.date = day.date;
   const head = node('div', undefined, 'day-head');
@@ -682,27 +811,35 @@ function renderDay(day: DayPlan): HTMLElement {
   const checkbox = node('input');
   checkbox.id = `include-${day.date}`;
   checkbox.type = 'checkbox';
-  checkbox.checked = !settings.excludedDates.includes(day.date);
   const snapshot = (state.snapshot ?? plan?.snapshot)?.days.find((item) => item.date === day.date);
   const weekday = new Date(`${day.date}T12:00:00Z`).getUTCDay();
-  checkbox.disabled = isRunning() || updating() || weekday === 0 || weekday === 6 || Boolean(day.holiday || snapshot?.absence || snapshot?.nonWorking || !snapshot?.editable);
-  if (checkbox.disabled && !isRunning() && !updating() && !settings.excludedDates.includes(day.date)) checkbox.checked = false;
+  const unavailable = weekday === 0 || weekday === 6 || Boolean(day.holiday || snapshot?.absence || snapshot?.nonWorking || (!snapshot?.editable && !snapshot?.unsupportedReason && day.action !== 'blocked'));
+  checkbox.checked = !unavailable && !settings.excludedDates.includes(day.date);
+  checkbox.disabled = isRunning() || isPaused() || updating() || unavailable;
   checkbox.setAttribute('aria-label', t('{date} berücksichtigen', { date: dateLabel(day.date) }));
   checkbox.addEventListener('change', () => {
-    if (isRunning() || updating()) return;
+    if (isRunning() || isPaused() || updating()) return;
     settings.excludedDates = checkbox.checked ? settings.excludedDates.filter((date) => date !== day.date) : [...new Set([...settings.excludedDates, day.date])].sort();
     $<HTMLTextAreaElement>('excludedDates').value = settings.excludedDates.join('\n');
     settingsChanged();
   });
-  label.append(checkbox, node('span', dateLabel(day.date), 'day-date'));
+  const dateText = node('span', undefined, 'day-date'); dateText.append(node('span', dateLabel(day.date)));
   const labels: Record<DayPlan['action'], string> = { create: t('Neu'), overwrite: t('Ersetzen'), skip: t('Ausgelassen'), conflict: t('Entscheidung offen'), unchanged: t('Unverändert'), blocked: t('Prüfung erforderlich') };
-  head.append(label, node('span', labels[day.action], `status ${day.action}`));
+  if (day.action !== 'create') dateText.append(node('small', labels[day.action], `day-state ${day.action}`));
+  label.append(checkbox, dateText);
+  const entries = (day.action === 'skip' || day.action === 'unchanged' ? day.existing : day.proposed).filter(entry => entry.type === 'work').sort((a, b) => a.start.localeCompare(b.start));
+  head.append(label, node('span', entries.length ? `${entries[0].start}–${entries[entries.length - 1].end}` : '—', 'day-time'), node('span', day.eligible ? formatMinutes(day.netMinutes) : '', 'day-net'));
   article.append(head);
+  const disclosure = node('details', undefined, 'day-details'); disclosure.dataset.dayDetails = day.date; disclosure.open = expanded;
+  const toggle = node('summary', '⌄'); toggle.setAttribute('aria-label', t('Einträge für {date} anzeigen', { date: dateLabel(day.date) })); disclosure.append(toggle);
   const list = node('dl', undefined, 'day-lines');
   if (day.existing.length) detailsLine(list, t('Bisher'), entriesElement(day.existing));
   if (day.proposed.length && (day.action === 'create' || day.action === 'overwrite' || day.action === 'conflict')) detailsLine(list, t('Geplant'), entriesElement(day.proposed));
   if (day.eligible) detailsLine(list, t('Netto'), formatMinutes(day.netMinutes));
-  if (list.childElementCount) article.append(list);
+  if (list.childElementCount) disclosure.append(list);
+  const extra = metadata(day.existing);
+  if (extra.length) disclosure.append(node('div', extra.join('\n'), 'metadata'));
+  if (list.childElementCount || extra.length) article.append(disclosure);
   const reason = [day.holiday, day.reason].filter((value, index, array) => value && array.indexOf(value) === index).map((value) => localizeText(value!)).join(' · ');
   if (reason) article.append(node('p', reason, 'day-reason'));
   return article;
@@ -713,11 +850,20 @@ function renderRun(): void {
   $('run-panel').hidden = !run;
   if (!run) return;
   const verified = run.results.filter((item) => item.status === 'verified').length;
-  const status = { running: t('Buchungen laufen'), complete: t('Lauf abgeschlossen'), stopped: t('Lauf angehalten'), failed: t('Lauf mit Fehler angehalten') }[run.status];
+  const status = { running: t('Buchungen laufen'), paused: t('Für Kontrolle pausiert'), complete: t('Lauf abgeschlossen'), stopped: t('Lauf angehalten'), failed: t('Lauf mit Fehler angehalten') }[run.status];
   $('run-status').textContent = t('{status} · {verified} von {total} Tagen verifiziert', { status, verified, total: run.results.filter((item) => item.status !== 'skipped').length });
+  $('run-uncertain').hidden = !run.results.some(result => result.status === 'uncertain');
+  const uncertainNotice = t('Als unklar markierte Buchungen können bereits in HiBob gespeichert sein. Vor einem neuen Lauf den Monat einlesen und die betroffenen Tage prüfen.');
+  if ($('run-uncertain').textContent !== uncertainNotice) $('run-uncertain').textContent = uncertainNotice;
+  if (run.status === 'failed') $<HTMLDetailsElement>('run-history').open = true;
   $('run-results').replaceChildren(...run.results.map((result) => {
     const item = node('li'); item.dataset.status = result.status;
-    item.append(node('span', dateLabel(result.date, false)), node('span', localizeText(result.message))); return item;
+    const description = node('div');
+    if (result.status === 'uncertain') description.append(node('strong', t('Speicherstatus unklar'), 'run-outcome'));
+    if (result.status === 'pending') description.append(node('strong', t('Noch nicht ausgeführt'), 'run-outcome'));
+    const message = localizeText(result.message);
+    if (result.status !== 'pending' || message !== t('Keine Änderung.')) description.append(node('span', message));
+    item.append(node('span', dateLabel(result.date, false)), description); return item;
   }));
 }
 
@@ -736,7 +882,7 @@ function settingsChanged(): void {
 }
 
 function openConflicts(): void {
-  if (!plan || updating()) return;
+  if (!plan || isPaused() || updating()) return;
   $('conflict-error').hidden = true;
   $('conflict-items').replaceChildren();
   for (const day of plan.days.filter((item) => item.eligible && item.existing.length > 0)) {
@@ -779,7 +925,7 @@ function chooseAll(value: string): void {
 }
 
 async function saveChoices(): Promise<void> {
-  if (!conflictDialog.open || !plan || isRunning() || updating()) return;
+  if (!conflictDialog.open || !plan || isRunning() || isPaused() || updating()) return;
   const next: ConflictChoices = { ...choices };
   for (const element of document.querySelectorAll<HTMLSelectElement>('[data-conflict-choice]')) {
     const date = element.dataset.conflictChoice!;
@@ -800,8 +946,8 @@ async function saveChoices(): Promise<void> {
 }
 
 async function scanMonth(): Promise<void> {
-  if (!connected() || isRunning() || updating() || rebuilding) return;
-  if (!$<HTMLFormElement>('settings-form').reportValidity()) return;
+  if (!connected() || isRunning() || isPaused() || updating() || rebuilding) return;
+  if (!revealInvalidSettings()) return;
   settings = readSettings();
   busy = true; demoCancelled = false; localError = ''; plan = undefined; choices = {}; preflightResult = undefined;
   if (isDemo) {
@@ -832,13 +978,25 @@ async function scanMonth(): Promise<void> {
   finally { busy = false; if (isDemo) state.progress = undefined; renderState(); persistDemo(); }
 }
 
-function openApply(): void {
-  if (!approved() || !plan || isRunning() || rebuilding) return;
+function remainingDays(reviewed: BookingPlan): DayPlan[] {
+  const verified = state.run?.planId === reviewed.id && isPaused() ? new Set(state.run.results.filter(item => item.status === 'verified').map(item => item.date)) : new Set<string>();
+  return writableDays(reviewed).filter(day => !verified.has(day.date));
+}
+
+function verificationDates(reviewed: BookingPlan): string[] {
+  const days = writableDays(reviewed).map(day => day.date).sort();
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+  const today = ['year', 'month', 'day'].map(type => parts.find(part => part.type === type)!.value).join('-');
+  return [...new Set([days[0], days.find(date => date > today)].filter((date): date is string => Boolean(date)))];
+}
+
+function openApply(resume = false): void {
+  if (!approved() || !plan || isRunning() || rebuilding || (resume ? !pausedJob() : isPaused())) return;
   preflightResult = undefined;
-  const days = writableDays(plan);
-  confirmed = { plan: structuredClone(plan), planRevision: planRevision(), contextFingerprint: contextFingerprint(plan.snapshot.context), preflightDate: days[0]?.date ?? '' };
+  const days = resume ? remainingDays(plan) : writableDays(plan);
+  confirmed = { plan: structuredClone(plan), planRevision: planRevision(), contextFingerprint: contextFingerprint(plan.snapshot.context), preflightDate: days[0]?.date ?? '', ...(resume ? { resumeJobId: pausedJob()!.id, checkpointId: pausedJob()!.checkpointId } : {}) };
   const reviewed = confirmed.plan;
-  $('apply-title').textContent = canWrite() ? t('Buchungen jetzt speichern?') : t('Plan prüfen');
+  $('apply-title').textContent = resume ? t('Restliche Buchungen fortsetzen?') : canWrite() ? t('Buchungen jetzt speichern?') : t('Plan prüfen');
   const manual = needsAccountConfirmation(reviewed);
   $('account-confirmation-field').hidden = !manual;
   input('account-confirmation').checked = false;
@@ -848,12 +1006,23 @@ function openApply(): void {
   const dateSelect = select('draft-check-date');
   dateSelect.replaceChildren(...days.map(day => { const option = node('option', `${dateLabel(day.date)} · ${formatMinutes(day.netMinutes)}`); option.value = day.date; return option; }));
   dateSelect.value = confirmed.preflightDate;
+  input('pause-verification').checked = false;
+  $('checkpoint-field').hidden = resume || !canWrite();
+  $('preflight-controls').hidden = resume;
+  $('additional-checks').hidden = resume;
+  $<HTMLDetailsElement>('additional-checks').open = !canWrite();
+  $('checkpoint-description').textContent = t('Nach dem ersten gebuchten Tag und dem ersten zukünftigen Tag anhalten. Danach nur mit neuer Bestätigung fortsetzen.');
+  $('confirm-apply').hidden = !canWrite();
+  $('confirm-apply').textContent = resume ? t('{count} restliche Tage buchen', { count: days.length }) : t('{count} Tage buchen', { count: days.length });
   const overwriteCount = days.filter((day) => day.action === 'overwrite').length;
   $('apply-description').textContent = isDemo ? t('Du startest eine lokale Simulation. Dein echtes HiBob-Konto wird nicht verändert.') : manual ? t('Prüfe das angezeigte Mitarbeiter- und Firmenkonto. Diese Bestätigung gilt nur für diesen Plan.') : t('Die folgenden Änderungen werden in deinem HiBob-Konto „{employee}“ gespeichert.', { employee: reviewed.snapshot.employeeLabel });
   const list = $('apply-details'); list.replaceChildren();
   detailsLine(list, t('Monat'), monthLabel(reviewed.settings.month));
   if (!isDemo) detailsLine(list, t('HiBob-Konto'), accountLabel());
   detailsLine(list, t('Tage zum Buchen'), String(days.length));
+  detailsLine(list, t('Netto'), formatMinutes(days.reduce((total, day) => total + (day.netMinutes ?? 0), 0)));
+  detailsLine(list, t('Geplant'), [reviewed.settings.start + '–' + reviewed.settings.end, reviewed.settings.useBreak ? `${t('Pause')} ${reviewed.settings.breakStart}–${reviewed.settings.breakEnd}` : t('Ohne Pause'), reviewed.settings.variable ? t('±{minutes} Min.', { minutes: reviewed.settings.variationMinutes }) : t('feste Zeiten')].join(' · '));
+  if (resume) detailsLine(list, t('Bereits gespeichert und geprüft'), String(writableDays(reviewed).length - days.length));
   detailsLine(list, t('Davon überschreiben'), String(overwriteCount));
   detailsLine(list, t('Bundesland'), t(GERMAN_STATES.find((item) => item.code === reviewed.settings.state)?.name || reviewed.settings.state));
   applyDialog.showModal();
@@ -863,6 +1032,7 @@ function openApply(): void {
 function accountConfirmation(review: NonNullable<typeof confirmed>): AccountConfirmation | undefined {
   return needsAccountConfirmation(review.plan) ? {
     planId: review.plan.id, planRevision: review.planRevision, contextFingerprint: review.contextFingerprint, confirmed: true,
+    ...(review.resumeJobId ? { checkpointId: review.checkpointId } : {}),
   } : undefined;
 }
 
@@ -882,7 +1052,7 @@ async function demoPreflight(day: DayPlan): Promise<PreflightResult> {
 
 async function checkPreflight(): Promise<void> {
   const review = confirmed;
-  if (!connected() || !review || !applyDialog.open || !currentConfirmation() || select('draft-check-date').value !== review.preflightDate || (needsAccountConfirmation(review.plan) && !input('account-confirmation').checked)) return;
+  if (isPaused() || !connected() || !review || !applyDialog.open || !currentConfirmation() || select('draft-check-date').value !== review.preflightDate || (needsAccountConfirmation(review.plan) && !input('account-confirmation').checked)) return;
   const day = writableDays(review.plan).find(day => day.date === review.preflightDate);
   if (!day) return;
   const confirmation = accountConfirmation(review);
@@ -897,7 +1067,7 @@ async function checkPreflight(): Promise<void> {
     const response = isDemo ? undefined : await request({ type: 'PANEL_PREFLIGHT', plan: review.plan, expectedPlanRevision: review.planRevision, date: day.date, ...(confirmation ? { confirmation } : {}) });
     const result = isDemo ? await demoPreflight(day) : response?.preflight;
     const completedState = response?.state;
-    const invalidated = isDemo || Boolean(completedState && completedState.schemaVersion === 4 && completedState.connection?.generation === connectionGeneration
+    const invalidated = isDemo || Boolean(completedState && completedState.schemaVersion === 5 && completedState.connection?.generation === connectionGeneration
       && sameJsonValue(completedState.connection, reviewedConnection)
       && typeof completedState.revision === 'number' && completedState.revision > revision
       && typeof completedState.planRevision === 'number' && completedState.planRevision > review.planRevision
@@ -919,9 +1089,13 @@ async function checkPreflight(): Promise<void> {
   }
 }
 
-async function demoApply(activePlan: BookingPlan): Promise<void> {
+async function demoApply(activePlan: BookingPlan, checkpointDates?: string[], continuing = false): Promise<void> {
   demoCancelled = false;
   const before = state.run?.planId === activePlan.id ? state.run : undefined;
+  if (!continuing) demoCheckpointDates = checkpointDates ?? [];
+  const checkpoints = demoCheckpointDates;
+  const jobId = continuing ? pausedJob()?.id : crypto.randomUUID();
+  state.job = undefined;
   state.run = {
     planId: activePlan.id, status: 'running', startedAt: before?.startedAt || new Date().toISOString(), updatedAt: new Date().toISOString(),
     results: activePlan.days.map((day) => before?.results.find((result) => result.date === day.date) ?? ({ date: day.date, status: day.action === 'create' || day.action === 'overwrite' ? 'pending' : 'skipped', message: day.action === 'create' || day.action === 'overwrite' ? t('Wartet auf Buchung') : day.reason || t('Keine Änderung') })),
@@ -936,11 +1110,17 @@ async function demoApply(activePlan: BookingPlan): Promise<void> {
     const stored = demoSnapshot?.days.find((item) => item.date === result.date);
     if (stored) { stored.entries = structuredClone(day.proposed); stored.fingerprint = demoFingerprint(stored.date, stored.entries); }
     result.status = 'verified'; result.message = t('Lokal gespeichert und verifiziert (Testdaten)'); state.run.updatedAt = new Date().toISOString();
+    if (checkpoints.includes(day.date) && state.run.results.some(item => item.status === 'pending')) {
+      state.run.status = 'paused'; state.run.checkpointDate = day.date;
+      state.job = { id: jobId!, kind: 'apply', status: 'paused', connectionId: state.connection?.generation ?? 'demo', month: activePlan.settings.month, startedAt: state.run.startedAt, updatedAt: state.run.updatedAt, checkpointId: crypto.randomUUID() };
+      state.plan = plan = activePlan; persistDemo(); renderState(); return;
+    }
     persistDemo(); renderState();
   }
   state.run.status = demoCancelled ? 'stopped' : 'complete';
   state.run.updatedAt = new Date().toISOString();
   state.snapshot = undefined;
+  state.job = undefined;
   plan = { ...activePlan, canReview: false };
   state.plan = plan;
 }
@@ -949,24 +1129,35 @@ async function applyPlan(): Promise<void> {
   const review = confirmed;
   if (!canWrite() || !review || !applyDialog.open || !currentConfirmation() || (needsAccountConfirmation(review.plan) && !input('account-confirmation').checked)) return;
   const confirmation = accountConfirmation(review);
+  const checkpointDates = !review.resumeJobId && input('pause-verification').checked ? verificationDates(review.plan) : undefined;
   closeConfirmation();
   const activePlan = review.plan;
   approvedPlanRevision = undefined;
   applying = true; localError = ''; renderState();
   try {
-    if (isDemo) await demoApply(activePlan);
+    if (isDemo) await demoApply(activePlan, checkpointDates, Boolean(review.resumeJobId));
     else {
-      await message({ type: 'PANEL_APPLY', plan: activePlan, expectedPlanRevision: review.planRevision, ...(confirmation ? { confirmation } : {}) });
+      await message(review.resumeJobId
+        ? { type: 'PANEL_CONTINUE', jobId: review.resumeJobId, planId: activePlan.id, expectedPlanRevision: review.planRevision, ...(confirmation ? { confirmation } : {}) }
+        : { type: 'PANEL_APPLY', plan: activePlan, expectedPlanRevision: review.planRevision, ...(confirmation ? { confirmation } : {}), ...(checkpointDates ? { options: { checkpointDates } } : {}) });
     }
   } catch (error) { localError = errorText(error); }
-  finally { applying = false; renderState(); persistDemo(); }
+  finally { applying = false; renderState(); persistDemo(); if (isPaused()) void refreshApproval(); }
 }
 
 async function cancelRun(): Promise<void> {
   try {
-    if (isDemo) demoCancelled = true;
+    if (isDemo) {
+      demoCancelled = true;
+      if (isPaused()) {
+        if (state.run) state.run.status = 'stopped';
+        state.job = undefined; state.snapshot = undefined;
+        if (plan) state.plan = plan = { ...plan, canReview: false };
+        revokeApproval(); persistDemo();
+      }
+    }
     else {
-      const job = activeJob();
+      const job = activeJob() ?? pausedJob();
       if (!job) return;
       await message({ type: 'PANEL_CANCEL', jobId: job.id });
     }
@@ -983,16 +1174,27 @@ function exportSettings(): void {
   if (transferBlocked()) return;
   try {
     const contents = serializeSettingsBackup(readSettings());
-    const url = URL.createObjectURL(new Blob([contents], { type: 'application/json' }));
-    const link = node('a');
-    link.href = url;
-    link.download = `hibob-settings-${settings.month}.json`;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    // Keep the URL alive long enough for the browser to begin the download.
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    downloadJson(contents, `hibob-settings-${settings.month}.json`);
     transferStatus(t('Die Einstellungssicherung wurde zum Download vorbereitet.'));
+  } catch (error) { showError(errorText(error)); }
+}
+
+function downloadJson(contents: string, filename: string): void {
+  const url = URL.createObjectURL(new Blob([contents], { type: 'application/json' }));
+  const link = node('a'); link.href = url; link.download = filename;
+  document.body.append(link); link.click(); link.remove();
+  // Keep the URL alive long enough for Chrome to begin the local download.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportBookingPlan(): void {
+  if (!canExportPlan() || !plan) return;
+  try {
+    const reviewed = structuredClone(plan);
+    delete reviewed.snapshot.context;
+    const exported = { format: 'hibob-attendance-review', version: 1, planRevision: planRevision(), plan: reviewed, ...(state.run?.planId === plan.id ? { run: structuredClone(state.run) } : {}) };
+    downloadJson(JSON.stringify(exported, null, 2) + '\n', `hibob-booking-plan-${reviewed.settings.month}.json`);
+    $('export-plan-status').textContent = t('Download vorbereitet.'); $('export-plan-status').hidden = false;
   } catch (error) { showError(errorText(error)); }
 }
 
@@ -1090,8 +1292,9 @@ async function initialize(retry = false): Promise<void> {
       plan = state.plan; settings = storedSettings(plan.settings); choices = structuredClone(plan.choices); seed = plan.seed;
       if (isDemo || sameJsonValue(initialResponse, state)) approvedPlanRevision = planRevision();
     }
-    if (isDemo && state.run?.status === 'running') {
+    if (isDemo && (state.run?.status === 'running' || state.run?.status === 'paused')) {
       state.run.status = 'stopped';
+      state.job = undefined;
       state.snapshot = undefined;
       if (plan) { plan = { ...plan, canReview: false }; state.plan = plan; }
     }
@@ -1103,7 +1306,7 @@ async function initialize(retry = false): Promise<void> {
 
 $<HTMLFormElement>('settings-form').addEventListener('submit', (event) => event.preventDefault());
 function settingsInput(): void {
-  if (isRunning() || updating()) return;
+  if (isRunning() || isPaused() || updating()) return;
   const next = readSettings();
   if (sameJsonValue(next, settings)) return;
   settings = next; updateConditionalFields();
@@ -1112,16 +1315,21 @@ function settingsInput(): void {
 $('settings-form').addEventListener('input', settingsInput);
 $('settings-form').addEventListener('change', settingsInput);
 $('scan').addEventListener('click', () => { void scanMonth(); });
+$('refresh-month').addEventListener('click', () => { void scanMonth(); });
+$('settings-toggle').addEventListener('click', () => setSettingsOpen($('settings-options').hidden));
+$('schedule-summary').addEventListener('click', () => setSettingsOpen($('settings-options').hidden));
 $('redistribute').addEventListener('click', () => { void rebuild(true); });
 $('conflicts').addEventListener('click', openConflicts);
 $('close-conflicts').addEventListener('click', () => conflictDialog.close());
 $('overwrite-all').addEventListener('click', () => chooseAll('overwrite'));
 $('skip-all').addEventListener('click', () => chooseAll('skip'));
 $('save-conflicts').addEventListener('click', () => { void saveChoices(); });
-$('apply').addEventListener('click', openApply);
+$('apply').addEventListener('click', () => openApply());
+$('continue-run').addEventListener('click', () => { void (async () => { if (!isPaused() || isRunning()) return; if (hasExtension) await refreshApproval(); else approvedPlanRevision = planRevision(); openApply(true); })(); });
 $('close-apply').addEventListener('click', closeConfirmation);
 applyDialog.addEventListener('cancel', closeConfirmation);
 input('account-confirmation').addEventListener('change', updateConfirmationButton);
+input('pause-verification').addEventListener('change', () => { input('account-confirmation').checked = false; updateConfirmationButton(); });
 select('draft-check-date').addEventListener('change', () => {
   if (!confirmed || !currentConfirmation()) return;
   const date = select('draft-check-date').value;
@@ -1138,6 +1346,7 @@ $('connect').addEventListener('click', () => { void changeConnection(); });
 $('disconnect').addEventListener('click', () => { void changeConnection(true); });
 $('build-preview').addEventListener('click', () => { if (!isRunning() && !updating() && !pendingDraft && state.snapshot?.month === settings.month) void rebuild(); });
 $('export-settings').addEventListener('click', exportSettings);
+$('export-plan').addEventListener('click', exportBookingPlan);
 $('import-settings').addEventListener('click', () => {
   if (transferBlocked()) return;
   input('settings-file').value = '';

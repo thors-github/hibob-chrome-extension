@@ -113,7 +113,7 @@ export class HiBobApiAdapter {
     const policy = { ...details.policyDetails, __timezone: identity.timezone };
     const raw = await this.client.request(reportRequest(identity.employeeId, period.id), signal);
     this.check(signal);
-    return { days: parseReport(month, raw, period, policy), policy, period, identity };
+    return { days: parseReport(month, raw, period, policy, identity.employeeId), policy, period, identity };
   }
   async scanMonth(connection: ApiConnection, month: string, progress?: (p: AdapterProgress) => void, signal?: AbortSignal): Promise<MonthSnapshot> {
     return this.operation(signal, async () => {
@@ -206,6 +206,7 @@ export class HiBobApiAdapter {
     if (!(error instanceof SessionClientError)) return new ApiAdapterError(error instanceof Error ? error.message : t('HiBob hat nicht geantwortet.'));
     const messages = {
       AUTH_REQUIRED: t('Bitte zuerst bei HiBob anmelden und die Verbindung prüfen.'), FORBIDDEN: t('HiBob hat den API-Zugriff verweigert. Bitte die Berechtigungen prüfen.'),
+      RATE_LIMITED: t('HiBob begrenzt API-Anfragen. Bitte mindestens {seconds} Sekunden warten, dann den Monat erneut einlesen. Unbestätigte Buchungen nicht wiederholen.', { seconds: Math.max(1, Math.ceil((error.retryAfterMs ?? 300_000) / 1000)) }),
       HTTP_ERROR: t('HiBob hat die API-Anfrage abgelehnt.'), NETWORK_UNAVAILABLE: t('Die HiBob-API-Verbindung ist nicht verfügbar.'), TIMEOUT: t('Die HiBob-API-Anfrage hat zu lange gedauert.'),
       CANCELLED: t('Vorgang vor dem Schreiben abgebrochen.'), INVALID_RESPONSE: t('HiBob hat eine nicht unterstützte API-Antwort zurückgegeben.'), RESPONSE_TOO_LARGE: t('Die HiBob-API-Antwort ist zu groß.'),
       DOCUMENT_CHANGED: t('Die temporäre HiBob-Seite wurde geändert. Bitte erneut verbinden.'), REQUEST_DENIED: t('Dieser HiBob-API-Aufruf ist nicht freigegeben.'), BUSY: t('Ein Vorgang läuft bereits. Bitte zuerst abbrechen.'), NO_OPERATION: t('Bitte zuerst bei HiBob anmelden und die Verbindung prüfen.'),

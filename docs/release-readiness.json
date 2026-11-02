@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
-  "version": "1.3.0",
+  "version": "1.4.0",
   "stableReleaseReady": false,
-  "bootstrapTag": "v1.3.0-beta.1",
+  "bootstrapTag": "v1.4.0-beta.1",
   "blockers": [
-    "The internal HiBob API is not a supported public integration contract. Live API saving and future-day acceptance remain unverified."
+    "The internal HiBob API is not a supported public integration contract. Live overwrite, interactive SSO, temporary-tab fallback and an uninterrupted native run exceeding five minutes without DevTools have not received native acceptance."
   ],
   "validationEvidence": [
-    "Automated API transport, strict response parsing, plan authorization and independent post-write readback tested against a local fake API.",
-    "Native installed 1.3.0-beta.1: existing-session direct API connection, complete month scan and read-only per-day preflight passed. No attendance writes were executed. Interactive SSO and temporary-tab fallback were not exercised natively."
+    "Automated unit, API-ledger and browser tests cover ownership, realistic save responses, weekly targets, checkpoints, retained-entry reconciliation and failure recovery.",
+    "Native Chrome acceptance covers existing-session/direct connection, complete month read, current and future creation, verification checkpoints and independent saved-data reconciliation. Private acceptance reports and personal attendance data are kept outside Git."
   ]
 }

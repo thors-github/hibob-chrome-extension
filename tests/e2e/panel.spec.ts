@@ -7,7 +7,7 @@ async function openDemo(page: Page) {
 }
 
 async function scan(page: Page) {
-  await page.getByRole('button', { name: 'Monat einlesen', exact: true }).click();
+  await page.locator('#scan').click();
   await expect(page.locator('#weeks article.day')).toHaveCount(30);
 }
 
@@ -23,6 +23,7 @@ test('complete preview, conflict decisions, weekly variation and stable reload',
   page.on('pageerror', error => errors.push(error.message));
   page.on('request', request => destinations.push(request.url()));
   await openDemo(page);
+  await page.locator('#settings-toggle').click();
   await page.getByLabel('Variable Zeiten', { exact: true }).check();
   await expect(page.locator('#variation-value')).toHaveText('±5 Min.');
   await scan(page);
@@ -60,12 +61,12 @@ test('local writes complete only after confirmation and require a fresh scan', a
   await page.locator('#apply').click();
   await expect(page.locator('#apply-dialog')).toBeVisible();
   await expect(page.locator('#run-panel')).not.toBeVisible();
-  await page.getByRole('button', { name: 'Buchungen starten', exact: true }).click();
+  await page.locator('#confirm-apply').click();
   await expect(page.locator('#run-status')).toContainText('Lauf abgeschlossen');
   await expect(page.locator('#run-results [data-status="verified"]')).toHaveCount(18);
   await expect(page.locator('#apply')).toBeDisabled();
   await expect(page.locator('#footer-hint')).toContainText('Testmodus');
-  await page.getByRole('button', { name: 'Monat einlesen', exact: true }).click();
+  await page.locator('#scan').click();
   await expect(page.locator('#conflicts')).toContainText('20 vorhandene Buchungen');
 });
 
@@ -74,8 +75,8 @@ test('cancellation stops the local queue and cannot blindly resume', async ({ pa
   await scan(page);
   await skipConflicts(page);
   await page.locator('#apply').click();
-  await page.getByRole('button', { name: 'Buchungen starten', exact: true }).click();
-  await page.getByRole('button', { name: 'Abbrechen', exact: true }).click();
+  await page.locator('#confirm-apply').click();
+  await page.locator('#cancel-run').click();
   await expect(page.locator('#run-status')).toContainText('Lauf angehalten');
   await expect(page.locator('#apply')).toBeDisabled();
 });
@@ -86,6 +87,7 @@ test('local read-only preflight preserves example attendance and never persists 
   await skipConflicts(page);
   const before = await page.evaluate(() => JSON.parse(sessionStorage.getItem('hibob-demo-session')!));
   await page.locator('#apply').click();
+  await page.locator('#additional-checks > summary').click();
   await page.locator('#check-draft').click();
   await expect(page.locator('#draft-check-result')).toBeVisible();
   await expect(page.locator('#draft-check-result-title')).toContainText('nicht gespeichert');
@@ -104,6 +106,7 @@ test('local read-only preflight preserves example attendance and never persists 
 
 test('regional requirements, manual exclusions and impossible weekly target', async ({ page }) => {
   await openDemo(page);
+  await page.locator('#settings-toggle').click();
   await page.getByLabel('Bundesland', { exact: true }).selectOption('BY');
   await expect(page.getByLabel('Arbeitsort in der Stadt Augsburg?')).toBeVisible();
   await page.getByLabel('Arbeitsort in der Stadt Augsburg?').selectOption('yes');
@@ -139,17 +142,28 @@ test('keyboard day selection keeps focus and the viewport through asynchronous p
 });
 
 for (const width of [320, 700]) {
-  test(`readable responsive panel at ${width}px`, async ({ page }) => {
+  test(`readable responsive panel at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
+    const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
     await openDemo(page);
+    await expect(page).toHaveTitle('HiBob · Monatsbuchung');
+    await expect(page.locator('#settings-options')).not.toBeVisible();
+    await expect(page.locator('#scan')).toBeInViewport();
+    await expect(page.locator('vite-error-overlay')).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath(`initial-${width}.png`), fullPage: false });
+    await page.locator('#settings-toggle').click();
     await page.getByLabel('Variable Zeiten', { exact: true }).check();
+    await page.screenshot({ path: testInfo.outputPath(`settings-${width}.png`), fullPage: false });
+    await page.locator('#settings-toggle').click();
     await scan(page);
     await skipConflicts(page);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await expect(page.locator('#apply')).toBeVisible();
     await page.evaluate(() => scrollTo(0, 0));
-    await page.screenshot({ path: `/tmp/hibob-panel-${width}.png`, fullPage: false });
+    await page.screenshot({ path: testInfo.outputPath(`preview-${width}.png`), fullPage: false });
+    await page.locator('#more-options > summary').click();
     await page.locator('#conflicts').click();
     expect(await page.locator('#conflict-dialog').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(errors).toEqual([]);
   });
 }

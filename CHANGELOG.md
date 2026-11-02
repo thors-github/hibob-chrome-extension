@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.0-beta.1
+
+- Simplify the monthly workflow: show the month, connected account and a compact schedule summary first. Move schedule, location and exclusion controls behind a labelled settings button; show advanced controls only when needed.
+- Keep day rows compact while retaining expandable work/break segments, existing-entry details, weekly totals and explicit conflict decisions. Reveal blocking errors automatically and keep excluded-day selection consistent while operations are busy.
+- Add optional verification checkpoints within one frozen monthly plan. Continuation requires fresh account consent and a full read-only reconciliation of verified and remaining days. Already verified days are never sent again; restart or cancellation requires a fresh scan.
+- Recognise observed manual-save response fields, validate returned entry ownership against the authenticated employee, and keep unknown provenance or metadata blocked. Warn clearly when an uncertain result may already be saved.
+- Acknowledge long booking jobs promptly and keep lifetime protection limited to active execution. Canonical progress and a status fallback preserve late storage-error visibility; interrupted work never resumes automatically.
+- Preserve local preferences and run history while migrating to session format 5. No new permissions, credentials or external services are added.
+- Space API requests conservatively and report HTTP 429 cooldowns without automatically retrying writes. Reconcile retained entries before checkpoint continuation.
+- Native acceptance covers session connection, month reading, current/future creation, retained-entry recovery and independent readback. The internal API remains an evaluation integration; live overwriting, interactive SSO and fallback transport remain unverified. Stable and Store publication stay blocked.
+
 ## 1.3.0-beta.1
 
 - Replace the production form writer with an API-first adapter for HiBob's internal web endpoints. Retain the monthly planner, German calendars, variable times, exclusions and conflict review.

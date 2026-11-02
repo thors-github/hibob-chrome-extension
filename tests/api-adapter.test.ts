@@ -96,6 +96,13 @@ async function setup(server = new Server(), choices: ConflictChoices = {}) {
 }
 const apply = (app: Awaited<ReturnType<typeof setup>>, signal?: AbortSignal) => app.adapter.applyDay(app.connection, app.day, app.snapshot.context, app.consent, undefined, signal);
 const preflight = (app: Awaited<ReturnType<typeof setup>>, signal?: AbortSignal) => app.adapter.preflightDay(app.connection, app.day, app.snapshot.context, app.consent, undefined, signal);
+function observedManualReadback(entries: ApiEntry[], employeeId: unknown = 'employee-fixture', source: unknown = 'employeeManuallyEdit'): ApiEntry[] {
+  return entries.map((entry, index) => ({
+    id: index + 501, employeeId, source, entryType: entry.entryType, start: entry.start, end: entry.end,
+    duration: (parseTime(String(entry.end).slice(-5))! - parseTime(String(entry.start).slice(-5))!) * 60,
+    reportingMethod: 'startEnd', isManuallyEdited: true, comment: entry.comment ?? '', reason: null, projectTracking: null,
+  }));
+}
 
 describe('API connection, complete month and read-only preflight', () => {
   it('permits the observed read-only policy POST and rejects the obsolete GET contract', async () => {
@@ -165,6 +172,46 @@ describe('API connection, complete month and read-only preflight', () => {
 });
 
 describe('single-request API writes with independent readback', () => {
+  it('verifies a native-shaped readback containing matching ownership and exact manual provenance after one write', async () => {
+    const app = await setup();
+    app.server.accepted = () => app.server.setEntries(target, observedManualReadback(app.server.data().entries));
+    const actual = await apply(app);
+    expect(app.server.mutations).toHaveLength(1); expect(actual.reportedMinutes).toBe(480);
+    expect(actual.entries).toEqual(app.day.proposed); expect(actual.unsupportedReason).toBeUndefined();
+    expect(actual.entries.every(entry => !entry.metadata)).toBe(true);
+    expect(app.server.data().entries).toEqual(expect.arrayContaining([expect.objectContaining({ employeeId: 'employee-fixture', source: 'employeeManuallyEdit', reportingMethod: 'startEnd', isManuallyEdited: true, duration: 14400 })]));
+    expect(actual.fingerprint).toContain('employee-fixture'); expect(actual.fingerprint).toContain('employeeManuallyEdit');
+  });
+
+  it('refuses a foreign entry owner during scanning, preflight and before a write', async () => {
+    const app = await setup();
+    app.server.setEntries(target, observedManualReadback(entries(), 'another-employee'));
+    await expect(app.adapter.scanMonth(app.connection, app.server.month)).rejects.toMatchObject({ connectionStatus: 'unsupported', uncertain: false });
+    await expect(preflight(app)).rejects.toMatchObject({ connectionStatus: 'unsupported', uncertain: false });
+    await expect(apply(app)).rejects.toMatchObject({ connectionStatus: 'unsupported', uncertain: false });
+    expect(app.server.mutations).toHaveLength(0);
+  });
+
+  it('stops with an uncertain outcome if acknowledged entries claim another employee, without repeating the write', async () => {
+    const app = await setup();
+    app.server.accepted = () => app.server.setEntries(target, observedManualReadback(app.server.data().entries, 'another-employee'));
+    await expect(apply(app)).rejects.toMatchObject({ connectionStatus: 'unsupported', uncertain: true });
+    expect(app.server.mutations).toHaveLength(1); expect(app.server.data().entries).toHaveLength(3);
+  });
+
+  it.each(['unknownServerSource', null, { type: 'employeeManuallyEdit' }])('stops on unknown readback provenance %j after one write', async source => {
+    const app = await setup();
+    app.server.accepted = () => app.server.setEntries(target, observedManualReadback(app.server.data().entries, app.server.user.id, source));
+    await expect(apply(app)).rejects.toMatchObject({ uncertain: true });
+    expect(app.server.mutations).toHaveLength(1);
+  });
+
+  it('keeps unknown additional readback data blocking even when ownership and provenance are recognized', async () => {
+    const app = await setup();
+    app.server.accepted = () => app.server.setEntries(target, observedManualReadback(app.server.data().entries).map(entry => ({ ...entry, extraServerData: 'unsupported' })));
+    await expect(apply(app)).rejects.toMatchObject({ uncertain: true });
+    expect(app.server.mutations).toHaveLength(1);
+  });
   it.each([['2026-11', -60], ['2026-07', -120]] as const)('preserves wall-clock values and the %s timezone offset, then verifies all three persisted segments', async (month, offset) => {
     const app = await setup(new Server(month));
     const actual = await apply(app);

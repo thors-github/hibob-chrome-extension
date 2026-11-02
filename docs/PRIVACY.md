@@ -2,7 +2,7 @@
 
 HiBob Monthly Attendance · Last updated 2 November 2026
 
-HiBob Monthly Attendance runs in Chrome and connects to HiBob using your normal signed-in browser session. There is no project server receiving your attendance data. This is an independent extension, not affiliated with HiBob. Version 1.3 uses HiBob's internal web API; it is not an officially supported HiBob integration.
+HiBob Monthly Attendance runs in Chrome and connects to HiBob using your normal signed-in browser session. There is no project server receiving your attendance data. This is an independent extension, not affiliated with HiBob. Version 1.4 uses HiBob's internal web API; it is not an officially supported HiBob integration.
 
 ## Data read from HiBob
 
@@ -18,11 +18,13 @@ Preferences such as work times, break times and holiday region are stored in Chr
 
 You can export preferences to a file you control and import them into another installation. A preferences export excludes attendance snapshots, account context, notes, previews and run history. Manual date exclusions are preferences and can appear in the exported file. Keep or delete exported files yourself.
 
+The separate **Download booking plan** action under **More options** creates a private local review file. It contains the displayed account label, month, preferences, existing and planned attendance segments, any entry details and the current run results. It excludes the API connection context, connection generation and authentication data. Raw change fingerprints may contain entry and employee identifiers; the file is confidential and is not anonymised. This file is not a settings backup and cannot authorize or start a booking. Keep it private; the extension does not upload it.
+
 ## Data sent to other services
 
 After your review and explicit final confirmation, the extension sends the approved attendance entries to HiBob through its internal API. Reading, generating a preview and **Check plan — no saving** do not create, update or delete attendance. The preflight checks current account/day data and the plan locally; it does not prove that the server will accept a write.
 
-Each booking requires the same reviewed employee/company and connection generation. Account changes, session expiry and reconnecting invalidate approval. Request failures with an unclear save outcome stop the run rather than repeating a write or falling back to form automation. Live API saving and acceptance of future entries remain unverified in this prerelease.
+Each booking requires the same reviewed employee/company and connection generation. Account changes, session expiry and reconnecting invalidate approval. Request failures with an unclear save outcome stop the run rather than repeating a write or falling back to form automation. Native acceptance has covered current and future entry creation with independent readback. Live overwriting, interactive SSO and fallback transport remain unverified in this prerelease. Requests are spaced conservatively; a server rate-limit response stops the operation without retrying a write.
 
 The project does not operate a telemetry, advertising, analytics or holiday lookup service. German holiday data is included in the extension package.
 
@@ -39,10 +41,11 @@ The extension does not request broad permission to read every website, a Chrome 
 
 ## Retention and removal
 
-Session data is temporary and may be cleared when Chrome restarts or the extension reloads or updates. A restart never resumes attendance writes automatically. Version 1.3 discards earlier previews and approvals while preserving preferences and existing booking history where available. Disconnecting invalidates the current preview; any retained run history remains subject to Chrome session-storage retention. Preferences remain in local extension storage until removed or the extension is uninstalled. Files you exported or downloaded are separate and must be removed yourself. HiBob retains attendance you saved there according to your organisation's HiBob policies.
+Session data is temporary and may be cleared when Chrome restarts or the extension reloads or updates. A restart never resumes attendance writes automatically. Version 1.4 uses session format 5 and discards earlier previews and approvals while preserving preferences and existing booking history where available. Disconnecting invalidates the current preview; any retained run history remains subject to Chrome session-storage retention. Preferences remain in local extension storage until removed or the extension is uninstalled. Files you exported or downloaded are separate and must be removed yourself. HiBob retains attendance you saved there according to your organisation's HiBob policies.
 
 ## Website hosting and contact
 
 The installation site's code sets no cookies and includes no analytics, external fonts or embedded third-party trackers. GitHub Pages hosts it and may process normal web request logs under the [GitHub privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement).
 
 The project is maintained by [thors-github](https://github.com/thors-github). For questions, use the [GitHub issue tracker](https://github.com/thors-github/hibob-chrome-extension/issues). Public issues are visible to other people; do not include attendance records, personal account details or credentials.
+

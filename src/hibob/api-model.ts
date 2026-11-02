@@ -55,8 +55,11 @@ function marker(value: unknown, fallback: string): string | undefined {
   if (object(value)) for (const field of ['name', 'displayName', 'label', 'description', 'policyTypeDisplayName']) if (text(value[field])) return value[field];
   return fallback;
 }
-const entryFields = new Set(['id', 'start', 'end', 'entryType', 'comment', 'reason', 'projectId', 'taskId', 'projectTracking', 'reportingMethod', 'duration', 'durationInMinutes', 'isManuallyEdited', 'offset']);
-function parseEntry(entry: ApiEntry, forDate: string): { value: AttendanceEntry; problem?: string } {
+const entryFields = new Set(['id', 'start', 'end', 'entryType', 'comment', 'reason', 'projectId', 'taskId', 'projectTracking', 'reportingMethod', 'duration', 'durationInMinutes', 'isManuallyEdited', 'offset', 'employeeId', 'source']);
+function parseEntry(entry: ApiEntry, forDate: string, expectedEmployeeId?: string): { value: AttendanceEntry; problem?: string } {
+  // Ownership is validated against the independently authenticated account,
+  // never inferred from an entry or treated as harmless display metadata.
+  if ('employeeId' in entry && (!text(expectedEmployeeId) || entry.employeeId !== expectedEmployeeId)) throw new ApiModelError('IDENTITY', t("Ein HiBob-Eintrag gehört nicht eindeutig zum angemeldeten Konto."));
   const start = localTime(entry.start, forDate); const end = localTime(entry.end, forDate);
   let problem: string | undefined;
   if ((entry.entryType !== 'work' && entry.entryType !== 'break') || !start || !end) problem = t("Ein HiBob-Eintrag enthält einen unbekannten Typ, ein abweichendes Datum oder eine unvollständige Uhrzeit.");
@@ -65,6 +68,8 @@ function parseEntry(entry: ApiEntry, forDate: string): { value: AttendanceEntry;
   if (!empty(entry.reason) && !id(entry.reason)) problem ??= t("Ein HiBob-Eintrag hat einen nicht lesbaren Grund.");
   if (!empty(entry.reportingMethod) && entry.reportingMethod !== 'startEnd') problem ??= t("HiBob-Einträge mit reiner Dauer werden nicht unterstützt.");
   const metadata: string[] = [];
+  // Only the exact provenance marker observed on a native manual entry is known.
+  if ('source' in entry && (entry.source !== 'employeeManuallyEdit' || entry.isManuallyEdited !== true || entry.reportingMethod !== 'startEnd')) { metadata.push('source'); problem ??= t("Ein HiBob-Eintrag enthält nicht unterstützte Zusatzdaten."); }
   for (const key of ['projectId', 'taskId', 'projectTracking']) if (!empty(entry[key])) { metadata.push(key); problem ??= t("Projekt- und Aufgabenzuordnungen müssen manuell geprüft werden."); }
   for (const key of Object.keys(entry)) if (!entryFields.has(key) && !empty(entry[key])) { metadata.push(key); problem ??= t("Ein HiBob-Eintrag enthält nicht unterstützte Zusatzdaten."); }
   if (start && end) {
@@ -84,7 +89,7 @@ function reportedMinutes(value: unknown): number | null {
   return minutes !== null && Number.isSafeInteger(minutes) ? minutes : null;
 }
 
-export function parseReport(month: string, raw: unknown, period: ApiPeriod, policy: unknown): ApiDay[] {
+export function parseReport(month: string, raw: unknown, period: ApiPeriod, policy: unknown, expectedEmployeeId?: string): ApiDay[] {
   let dates: string[];
   try { dates = getMonthDates(month); } catch { throw new ApiModelError('REPORT', t("Der angeforderte Monat ist ungültig.")); }
   if (!dates.length || !object(raw) || !Array.isArray(raw.employees) || !object(policy) || dates[0] < period.start || dates.at(-1)! > period.end) throw new ApiModelError('REPORT', t("HiBob hat keinen vollständigen Bericht für den gewählten Zeitraum zurückgegeben."));
@@ -98,7 +103,7 @@ export function parseReport(month: string, raw: unknown, period: ApiPeriod, poli
     const entries = clone(data.entries as ApiEntry[]);
     let problem: string | undefined;
     const parsed = entries.map(entry => {
-      const result = parseEntry(entry, row.dateKey as string);
+      const result = parseEntry(entry, row.dateKey as string, expectedEmployeeId);
       problem ??= result.problem;
       if (id(entry.id)) { if (entryIds.has(String(entry.id))) throw new ApiModelError('REPORT', t("HiBob hat doppelte Eintragskennungen zurückgegeben.")); entryIds.add(String(entry.id)); }
       return result.value;

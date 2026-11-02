@@ -9,6 +9,8 @@ test('exports only settings and reviews a file before applying it in the narrow 
   await page.goto('/sidepanel.html?demo=1');
   await expect(page.locator('#installed-version')).toContainText('Version ');
   await page.getByLabel('Month', { exact: true }).fill('2026-11');
+  await page.locator('#settings-toggle').click();
+  await page.locator('#more-options > summary').click();
   await page.getByLabel('Work starts', { exact: true }).fill('07:45');
   await page.getByLabel('Work ends', { exact: true }).fill('16:15');
   await page.getByText('Transfer settings', { exact: true }).click();
