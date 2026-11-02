@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.0-beta.1
+
+- Add a fast serial month runner with one complete preflight and one independent final readback: 34 requests for 21 changed dates, without an unconditional delay. Keep the strict per-day runner and server cooldowns.
+- Preserve suitable existing clock times and notes; minimise the number of changed dates needed to reach exact weekly targets. Keep redistribution and detailed controls under More options.
+- Bind consent to execution profile and checkpoints. Journal each dispatch and acknowledgement; only final readback marks entries verified. Stop new writes on failure/cancel and never retry an ambiguous write.
+- Use session format 6, migrate incomplete acknowledgements to uncertain, preserve completed history/preferences and discard old previews. Add timing-only local measurements and latency-injected production-transport tests.
+- Native acceptance remains read-only. No new credentials, permissions, unverified bulk routes or concurrent same-sheet writes are introduced; stable and Store release remain gated.
+
 ## 1.4.1-beta.1
 
 - Remove duplicated API preparation before each day and consume successful transport identity proofs only within the operation that obtained them. Preserve fresh final account/permission/day validation and full independent saved-data readback.

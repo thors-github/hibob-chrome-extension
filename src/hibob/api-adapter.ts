@@ -1,8 +1,9 @@
 import { t } from '../i18n';
-import { assertApplyAuthorization, contextFingerprint } from '../shared/context';
+import { assertApplyAuthorization, contextFingerprint, executionFingerprint } from '../shared/context';
 import { netMinutes, parseTime } from '../shared/entries';
 import { canonicalJson } from '../shared/json';
-import type { AdapterProgress, ApiConnection, ApplyAuthorization, AttendanceContext, AttendanceEntry, DayPlan, DaySnapshot, MonthSnapshot, PreflightResult } from '../shared/types';
+import type { AdapterProgress, ApiConnection, ApplyAuthorization, AttendanceContext, AttendanceEntry, BookingPlan, DayPlan, DaySnapshot, ExecutionProfile, MonthApplyHooks, MonthApplyResult, MonthSnapshot, PreflightResult, RunTimings } from '../shared/types';
+import { assertWritablePlan } from '../shared/validation';
 import { SessionClient, SessionClientError, type ApiEndpointRule, type ApiHttpRequest, type SessionConnection, type SessionRequest } from './session-client';
 import { ApiModelError, parseIdentity, parsePeriods, parseReport, type ApiIdentity, type ApiPeriod, type ApiDay } from './api-model';
 
@@ -28,10 +29,11 @@ export const reportRequest = (employeeId: string, timesheetId: string | number):
 interface Client {
   connect(signal?: AbortSignal): Promise<SessionConnection>;
   disconnect(): Promise<void>;
-  openOperation(signal?: AbortSignal): Promise<SessionConnection>;
+  openOperation(signal?: AbortSignal, profile?: ExecutionProfile): Promise<SessionConnection>;
   closeOperation(): Promise<void>;
   request<T = unknown>(request: ApiHttpRequest, signal?: AbortSignal): Promise<T>;
   cancel(): void;
+  requestCounts?(): { requests: number; writes: number };
 }
 interface Options { client?: Client; now?: () => Date }
 interface MonthRead { days: ApiDay[]; period: ApiPeriod; policy: Record<string, unknown>; identity: ApiIdentity }
@@ -45,6 +47,9 @@ export class HiBobApiAdapter {
   private readonly now: () => Date;
   private busy = false;
   private verifying = false;
+  private softWriting = false;
+  private softCancelled = false;
+  private readonly fallbackCounts = { requests: 0, writes: 0 };
   private generation?: string;
   /** Successful transport probe identity, usable once inside this opening only. */
   private openingIdentity?: ApiIdentity;
@@ -57,17 +62,23 @@ export class HiBobApiAdapter {
     } });
   }
   private check(signal?: AbortSignal) { if (signal?.aborted) throw new ApiAdapterError(t('Vorgang vor dem Schreiben abgebrochen.')); }
-  private async identity(request: SessionRequest = (r, s) => this.client.request(r, s), signal?: AbortSignal): Promise<ApiIdentity> {
+  private async request<T = unknown>(request: ApiHttpRequest, signal?: AbortSignal): Promise<T> {
+    this.fallbackCounts.requests++;
+    if (ATTENDANCE_API_RULES.some(rule => rule.mutation && rule.method === request.method && (typeof rule.path === 'string' ? rule.path === request.path : rule.path.test(request.path)))) this.fallbackCounts.writes++;
+    return this.client.request<T>(request, signal);
+  }
+  private counts() { return this.client.requestCounts?.() ?? { ...this.fallbackCounts }; }
+  private async identity(request: SessionRequest = (r, s) => this.request(r, s), signal?: AbortSignal): Promise<ApiIdentity> {
     this.check(signal);
     const user = await request({ method: 'GET', path: '/api/user' }, signal);
     const company = await request({ method: 'GET', path: '/api/company' }, signal);
     this.check(signal);
     return parseIdentity(user, company);
   }
-  private async openOperation(signal?: AbortSignal): Promise<SessionConnection> {
+  private async openOperation(signal?: AbortSignal, profile: ExecutionProfile = 'strict'): Promise<SessionConnection> {
     this.openingIdentity = undefined;
     try {
-      const connection = await this.client.openOperation(signal);
+      const connection = await this.client.openOperation(signal, profile);
       this.check(signal);
       return connection;
     } catch (error) {
@@ -83,7 +94,7 @@ export class HiBobApiAdapter {
     return identity ?? this.identity(undefined, signal);
   }
   private async permissions(signal?: AbortSignal): Promise<boolean> {
-    const result = await this.client.request({ method: 'GET', path: '/api/permissions/authorizations/domains/timeAttendance' }, signal);
+    const result = await this.request({ method: 'GET', path: '/api/permissions/authorizations/domains/timeAttendance' }, signal);
     if (!obj(result) || !obj(result.permissions) || !Array.isArray(result.permissions.timeAttendance)) throw new ApiAdapterError(t('HiBob hat nicht vollständig lesbare Attendance-Berechtigungen zurückgegeben.'));
     return result.permissions.timeAttendance.some(p => obj(p) && p.resource === 'timeAttendance' && p.filter === 'self' && p.action === 'editSheet');
   }
@@ -91,12 +102,12 @@ export class HiBobApiAdapter {
     if (connection.status !== 'connected' || !connection.capabilities?.read || !connection.generation || connection.employeeId !== identity.employeeId || connection.companyId !== identity.companyId || this.generation && this.generation !== connection.generation) throw accountChanged();
     this.generation = connection.generation;
   }
-  private async operation<T>(signal: AbortSignal | undefined, action: () => Promise<T>): Promise<T> {
+  private async operation<T>(signal: AbortSignal | undefined, action: () => Promise<T>, profile: ExecutionProfile = 'strict'): Promise<T> {
     if (this.busy) throw new ApiAdapterError(t('Ein Vorgang läuft bereits. Bitte zuerst abbrechen.'));
     this.busy = true;
-    try { const connection = await this.openOperation(signal); this.transportMode = connection.mode === 'tab' ? 'temporary-tab' : 'direct'; return await action(); }
+    try { const connection = await this.openOperation(signal, profile); this.transportMode = connection.mode === 'tab' ? 'temporary-tab' : 'direct'; return await action(); }
     catch (error) { throw this.localized(error); }
-    finally { this.openingIdentity = undefined; try { await this.client.closeOperation(); } finally { this.openingIdentity = undefined; this.busy = false; this.verifying = false; } }
+    finally { this.openingIdentity = undefined; try { await this.client.closeOperation(); } finally { this.openingIdentity = undefined; this.busy = false; this.verifying = false; this.softWriting = false; this.softCancelled = false; } }
   }
   async connect(signal?: AbortSignal): Promise<ApiConnection> {
     if (this.busy) throw new ApiAdapterError(t('Ein Vorgang läuft bereits. Bitte zuerst abbrechen.'));
@@ -113,7 +124,7 @@ export class HiBobApiAdapter {
   }
   private transportMode: 'direct' | 'temporary-tab' = 'direct';
   async disconnect() { if (this.busy) throw new ApiAdapterError(t('Ein Vorgang läuft bereits. Bitte zuerst abbrechen.')); this.openingIdentity = undefined; await this.client.disconnect(); this.generation = undefined; }
-  cancel() { if (!this.verifying) this.client.cancel(); }
+  cancel() { if (this.softWriting) this.softCancelled = true; else if (!this.verifying) this.client.cancel(); }
   async assertIdle() { if (this.busy) throw new ApiAdapterError(t('Ein Vorgang läuft bereits. Bitte zuerst abbrechen.')); }
   async recover(_connection: ApiConnection, _jobId: string) { await this.assertIdle(); }
   private path(identity: ApiIdentity) {
@@ -126,16 +137,16 @@ export class HiBobApiAdapter {
   private async read(connection: ApiConnection, month: string, signal?: AbortSignal): Promise<MonthRead> {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new ApiAdapterError(t('Ungültiger Monat.'));
     const identity = await this.openingOrFreshIdentity(signal); this.verifyIdentity(connection, identity);
-    const periods = parsePeriods(await this.client.request({ method: 'GET', path: `${this.path(identity)}/timesheets` }, signal));
+    const periods = parsePeriods(await this.request({ method: 'GET', path: `${this.path(identity)}/timesheets` }, signal));
     const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5)), 0)).getUTCDate();
     const candidates = periods.filter(p => p.start === `${month}-01` && p.end === `${month}-${last}`);
     if (candidates.length !== 1) throw new ApiAdapterError(t('HiBob bietet keinen eindeutig zugeordneten Monatszeitraum an.'));
     const period = candidates[0];
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(period.id))) throw new ApiAdapterError(t('Der HiBob-Monatszeitraum ist nicht unterstützt.'));
-    const details = await this.client.request({ method: 'POST', path: `${this.path(identity)}/timesheets/${period.id}/details`, body: { fields: ['policyDetails'] } }, signal);
+    const details = await this.request({ method: 'POST', path: `${this.path(identity)}/timesheets/${period.id}/details`, body: { fields: ['policyDetails'] } }, signal);
     if (!obj(details) || !obj(details.policyDetails)) throw new ApiAdapterError(t('Die HiBob-Anwesenheitsrichtlinie ist nicht vollständig lesbar.'));
     const policy = { ...details.policyDetails, __timezone: identity.timezone };
-    const raw = await this.client.request(reportRequest(identity.employeeId, period.id), signal);
+    const raw = await this.request(reportRequest(identity.employeeId, period.id), signal);
     this.check(signal);
     return { days: parseReport(month, raw, period, policy, identity.employeeId), policy, period, identity };
   }
@@ -204,7 +215,7 @@ export class HiBobApiAdapter {
       this.verifyIdentity(connection, await this.identity(undefined, signal));
       this.check(signal);
       try {
-        await this.client.request({ method: 'POST', path: `${this.path(read.identity)}/attendance/entries?forDate=${day.date}`, body }, signal);
+        await this.request({ method: 'POST', path: `${this.path(read.identity)}/attendance/entries?forDate=${day.date}`, body }, signal);
         // Acknowledged writes get a new, strictly read-only verification lifetime.
         // The previous operation may be cancelled; it must not poison readback.
         this.verifying = true;
@@ -221,6 +232,123 @@ export class HiBobApiAdapter {
         throw new ApiAdapterError(localized.message, true, localized.connectionStatus);
       }
     });
+  }
+  /** A bounded month write window: serial day requests, then independent full readback. */
+  async applyMonth(connection: ApiConnection, input: BookingPlan, authorization: ApplyAuthorization, hooks: MonthApplyHooks, progress?: (p: AdapterProgress) => void, signal?: AbortSignal): Promise<MonthApplyResult> {
+    const plan = structuredClone(input), consent = structuredClone(authorization);
+    assertWritablePlan(plan);
+    if (consent.planId !== plan.id || consent.executionFingerprint !== executionFingerprint({ executionProfile: 'fast-serial' })) throw new ApiAdapterError(t('Die Freigabe gehört nicht zum schnellen Monatslauf. Bitte erneut bestätigen.'));
+    assertApplyAuthorization(plan.snapshot.context, consent);
+    this.check(signal);
+    const started = Date.now(), initialCounts = this.counts();
+    const timings: RunTimings = { preparationMs: 0, writingMs: 0, journalingMs: 0, verificationMs: 0, totalMs: 0, requests: 0, writes: 0 };
+    const changes = plan.days.filter(day => day.action === 'create' || day.action === 'overwrite');
+    const dispatched = new Map<string, DayPlan>();
+    let result: MonthApplyResult | undefined;
+    const cancelled = () => signal?.aborted === true || this.softCancelled;
+    const journal = async (hook: (date: string) => Promise<void>, date: string) => {
+      const at = Date.now();
+      try { await hook(date); } finally { timings.journalingMs += Math.max(0, Date.now() - at); }
+    };
+    const normalize = (entries: AttendanceEntry[]) => canonicalJson(entries.map(entry => ({ type: entry.type, start: entry.start, end: entry.end, note: entry.note ?? '', reason: entry.reason ?? '', metadata: [...(entry.metadata ?? [])].sort() })).sort((a, b) => a.start.localeCompare(b.start) || a.end.localeCompare(b.end) || a.type.localeCompare(b.type)));
+    try {
+      result = await this.operation(undefined, async () => {
+        progress?.({ phase: 'apply', stage: 'prepare', completed: 0, total: changes.length, message: t('Monat und Kontofreigabe vor dem Speichern prüfen …') });
+        if (!connection.capabilities?.write || changes.some(day => day.action === 'overwrite') && !connection.capabilities.overwrite) throw new ApiAdapterError(t('Das Speichern ist über diese HiBob-Verbindung noch nicht freigegeben. Die Vorprüfung bleibt verfügbar.'));
+        const before = await this.read(connection, plan.settings.month, signal);
+        const baseline = new Map(plan.snapshot.days.map(day => [day.date, day]));
+        if (plan.snapshot.month !== plan.settings.month || baseline.size !== before.days.length || baseline.size !== plan.snapshot.days.length || plan.days.length !== before.days.length
+          || before.days.some(day => baseline.get(day.snapshot.date)?.fingerprint !== day.snapshot.fingerprint)
+          || plan.days.some(day => baseline.get(day.date)?.fingerprint !== day.fingerprint)) throw new ApiAdapterError(t('Der Monatsstand hat sich seit der Vorschau geändert. Bitte erneut einlesen.'));
+        const payloads = new Map(changes.map(day => {
+          const current = this.validateDay(connection, day, plan.snapshot.context, consent, before, signal);
+          if (netMinutes(day.proposed) !== day.netMinutes) throw new ApiAdapterError(t('Die geplante Nettozeit stimmt nicht mit den Tagessegmenten überein.'));
+          return [day.date, this.payload(day, current, before.identity.timezone)];
+        }));
+        if (!await this.permissions(signal)) throw new ApiAdapterError(t('Das Speichern ist über diese HiBob-Verbindung noch nicht freigegeben. Die Vorprüfung bleibt verfügbar.'));
+        this.verifyIdentity(connection, await this.identity(undefined, signal));
+        this.check(signal);
+        timings.preparationMs = Math.max(0, Date.now() - started);
+        const writeStarted = Date.now(), journalBefore = timings.journalingMs;
+        let failure: ApiAdapterError | undefined;
+        this.softWriting = true;
+        try {
+          for (const day of changes) {
+            if (cancelled()) break;
+            await journal(date => hooks.beforeDispatch(date), day.date);
+            if (cancelled()) break;
+            progress?.({ phase: 'apply', stage: 'write', date: day.date, completed: dispatched.size, total: changes.length, message: t('Tagesbuchungen nacheinander senden …') });
+            // The caller can cancel the next write, but never abort an in-flight
+            // mutation. Its own timeout still applies; ambiguous writes are not retried.
+            dispatched.set(day.date, day);
+            await this.request({ method: 'POST', path: `${this.path(before.identity)}/attendance/entries?forDate=${day.date}`, body: payloads.get(day.date) });
+            await journal(date => hooks.acknowledged(date), day.date);
+          }
+        } catch (error) {
+          failure = this.localized(error);
+          if (!dispatched.size) throw failure;
+        } finally {
+          timings.writingMs = Math.max(0, Date.now() - writeStarted - (timings.journalingMs - journalBefore));
+          this.softWriting = false;
+          this.verifying = true;
+        }
+        const stopped = cancelled();
+        let message = failure?.message ?? (stopped ? t('Lauf abgebrochen. Bereits gesendete Tage werden jetzt geprüft.') : undefined);
+        let connectionStatus = failure?.connectionStatus;
+        const days: MonthApplyResult['days'] = [];
+        if (dispatched.size) {
+          const verificationStarted = Date.now();
+          try {
+            progress?.({ phase: 'apply', stage: 'verify', completed: 0, total: dispatched.size, message: t('Gesendete Buchungen unabhängig aus HiBob zurücklesen …') });
+            await this.client.closeOperation();
+            await this.openOperation(undefined, 'fast-serial');
+            const after = await this.read(connection, plan.settings.month);
+            if (canonicalJson(before.period) !== canonicalJson(after.period) || canonicalJson(before.policy) !== canonicalJson(after.policy)) throw new ApiAdapterError(t('Der HiBob-Zeitraum oder die Anwesenheitsrichtlinie hat sich während des Laufs geändert.'), true);
+            const actual = new Map(after.days.map(day => [day.snapshot.date, day.snapshot]));
+            for (const [date, day] of dispatched) {
+              const saved = actual.get(date);
+              if (saved && !saved.unsupportedReason && !saved.absence && !saved.nonWorking && normalize(saved.entries) === normalize(day.proposed) && saved.reportedMinutes === day.netMinutes && netMinutes(saved.entries) === day.netMinutes) {
+                days.push({ date, status: 'verified', message: t('Gespeichert und erneut aus HiBob gelesen.') });
+              } else if (saved?.fingerprint === baseline.get(date)?.fingerprint) {
+                days.push({ date, status: 'failed', message: t('HiBob zeigt weiterhin den unveränderten Ausgangszustand. Der Tag wurde nicht erneut gesendet.') });
+              } else {
+                days.push({ date, status: 'uncertain', message: t('Die gespeicherten HiBob-Segmente, Zusatzdaten oder die Nettozeit weichen von der Vorschau ab. Bitte den Tag manuell prüfen.') });
+              }
+            }
+            if (after.days.some(day => !dispatched.has(day.snapshot.date) && day.snapshot.fingerprint !== baseline.get(day.snapshot.date)?.fingerprint)) message ??= t('Ein beibehaltener oder nicht gesendeter Tag hat sich geändert. Bitte den Monat erneut prüfen.');
+            if (dispatched.size === changes.length) {
+              for (const week of plan.weeks) {
+                const included = plan.days.filter(day => day.eligible && week.dates.includes(day.date));
+                const total = included.reduce<number | null>((sum, day) => {
+                  const saved = actual.get(day.date);
+                  return sum === null || !saved || saved.absence || saved.nonWorking || saved.unsupportedReason || saved.reportedMinutes !== netMinutes(saved.entries) ? null : sum + saved.reportedMinutes!;
+                }, 0);
+                if (total !== week.plannedMinutes || plan.settings.variable && total !== week.targetMinutes) message ??= t('Die zurückgelesene Wochensumme stimmt nicht mit dem freigegebenen Ziel überein. Bitte den Monat prüfen.');
+              }
+            }
+            if (days.some(day => day.status !== 'verified')) message ??= t('Nicht alle gesendeten Tage konnten bestätigt werden. Bitte die Ergebnisse prüfen.');
+            progress?.({ phase: 'apply', stage: 'verify', completed: days.filter(day => day.status === 'verified').length, total: dispatched.size, message: t('Monatsbuchungen und Wochensummen zurückgelesen') });
+          } catch (error) {
+            const localized = this.localized(error);
+            message = localized.message; connectionStatus = localized.connectionStatus;
+            days.splice(0, days.length, ...[...dispatched.keys()].map(date => ({ date, status: 'uncertain' as const, message: localized.message })));
+          } finally { timings.verificationMs = Math.max(0, Date.now() - verificationStarted); }
+        }
+        return result = { days, complete: !message && !stopped && dispatched.size === changes.length && days.every(day => day.status === 'verified'), stopped, ...(message ? { error: message } : {}), ...(connectionStatus ? { connectionStatus } : {}), timings };
+      }, 'fast-serial');
+    } catch (error) {
+      if (!dispatched.size) throw this.localized(error);
+      // Cleanup failures after dispatch must not erase already reconciled outcomes.
+      const localized = this.localized(error);
+      result ??= { days: [...dispatched.keys()].map(date => ({ date, status: 'uncertain', message: localized.message })), complete: false, stopped: cancelled(), timings };
+      result.complete = false; result.error = localized.message;
+      if (localized.connectionStatus) result.connectionStatus = localized.connectionStatus;
+    }
+    const counts = this.counts();
+    timings.totalMs = Math.max(0, Date.now() - started);
+    timings.requests = counts.requests - initialCounts.requests;
+    timings.writes = counts.writes - initialCounts.writes;
+    return result!;
   }
   private localized(error: unknown): ApiAdapterError {
     if (error instanceof ApiAdapterError) return error;

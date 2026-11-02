@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildMonthPlan, defaultSettings, getMonthDates } from '../src/domain/index';
-import type { AccountConfirmation, AdapterProgress, ApiConnection, ApplyAuthorization, AttendanceContext, BookingPlan, DayPlan, DaySnapshot, MonthSnapshot, PreflightResult, SessionState } from '../src/shared/types';
-import { contextFingerprint } from '../src/shared/context';
+import type { AccountConfirmation, AdapterProgress, ApiConnection, ApplyAuthorization, AttendanceContext, BookingPlan, DayPlan, DaySnapshot, MonthSnapshot, PreflightResult, SessionState, MonthApplyHooks, MonthApplyResult } from '../src/shared/types';
+import { contextFingerprint, executionFingerprint } from '../src/shared/context';
 
 const connection = (write = true): ApiConnection => ({ status: 'connected', generation: 'session-fixture', employeeId: 'employee-fixture', companyId: 'company-fixture', employeeLabel: 'Local fixture', companyLabel: 'Local company', transport: 'direct', capabilities: { read: true, write, overwrite: write } });
 const snapshot = (): MonthSnapshot => ({ month: '2026-11', employeeLabel: 'Local fixture', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02T10:00:00Z', context: { mode: 'api-session', connectionId: 'session-fixture', employeeKey: 'employee-fixture', tenantKey: 'company-fixture' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) });
@@ -23,7 +23,17 @@ async function fixture(options: { initial?: SessionState; failLoads?: number; be
     preflightDay: vi.fn(async (_connection: ApiConnection, day: DayPlan, _context?: AttendanceContext, _authorization?: ApplyAuthorization, _progress?: (value: AdapterProgress) => void, _signal?: AbortSignal): Promise<PreflightResult> => ({ date: day.date, checked: true, saved: false, serverValidated: false, netMinutes: day.netMinutes! })),
     cancel: vi.fn(), assertIdle: vi.fn(async () => {}), recover: vi.fn(async (_connection: ApiConnection, _jobId: string) => {}),
   };
-  vi.doMock('../src/hibob/api-adapter', () => ({ HiBobApiAdapter: class { connect = api.connect; disconnect = api.disconnect; scanMonth = api.scanMonth; applyDay = api.applyDay; preflightDay = api.preflightDay; cancel = api.cancel; assertIdle = api.assertIdle; recover = api.recover; } }));
+  const applyMonth = vi.fn(async (_connection: ApiConnection, plan: BookingPlan, _authorization: ApplyAuthorization, hooks: MonthApplyHooks): Promise<MonthApplyResult> => {
+    const days: MonthApplyResult['days'] = [];
+    for (const day of plan.days.filter(item => item.action === 'create' || item.action === 'overwrite')) {
+      await hooks.beforeDispatch(day.date);
+      await api.applyDay(_connection, day);
+      await hooks.acknowledged(day.date);
+      days.push({ date: day.date, status: 'verified', message: 'Independent readback' });
+    }
+    return { days, complete: true, stopped: false, timings: { preparationMs: 1, writingMs: 1, journalingMs: 1, verificationMs: 1, totalMs: 4, requests: days.length + 13, writes: days.length } };
+  });
+  vi.doMock('../src/hibob/api-adapter' , () => ({ HiBobApiAdapter: class { connect = api.connect; disconnect = api.disconnect; scanMonth = api.scanMonth; applyDay = api.applyDay; applyMonth = applyMonth; preflightDay = api.preflightDay; cancel = api.cancel; assertIdle = api.assertIdle; recover = api.recover; } }));
   let failures = options.failLoads ?? 0;
   const get = vi.fn(async () => { if (failures-- > 0) throw new Error('Fixture session storage unavailable'); return { sessionState: stored }; });
   const set = vi.fn(async ({ sessionState }: { sessionState: SessionState }) => { await options.beforeSave?.(sessionState); stored = structuredClone(sessionState); publications.push(stored); });
@@ -35,9 +45,13 @@ async function fixture(options: { initial?: SessionState; failLoads?: number; be
     tabs: { sendMessage }, scripting: { executeScript },
   });
   await import('../src/background');
-  const rpc = (message: object, sender: object = { id: 'test', url: 'chrome-extension://test/sidepanel.html' }) => new Promise<Reply>(resolve => receiver(message, sender, resolve));
+  const rpc = (message: object, sender: object = { id: 'test', url: 'chrome-extension://test/sidepanel.html' }) => {
+    const command = message as { type?: string; options?: object };
+    const strictCommand = command.type === 'PANEL_APPLY' ? { ...message, options: { executionProfile: 'strict', ...command.options } } : message;
+    return new Promise<Reply>(resolve => receiver(strictCommand, sender, resolve));
+  };
   const connect = () => rpc({ type: 'PANEL_CONNECT' });
-  async function review(dates = ['2026-11-03']) {
+  async function review(dates = ['2026-11-03'], checkpointDates: string[] = []) {
     const scan = await rpc({ type: 'PANEL_SCAN', month: '2026-11' }); expect(scan.ok).toBe(true);
     const settings = { ...defaultSettings('2026-11'), excludedDates: getMonthDates('2026-11').filter(date => !dates.includes(date)) };
     const candidate = buildMonthPlan(settings, scan.state!.snapshot!, {}, 1);
@@ -45,17 +59,31 @@ async function fixture(options: { initial?: SessionState; failLoads?: number; be
     const result = await rpc({ type: 'PANEL_SAVE_PLAN', plan: candidate, lease: invalidation.state!.editLease });
     expect(result.ok).toBe(true);
     const plan = result.state!.plan!, revision = result.state!.planRevision!;
-    const confirmation: AccountConfirmation = { planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context), confirmed: true };
+    const confirmation: AccountConfirmation = { planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context), executionFingerprint: executionFingerprint({ executionProfile: 'strict', checkpointDates }), confirmed: true };
     return { plan, revision, confirmation };
   }
   const settledRun = async () => {
     await vi.waitFor(() => { expect(stored?.run).toBeDefined(); expect(stored?.run?.status).not.toBe('running'); });
     return structuredClone(stored!);
   };
-  return { api, rpc, receiver, clicked, stored: () => stored, publications, connect, review, settledRun, get, set, open, reload, sendMessage, executeScript, getPlatformInfo };
+  return { api: { ...api, applyMonth }, rpc, receiver, clicked, stored: () => stored, publications, connect, review, settledRun, get, set, open, reload, sendMessage, executeScript, getPlatformInfo };
 }
 
 describe('direct API background transport', () => {
+  it('routes a consent-bound fast profile to the exclusive monthly writer and publishes verification', async () => {
+    const app = await fixture(); await app.connect();
+    const { plan, revision, confirmation } = await app.review();
+    const approval = { ...confirmation, executionFingerprint: executionFingerprint({ executionProfile: 'fast-serial' }) };
+    const response = await app.rpc({ type: 'PANEL_APPLY', plan, expectedPlanRevision: revision, confirmation: approval, options: { executionProfile: 'fast-serial' } });
+    expect(response.ok).toBe(true);
+    const final = await app.settledRun();
+    expect(app.api.applyMonth).toHaveBeenCalledOnce(); expect(final.run?.status).toBe('complete');
+    expect(final.run?.executionProfile).toBe('fast-serial'); expect(final.run?.timings?.requests).toBe(14);
+    expect(app.publications.some(state => state.run?.results.some(day => day.status === 'awaiting-verification'))).toBe(true);
+    expect(final.run?.results.find(day => day.date === '2026-11-03')?.status).toBe('verified');
+    expect(app.executeScript).not.toHaveBeenCalled();
+  });
+
   it('opens from any website without implicit sign-in, scans, content injection or account reset', async () => {
     const app = await fixture();
     app.clicked({ id: 22, windowId: 1, url: 'https://example.org' });
@@ -148,7 +176,7 @@ describe('direct API background transport', () => {
     expect((await app.rpc(command)).ok).toBe(false); expect(app.api.applyDay).not.toHaveBeenCalled();
     const result = await app.rpc({ ...command, confirmation });
     expect(result.ok).toBe(true); expect((await app.settledRun()).run?.status).toBe('complete'); expect(app.api.applyDay).toHaveBeenCalledOnce();
-    expect(app.api.applyDay.mock.calls[0].slice(0, 4)).toEqual([connection(), plan.days.find(day => day.action === 'create'), plan.snapshot.context, { planId: plan.id, planRevision: revision, contextFingerprint: confirmation.contextFingerprint, confirmation }]);
+    expect(app.api.applyDay.mock.calls[0].slice(0, 4)).toEqual([connection(), plan.days.find(day => day.action === 'create'), plan.snapshot.context, { planId: plan.id, planRevision: revision, contextFingerprint: confirmation.contextFingerprint, confirmation, executionFingerprint: confirmation.executionFingerprint }]);
     expect(app.sendMessage).not.toHaveBeenCalled(); expect(app.executeScript).not.toHaveBeenCalled();
   });
 
@@ -164,7 +192,7 @@ describe('direct API background transport', () => {
 
   it('routes explicit checkpoints and consent-bound continuation without rebooking verified days', async () => {
     const app = await fixture(); await app.connect();
-    const { plan, revision, confirmation } = await app.review(['2026-11-02', '2026-11-03']);
+    const { plan, revision, confirmation } = await app.review(['2026-11-02', '2026-11-03'], ['2026-11-02']);
     const started = await app.rpc({ type: 'PANEL_APPLY', plan, expectedPlanRevision: revision, confirmation, options: { checkpointDates: ['2026-11-02'] } });
     expect(started.ok).toBe(true); const paused = await app.settledRun(); expect(paused.run?.status).toBe('paused'); expect(app.api.applyDay).toHaveBeenCalledOnce();
     const jobId = paused.job!.id;
@@ -270,7 +298,7 @@ describe('direct API background transport', () => {
   it('releases the lifetime pulse at a checkpoint and acknowledges continuation before reconciliation finishes', async () => {
     vi.useFakeTimers();
     const app = await fixture(); await app.connect();
-    const { plan, revision, confirmation } = await app.review(['2026-11-02', '2026-11-03']);
+    const { plan, revision, confirmation } = await app.review(['2026-11-02', '2026-11-03'], ['2026-11-02']);
     const started = await app.rpc({ type: 'PANEL_APPLY', plan, expectedPlanRevision: revision, confirmation, options: { checkpointDates: ['2026-11-02'] } });
     expect(started.ok).toBe(true);
     const paused = await app.settledRun(); expect(paused.run?.status).toBe('paused');
@@ -292,7 +320,7 @@ describe('direct API background transport', () => {
 
   it('journals a late rejected continuation after its acknowledgement and makes no next write', async () => {
     vi.useFakeTimers();
-    const app = await fixture(); await app.connect(); const { plan, revision, confirmation } = await app.review(['2026-11-02', '2026-11-03']);
+    const app = await fixture(); await app.connect(); const { plan, revision, confirmation } = await app.review(['2026-11-02', '2026-11-03'], ['2026-11-02']);
     await app.rpc({ type: 'PANEL_APPLY', plan, expectedPlanRevision: revision, confirmation, options: { checkpointDates: ['2026-11-02'] } });
     const paused = await app.settledRun();
     const entered = deferred(), release = deferred();

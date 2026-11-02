@@ -11,7 +11,7 @@ for (const language of ['de-DE', 'en-GB']) {
     const snapshot: MonthSnapshot = { source: 'hibob', month: settings.month, employeeLabel: 'Local Employee', periodLabel: '2026-11-01–2026-11-30', scannedAt: '2026-11-02T08:00:00Z', context: { mode: 'api-session', connectionId: 'local-session', employeeKey: 'local-employee', tenantKey: 'local-company' }, days: dates.map(date => ({ date, editable: true, entries: [], reportedMinutes: 0, fingerprint: `empty:${date}` })) };
     const days: DayPlan[] = snapshot.days.map(day => { const weekday = new Date(`${day.date}T12:00:00Z`).getUTCDay(); const eligible = weekday !== 0 && weekday !== 6; return { date: day.date, existing: [], proposed: eligible ? [{ type: 'work', start: '08:00', end: '12:00' }, { type: 'break', start: '12:00', end: '12:30' }, { type: 'work', start: '12:30', end: '16:30' }] : [], action: eligible ? 'create' : 'skip', fingerprint: day.fingerprint, eligible, netMinutes: eligible ? 480 : 0, existingNetMinutes: 0 }; });
     const plan: BookingPlan = { id: 'checkpoint-month', seed: 123, settings, snapshot, choices: {}, days, errors: [], canReview: true, weeks: ['2026-10-26', '2026-11-02', '2026-11-09', '2026-11-16', '2026-11-23', '2026-11-30'].map(week => { const start = new Date(`${week}T12:00:00Z`).getTime(); const included = days.filter(day => { const instant = new Date(`${day.date}T12:00:00Z`).getTime(); return instant >= start && instant < start + 7 * 86400000; }); const minutes = included.reduce((total, day) => total + (day.netMinutes ?? 0), 0); return { week, dates: included.map(day => day.date), targetMinutes: minutes, plannedMinutes: minutes, errors: [] }; }) };
-    const initial: SessionState = { schemaVersion: 5, revision: 1, planRevision: 7, connection: { status: 'connected', generation: 'local-session', employeeId: 'local-employee', companyId: 'local-company', employeeLabel: 'Local Employee', companyLabel: 'Local Company', transport: 'direct', capabilities: { read: true, write: true, overwrite: true } }, snapshot, plan };
+    const initial: SessionState = { schemaVersion: 6, revision: 1, planRevision: 7, connection: { status: 'connected', generation: 'local-session', employeeId: 'local-employee', companyId: 'local-company', employeeLabel: 'Local Employee', companyLabel: 'Local Company', transport: 'direct', capabilities: { read: true, write: true, overwrite: true } }, snapshot, plan };
     const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
     const destinations: string[] = []; page.on('request', request => destinations.push(request.url()));
     await page.clock.install({ time: new Date('2026-11-02T08:00:00Z') });
@@ -24,10 +24,10 @@ for (const language of ['de-DE', 'en-GB']) {
         runtime: { id: 'local-checkpoint-fixture', sendMessage: async (command: Record<string, unknown>) => {
           commands.push(command);
           if (command.type === 'PANEL_APPLY' || command.type === 'PANEL_CONTINUE') {
-            if (command.type === 'PANEL_CONTINUE' && (command.confirmation as { checkpointId?: string })?.checkpointId !== state.job?.checkpointId) return { ok: false, state: structuredClone(state), error: 'Stale checkpoint consent' };
+            if (command.type === 'PANEL_CONTINUE' && ((command.confirmation as { checkpointId?: string })?.checkpointId !== state.job?.checkpointId || (command.confirmation as { executionFingerprint?: string })?.executionFingerprint !== state.run?.executionFingerprint)) return { ok: false, state: structuredClone(state), error: 'Stale checkpoint consent' };
             checkpoint++; state.revision!++;
             const now = '2026-11-02T10:00:00Z';
-            if (!state.run) state.run = { runId: 'local-run', planId: state.plan!.id, status: 'running', startedAt: now, updatedAt: now, results: state.plan!.days.map(day => ({ date: day.date, status: day.eligible ? 'pending' : 'skipped', message: day.eligible ? 'Pending' : 'Skipped' })) };
+            if (!state.run) state.run = { runId: 'local-run', planId: state.plan!.id, executionProfile: 'strict', executionFingerprint: (command.confirmation as { executionFingerprint: string }).executionFingerprint, status: 'running', startedAt: now, updatedAt: now, results: state.plan!.days.map(day => ({ date: day.date, status: day.eligible ? 'pending' : 'skipped', message: day.eligible ? 'Pending' : 'Skipped' })) };
             const work = state.run.results.filter(day => day.status !== 'skipped');
             if (checkpoint <= 2) {
               work[checkpoint - 1].status = 'verified'; work[checkpoint - 1].message = 'Saved and verified';
@@ -65,7 +65,11 @@ for (const language of ['de-DE', 'en-GB']) {
     expect(await page.locator('#apply-dialog').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
     await expect(page.locator('#additional-checks')).not.toHaveAttribute('open');
     await page.locator('#additional-checks > summary').click();
+    await page.locator('#account-confirmation').check();
     await page.locator('#pause-verification').check();
+    await expect(page.locator('#account-confirmation')).not.toBeChecked();
+    await expect(page.locator('#execution-profile')).toHaveValue('strict');
+    await expect(page.locator('#execution-consent-reset')).toContainText(language.startsWith('en') ? 'Checkpoints use strict mode' : 'Kontrollpausen verwenden den strengen Modus');
     await page.locator('#account-confirmation').check();
     await page.locator('#confirm-apply').click();
     await expect(page.locator('#paused-card')).toBeVisible();
@@ -107,7 +111,7 @@ for (const language of ['de-DE', 'en-GB']) {
     await expect(page.locator('#scan')).toBeEnabled();
     const evidence = await page.evaluate(() => (window as unknown as { __checkpointFixture: { commands: Array<{ type: string; options?: { checkpointDates: string[] }; confirmation?: { checkpointId?: string }; plan?: unknown }>; preferences: unknown[]; state: SessionState } }).__checkpointFixture);
     const starts = evidence.commands.filter(command => command.type === 'PANEL_APPLY');
-    expect(starts).toHaveLength(1); expect(starts[0].options).toEqual({ checkpointDates: ['2026-11-02', '2026-11-03'] });
+    expect(starts).toHaveLength(1); expect(starts[0].options).toEqual({ executionProfile: 'strict', checkpointDates: ['2026-11-02', '2026-11-03'] });
     expect(starts[0].plan).toEqual(plan);
     expect(evidence.commands.filter(command => command.type === 'PANEL_CONTINUE').map(command => command.confirmation?.checkpointId)).toEqual(['checkpoint-1', 'checkpoint-2']);
     expect(evidence.preferences).toEqual([]);

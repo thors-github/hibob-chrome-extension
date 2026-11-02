@@ -236,3 +236,6 @@ dialog::backdrop { background: #20333e66; }
 .preview-summary span { display: block; margin-top: 5px; line-height: 1.35; }
 .run-results li > div { min-width: 0; }
 .run-outcome { display: block; font-size: 11px; margin-bottom: 2px; }
+.preview-summary > .no-changes { grid-column: 1 / -1; color: var(--green); font-weight: 600; margin: 4px 0; }
+.day-state.unchanged { color: var(--green); }
+.run-results li[data-status='awaiting-verification'] { color: #8e5f12; }

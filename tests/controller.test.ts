@@ -182,13 +182,13 @@ describe('write queue and recovery', () => {
     await review(controller, planFor(controller));
     const original = structuredClone(controller.state.plan!);
     await controller.bindConnection(undefined, 'Bitte HiBob öffnen.');
-    expect(stored()).toMatchObject({ error: 'Bitte HiBob öffnen.', schemaVersion: 5 });
+    expect(stored()).toMatchObject({ error: 'Bitte HiBob öffnen.', schemaVersion: 6 });
     expect(stored()?.tabId).toBeUndefined();
     await expect(controller.scan('2026-11')).rejects.toThrow('anmelden');
     await expect(applyReviewed(controller, original)).rejects.toThrow('Vorschau');
     expect(bridge.applyDay).not.toHaveBeenCalled();
     await controller.bindConnection(connection('connection-99'));
-    expect(controller.state).toMatchObject({ connection: connection('connection-99'), error: undefined, schemaVersion: 5 });
+    expect(controller.state).toMatchObject({ connection: connection('connection-99'), error: undefined, schemaVersion: 6 });
     await controller.scan('2026-11');
     await review(controller, planFor(controller));
     await controller.bindConnection(connection('connection-100'));
@@ -406,7 +406,7 @@ describe('canonical edit leases, journaling, and job recovery', () => {
   });
 
   it('migrates a legacy interrupted scan to explicit recovery and checks adapter idleness before a new scan', async () => {
-    const { controller, bridge } = await setup({ schemaVersion: 5, connection: connection(), progress: { phase: 'scan', completed: 12, total: 30, message: 'Reading' } });
+    const { controller, bridge } = await setup({ schemaVersion: 6, connection: connection(), progress: { phase: 'scan', completed: 12, total: 30, message: 'Reading' } });
     const oldJob = controller.state.job!;
     expect(oldJob.status).toBe('interrupted');
     expect(controller.state.progress).toBeUndefined();
@@ -414,7 +414,7 @@ describe('canonical edit leases, journaling, and job recovery', () => {
     await controller.scan('2026-11');
     expect(bridge.recover).toHaveBeenCalledWith(connection(), oldJob.id);
     expect(controller.state.job).toBeUndefined();
-    expect(controller.state.schemaVersion).toBe(5);
+    expect(controller.state.schemaVersion).toBe(6);
   });
 
   it('persists an active scan, rejects stale progress and cancellation, and ignores progress after completion', async () => {
@@ -447,14 +447,14 @@ describe('canonical edit leases, journaling, and job recovery', () => {
     expect(controller.state.revision).toBeGreaterThan(prior);
     await controller.bindConnection(connection('connection-99'));
     expect(controller.state.revision).toBeGreaterThan(prior + 1);
-    await expect(setup({ schemaVersion: 5, job: { id: 'bad', kind: 'other' } as never })).rejects.toThrow('ungültig');
+    await expect(setup({ schemaVersion: 6, job: { id: 'bad', kind: 'other' } as never })).rejects.toThrow('ungültig');
     await expect(setup({ run: { status: 'unknown', results: [] } as never })).rejects.toThrow('ungültig');
   });
 });
 
 describe('recovery publication and cold canonical state', () => {
   it('publishes a running scan while recovering an old adapter and allows cancellation before scanning', async () => {
-    const { controller, bridge, stored } = await setup({ schemaVersion: 5, connection: connection(), progress: { phase: 'scan', completed: 12, total: 30, message: 'old' } });
+    const { controller, bridge, stored } = await setup({ schemaVersion: 6, connection: connection(), progress: { phase: 'scan', completed: 12, total: 30, message: 'old' } });
     const oldJobId = controller.state.job!.id;
     let entered!: () => void; let release!: () => void;
     const recovering = new Promise<void>(resolve => { entered = resolve; });
@@ -573,7 +573,7 @@ describe('per-plan API account confirmation and schema 5', () => {
     legacy.confirmation = { planId: legacy.plan!.id, confirmed: true };
     legacy.run = { planId: legacy.plan!.id, status: 'complete', startedAt: '2026-11-02T10:00:00Z', updatedAt: '2026-11-02T10:01:00Z', results: [{ date: '2026-11-02', status: 'verified', message: 'Historical verified day' }] };
     const restored = await setup(legacy);
-    expect(restored.controller.state.schemaVersion).toBe(5);
+    expect(restored.controller.state.schemaVersion).toBe(6);
     expect(restored.controller.state.snapshot).toBeUndefined(); expect(restored.controller.state.plan).toBeUndefined(); expect(restored.controller.state.editLease).toBeUndefined();
     expect(restored.controller.state.run).toEqual(legacy.run);
     expect(restored.controller.state.update).toEqual(legacy.update);
@@ -593,7 +593,7 @@ describe('tabless API connection lifecycle and capabilities', () => {
     const revision = app.controller.state.planRevision!;
     const connected = await app.controller.connect();
     expect(app.bridge.connect).toHaveBeenCalledOnce();
-    expect(connected).toMatchObject({ schemaVersion: 5, connection: connection(), run: history });
+    expect(connected).toMatchObject({ schemaVersion: 6, connection: connection(), run: history });
     expect(connected.tabId).toBeUndefined(); expect(connected.snapshot).toBeUndefined(); expect(connected.plan).toBeUndefined();
     expect(connected.planRevision).toBeGreaterThan(revision);
     await app.controller.scan('2026-11');
@@ -665,7 +665,7 @@ describe('tabless API connection lifecycle and capabilities', () => {
     const legacy = structuredClone(app.controller.state); legacy.schemaVersion = 3; legacy.tabId = 42;
     legacy.run = { planId: 'past', status: 'complete', results: [{ date: '2026-10-30', status: 'verified', message: 'Previously verified' }], startedAt: 'x', updatedAt: 'x' };
     const restored = await setup(legacy);
-    expect(restored.controller.state.schemaVersion).toBe(5);
+    expect(restored.controller.state.schemaVersion).toBe(6);
     expect(restored.controller.state.connection).toBeUndefined(); expect(restored.controller.state.tabId).toBeUndefined();
     expect(restored.controller.state.snapshot).toBeUndefined(); expect(restored.controller.state.plan).toBeUndefined();
     expect(restored.controller.state.run).toEqual(legacy.run);
@@ -754,7 +754,7 @@ describe('frozen monthly queue checkpoints', () => {
   it('pauses once after each requested verified day and preserves every original segment through completion', async () => {
     const app = await checkpointFixture();
     const first = await app.start();
-    expect(first.schemaVersion).toBe(5);
+    expect(first.schemaVersion).toBe(6);
     expect(first.run).toMatchObject({ runId: first.job!.id, planId: app.plan.id, status: 'paused', checkpointDate: '2026-11-02' });
     expect(first.job).toMatchObject({ kind: 'apply', status: 'paused', checkpointId: expect.any(String) });
     expect(first.plan).toEqual(app.plan); expect(first.planRevision).toBe(app.revision); expect(first.snapshot).toEqual(app.plan.snapshot);
@@ -936,7 +936,7 @@ describe('frozen monthly queue checkpoints', () => {
     const old = structuredClone(app.controller.state); old.schemaVersion = 4;
     old.run = { planId: 'old-plan', status: 'complete', startedAt: 'x', updatedAt: 'x', results: [{ date: '2026-10-30', status: 'verified', message: 'Historical outcome' }] };
     const restored = await setup(old);
-    expect(restored.controller.state.schemaVersion).toBe(5);
+    expect(restored.controller.state.schemaVersion).toBe(6);
     expect(restored.controller.state.run).toEqual(old.run); expect(restored.controller.state.connection).toEqual(old.connection);
     expect(restored.controller.state.plan).toBeUndefined(); expect(restored.controller.state.snapshot).toBeUndefined(); expect(restored.controller.state.editLease).toBeUndefined();
     expect(restored.bridge.applyDay).not.toHaveBeenCalled();

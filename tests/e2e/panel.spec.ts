@@ -67,7 +67,7 @@ test('local writes complete only after confirmation and require a fresh scan', a
   await expect(page.locator('#apply')).toBeDisabled();
   await expect(page.locator('#footer-hint')).toContainText('Testmodus');
   await page.locator('#scan').click();
-  await expect(page.locator('#conflicts')).toContainText('20 vorhandene Buchungen');
+  await expect(page.locator('#conflicts')).toContainText('2 vorhandene Buchungen');
 });
 
 test('cancellation stops the local queue and cannot blindly resume', async ({ page }) => {
@@ -167,3 +167,33 @@ for (const width of [320, 700]) {
     expect(errors).toEqual([]);
   });
 }
+
+test('a repeated scan retains compatible varying times and offers redistribution only as an explicit advanced action', async ({ page }) => {
+  await openDemo(page);
+  await page.locator('#settings-toggle').click();
+  await page.locator('#variable').check();
+  await page.locator('#variationMinutes').fill('15');
+  await scan(page);
+  await expect(page.locator('#conflicts')).not.toBeVisible();
+  await expect(page.locator('[data-date="2026-11-02"]')).toContainText('Passt bereits');
+  await page.locator('#apply').click();
+  await expect(page.locator('#execution-disclosure')).toContainText('keine gemeinsame Transaktion');
+  await page.locator('#confirm-apply').click();
+  await expect(page.locator('#run-status')).toContainText('Lauf abgeschlossen');
+  await expect(page.locator('#run-timing')).toContainText('Tatsächliche Laufzeit');
+  const saved = await page.evaluate(() => JSON.parse(sessionStorage.getItem('hibob-demo-session')!).demoSnapshot.days);
+  await page.locator('#more-options > summary').click();
+  await page.locator('#scan').click();
+  await expect(page.locator('#preview-summary')).toContainText('Alles passt – keine Buchung nötig');
+  await expect(page.locator('#apply')).toBeDisabled();
+  await expect(page.locator('#conflicts')).not.toBeVisible();
+  const retained = await page.evaluate(() => JSON.parse(sessionStorage.getItem('hibob-demo-session')!).plan);
+  expect(retained.snapshot.days).toEqual(saved);
+  expect(retained.days.filter((day: { action: string }) => day.action === 'unchanged')).toHaveLength(20);
+  expect(retained.redistributeAll).toBeUndefined();
+  await page.locator('#redistribute').click();
+  await expect(page.locator('#conflicts')).toBeVisible();
+  const redistributed = await page.evaluate(() => JSON.parse(sessionStorage.getItem('hibob-demo-session')!).plan);
+  expect(redistributed.redistributeAll).toBe(true);
+  expect(redistributed.days.some((day: { action: string }) => day.action === 'conflict')).toBe(true);
+});

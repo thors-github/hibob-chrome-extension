@@ -23,7 +23,7 @@ for (const language of ['de-DE', 'en-GB']) {
         return { week, dates: included.map(day => day.date), targetMinutes: minutes, plannedMinutes: minutes, errors: [] };
       }),
     };
-    const state: SessionState = { schemaVersion: 5, revision: 1, planRevision: 7, connection: { status: 'connected', generation: 'local-session', employeeId: 'local-employee', companyId: 'local-company', employeeLabel: 'Local Employee', companyLabel: 'Local Company', transport: 'direct', capabilities: { read: true, write: true, overwrite: true } }, snapshot, plan };
+    const state: SessionState = { schemaVersion: 6, revision: 1, planRevision: 7, connection: { status: 'connected', generation: 'local-session', employeeId: 'local-employee', companyId: 'local-company', employeeLabel: 'Local Employee', companyLabel: 'Local Company', transport: 'direct', capabilities: { read: true, write: true, overwrite: true } }, snapshot, plan };
     const destinations: string[] = [];
     page.on('request', request => destinations.push(request.url()));
     // This isolated page owns a local RPC fixture. No real extension runtime or
@@ -43,7 +43,9 @@ for (const language of ['de-DE', 'en-GB']) {
     await expect(page.locator('#apply')).toBeEnabled();
     await expect(page.locator('#account-context-notice')).toBeVisible();
     await expect(page.locator('#main-error')).not.toBeVisible();
+    await expect(page.locator('#execution-profile')).toHaveValue('fast-serial');
     await page.locator('#apply').click();
+    await expect(page.locator('#execution-disclosure')).toContainText(language.startsWith('en') ? 'not one transaction' : 'keine gemeinsame Transaktion');
     const checkbox = page.getByRole('checkbox', { name: /November 2026/ });
     await expect(checkbox).not.toBeChecked();
     if (language.startsWith('en')) await expect(checkbox).toHaveAccessibleName(/I confirm/);
@@ -54,7 +56,11 @@ for (const language of ['de-DE', 'en-GB']) {
     await checkbox.check();
     await expect(page.locator('#confirm-apply')).toBeEnabled();
     await page.locator('#close-apply').click();
+    await page.locator('#more-options > summary').click();
+    await page.locator('#execution-profile').selectOption('strict');
     await page.locator('#apply').click();
+    await expect(page.locator('#apply-execution-mode')).toContainText(language.startsWith('en') ? 'Strict' : 'Streng');
+    await expect(page.locator('#execution-disclosure')).toContainText(language.startsWith('en') ? 'each saved day' : 'jeden gespeicherten Tag');
     await expect(checkbox).not.toBeChecked();
     await expect(page.locator('#confirm-apply')).toBeDisabled();
     await checkbox.check();
@@ -62,7 +68,7 @@ for (const language of ['de-DE', 'en-GB']) {
     const requests = await page.evaluate(() => (window as unknown as { __accountFixture: { commands: Array<{ type: string; confirmation?: { planId: string; planRevision: number; contextFingerprint: string; confirmed: boolean } }>; writes: unknown[] } }).__accountFixture);
     const applied = requests.commands.filter(command => command.type === 'PANEL_APPLY');
     expect(applied).toHaveLength(1);
-    expect(applied[0].confirmation).toEqual({ planId: plan.id, planRevision: 7, contextFingerprint: expect.any(String), confirmed: true });
+    expect(applied[0].confirmation).toEqual({ planId: plan.id, planRevision: 7, contextFingerprint: expect.any(String), executionFingerprint: JSON.stringify({ checkpointDates: [], executionProfile: 'strict' }), confirmed: true });
     expect(JSON.parse(applied[0].confirmation!.contextFingerprint)).toEqual(snapshot.context);
     expect(requests.writes).toEqual([]);
     expect(destinations.every(url => url.startsWith('http://127.0.0.1:5173/') || url.startsWith('ws://127.0.0.1:5173/'))).toBe(true);

@@ -1,8 +1,8 @@
 import './styles.css';
 import { buildMonthPlan, defaultSettings, formatMinutes, GERMAN_STATES, netMinutes } from '../domain/index';
-import type { AccountConfirmation, AttendanceEntry, BookingPlan, ConflictChoices, DayPlan, PreflightResult, MonthSnapshot, PlanEditLease, SessionState, Settings } from '../shared/types';
+import type { AccountConfirmation, AttendanceEntry, BookingPlan, ConflictChoices, DayPlan, ExecutionProfile, PreflightResult, MonthSnapshot, PlanEditLease, RunOptions, SessionState, Settings } from '../shared/types';
 import { sameJsonValue } from '../shared/json';
-import { contextFingerprint } from '../shared/context';
+import { contextFingerprint, executionFingerprint } from '../shared/context';
 import { createDemoSnapshot, demoFingerprint } from './demo';
 import { language, locale, localizeText, t } from '../i18n/index';
 import { MAX_SETTINGS_BACKUP_BYTES, parseSettingsBackup, serializeSettingsBackup } from '../shared/settings-backup';
@@ -19,6 +19,8 @@ let state: SessionState = {};
 let plan: BookingPlan | undefined;
 let choices: ConflictChoices = {};
 let seed = freshSeed();
+let redistributeAll = false;
+let executionProfile: ExecutionProfile = 'fast-serial';
 let busy = false;
 let applying = false;
 let connecting = false;
@@ -37,7 +39,7 @@ let initializationFailed = false;
 let preferencesLoaded = !hasExtension;
 let connectionRetryAvailable = false;
 let approvedPlanRevision: number | undefined;
-let confirmed: { plan: BookingPlan; planRevision: number; contextFingerprint: string; preflightDate: string; resumeJobId?: string; checkpointId?: string } | undefined;
+let confirmed: { plan: BookingPlan; planRevision: number; contextFingerprint: string; executionFingerprint: string; options: RunOptions; preflightDate: string; resumeJobId?: string; checkpointId?: string } | undefined;
 let pendingDraft: Draft | undefined;
 let invalidations: Promise<void> = Promise.resolve();
 let preferenceWrites: Promise<void> = Promise.resolve();
@@ -57,11 +59,12 @@ interface Draft {
   settings: Settings;
   choices: ConflictChoices;
   seed: number;
+  redistributeAll: boolean;
   lease?: PlanEditLease;
   preferencesSaved: boolean;
 }
 
-type PanelMessage = { type: string; month?: string; date?: string; plan?: BookingPlan; planId?: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation; options?: { checkpointDates: string[] } };
+type PanelMessage = { type: string; month?: string; date?: string; plan?: BookingPlan; planId?: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation; options?: RunOptions };
 type PanelResponse = { ok: boolean; state?: SessionState; error?: string; preflight?: PreflightResult };
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -118,7 +121,7 @@ app.innerHTML = `
           </div>
         </fieldset>
       </form>
-      <details id="more-options" class="more-options"><summary>${t('Weitere Optionen')}</summary><button id="refresh-month" class="button wide" hidden>${t('Monat erneut einlesen')}</button><button id="redistribute" class="button wide" hidden>${t("Neu verteilen")}</button><details class="settings-transfer"><summary>${t('Einstellungen übertragen')}</summary><p class="hint">${t('Übertrage deine Vorgaben zwischen Installationen. HiBob-Daten und Buchungsverläufe werden nicht exportiert.')}</p><div class="transfer-actions"><button id="export-settings" class="button">${t('Einstellungen exportieren')}</button><button id="import-settings" class="button">${t('Einstellungen importieren')}</button></div><input id="settings-file" type="file" accept="application/json,.json" hidden /><p id="transfer-status" class="hint" role="status" hidden></p></details><div class="version-bar"><span id="installed-version"></span><button id="activate-update" class="button subtle" hidden>${t('Jetzt aktualisieren')}</button></div><p id="connection-technical" class="hint"></p></details>
+      <details id="more-options" class="more-options"><summary>${t('Weitere Optionen')}</summary><button id="refresh-month" class="button wide" hidden>${t('Monat erneut einlesen')}</button><button id="redistribute" class="button wide" hidden>${t("Alles neu verteilen")}</button><details class="settings-transfer"><summary>${t('Einstellungen übertragen')}</summary><p class="hint">${t('Übertrage deine Vorgaben zwischen Installationen. HiBob-Daten und Buchungsverläufe werden nicht exportiert.')}</p><div class="transfer-actions"><button id="export-settings" class="button">${t('Einstellungen exportieren')}</button><button id="import-settings" class="button">${t('Einstellungen importieren')}</button></div><input id="settings-file" type="file" accept="application/json,.json" hidden /><p id="transfer-status" class="hint" role="status" hidden></p></details><div class="version-bar"><span id="installed-version"></span><button id="activate-update" class="button subtle" hidden>${t('Jetzt aktualisieren')}</button></div><p id="connection-technical" class="hint"></p></details>
       <div id="scan-toolbar" class="scan-toolbar"><button id="scan" class="button primary wide" disabled>${t("Monat einlesen")}</button></div>
     </section>
     <section id="scan-progress" class="notice" role="status" hidden></section>
@@ -133,11 +136,11 @@ app.innerHTML = `
       <div id="weeks"></div>
     </section>
     <section id="paused-card" class="notice paused-card" hidden aria-labelledby="paused-title"><h2 id="paused-title">${t('Für Kontrolle pausiert')}</h2><p id="paused-description"></p><button id="continue-run" class="button primary wide">${t('Restliche Tage fortsetzen')}</button></section>
-    <section id="run-panel" class="run-panel" aria-labelledby="run-title" hidden><h2 id="run-title">${t("Buchungsverlauf")}</h2><div id="run-status" class="run-summary" aria-live="polite"></div><div id="run-uncertain" class="notice error" role="alert" hidden></div><details id="run-history"><summary>${t('Einzelne Ergebnisse')}</summary><ul id="run-results" class="run-results"></ul></details></section>
+    <section id="run-panel" class="run-panel" aria-labelledby="run-title" hidden><h2 id="run-title">${t("Buchungsverlauf")}</h2><div id="run-status" class="run-summary" aria-live="polite"></div><p id="run-timing" class="hint" hidden></p><div id="run-uncertain" class="notice error" role="alert" hidden></div><details id="run-history"><summary>${t('Einzelne Ergebnisse')}</summary><ul id="run-results" class="run-results"></ul></details></section>
     <footer id="booking-footer" class="footer"><div class="footer-buttons"><button id="cancel-run" class="button danger" hidden>${t('Restliche Tage stoppen')}</button><button id="apply" class="button primary" disabled>${t("Jetzt buchen")}</button></div><p id="footer-hint" class="hint">${t("Es wird erst nach deiner Bestätigung gespeichert.")}</p></footer>
   </div>
   <dialog id="conflict-dialog" aria-labelledby="conflict-title"><div class="dialog-body"><h2 id="conflict-title">${t("Vorhandene Buchungen prüfen")}</h2><p class="hint">${t("Entscheide für jeden Tag. Beim Überschreiben werden die bisherigen Arbeits- und Pauseneinträge durch die Vorschau ersetzt.")}</p><div class="dialog-toolbar"><button id="overwrite-all" class="button">${t("Alle überschreiben")}</button><button id="skip-all" class="button">${t("Alle überspringen")}</button></div><div id="conflict-error" class="notice error" role="alert" style="margin-top:12px" hidden></div><div id="conflict-items"></div></div><div class="dialog-footer"><button id="close-conflicts" class="button">${t("Zurück")}</button><button id="save-conflicts" class="button primary">${t("Entscheidungen übernehmen")}</button></div></dialog>
-  <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t("Buchungen jetzt speichern?")}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><div id="account-confirmation-field" class="notice account-confirmation" hidden><label class="ack-label" for="account-confirmation"><input id="account-confirmation" type="checkbox" /><span id="account-confirmation-label"></span></label></div><details id="additional-checks" class="additional-checks"><summary>${t('Zusätzliche Prüfungen')}</summary><div id="checkpoint-field" class="checkpoint-field"><label class="ack-label" for="pause-verification"><input id="pause-verification" type="checkbox" /><span>${t('Für Kontrolle pausieren')}</span></label><p id="checkpoint-description" class="hint"></p></div><div id="preflight-controls" class="draft-check-controls field"><label for="draft-check-date">${t('Tag für Planprüfung')}</label><select id="draft-check-date" disabled></select><p class="hint">${t('Der ausgewählte Tag und die geplanten Daten werden ohne Änderungen geprüft. Das bestätigt keine serverseitige Speicherung. Danach den Monat erneut einlesen.')}</p><button id="check-draft" class="button wide" disabled>${t('Plan prüfen – ohne Speichern')}</button></div></details><p class="hint">${t("Die Extension kontrolliert jeden gespeicherten Tag. Bei einer Abweichung stoppt der Lauf.")}</p></div><div class="dialog-footer"><button id="close-apply" class="button">${t("Zurück")}</button><button id="confirm-apply" class="button primary" disabled>${t("Buchungen starten")}</button></div></dialog>
+  <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t("Buchungen jetzt speichern?")}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><div id="account-confirmation-field" class="notice account-confirmation" hidden><label class="ack-label" for="account-confirmation"><input id="account-confirmation" type="checkbox" /><span id="account-confirmation-label"></span></label></div><details id="additional-checks" class="additional-checks"><summary>${t('Zusätzliche Prüfungen')}</summary><div id="checkpoint-field" class="checkpoint-field"><label class="ack-label" for="pause-verification"><input id="pause-verification" type="checkbox" /><span>${t('Für Kontrolle pausieren')}</span></label><p id="checkpoint-description" class="hint"></p></div><div id="preflight-controls" class="draft-check-controls field"><label for="draft-check-date">${t('Tag für Planprüfung')}</label><select id="draft-check-date" disabled></select><p class="hint">${t('Der ausgewählte Tag und die geplanten Daten werden ohne Änderungen geprüft. Das bestätigt keine serverseitige Speicherung. Danach den Monat erneut einlesen.')}</p><button id="check-draft" class="button wide" disabled>${t('Plan prüfen – ohne Speichern')}</button></div></details><p id="execution-disclosure" class="hint"></p><p id="execution-consent-reset" class="hint" role="status" hidden></p></div><div class="dialog-footer"><button id="close-apply" class="button">${t("Zurück")}</button><button id="confirm-apply" class="button primary" disabled>${t("Buchungen starten")}</button></div></dialog>
   <dialog id="import-dialog" aria-labelledby="import-title"><div class="dialog-body"><h2 id="import-title">${t('Einstellungen importieren?')}</h2><p class="hint">${t('Diese Vorgaben ersetzen deine aktuellen Einstellungen. Der Import startet keine Buchungen; prüfe danach die Monatsvorschau.')}</p><dl id="import-details" class="confirm-details"></dl></div><div class="dialog-footer"><button id="cancel-import" class="button">${t('Abbrechen')}</button><button id="confirm-import" class="button primary">${t('Einstellungen übernehmen')}</button></div></dialog>
 `;
 
@@ -148,6 +151,14 @@ const conflictDialog = $<HTMLDialogElement>('conflict-dialog');
 const applyDialog = $<HTMLDialogElement>('apply-dialog');
 const importDialog = $<HTMLDialogElement>('import-dialog');
 $('more-options').append($('disconnect'));
+const profileField = node('div', undefined, 'field');
+const profileLabel = node('label', t('Buchungsmodus')); profileLabel.htmlFor = 'execution-profile';
+const profileSelect = node('select'); profileSelect.id = 'execution-profile';
+for (const [value, label] of [['fast-serial', t('Schnell – monatlich prüfen')], ['strict', t('Streng – jeden Tag einzeln prüfen')]]) {
+  const option = node('option', label); option.value = value; profileSelect.append(option);
+}
+profileField.append(profileLabel, profileSelect, node('p', t('Im schnellen Modus werden nur nötige Änderungen nacheinander gespeichert. Für eine Prüfung nach jedem Tag den strengen Modus wählen.'), 'hint'));
+$('more-options').querySelector('summary')!.after(profileField);
 const exportPlanButton = node('button', t('Buchungsplan herunterladen'), 'button wide');
 exportPlanButton.id = 'export-plan'; exportPlanButton.type = 'button'; exportPlanButton.hidden = true;
 const exportPlanHint = node('p', t('Enthält private Anwesenheitsdaten. Nur lokal und vertraulich verwenden.'), 'hint');
@@ -318,12 +329,51 @@ function writableDays(reviewed: BookingPlan): DayPlan[] {
   return reviewed.days.filter(day => day.eligible && !reviewed.settings.excludedDates.includes(day.date) && (day.action === 'create' || day.action === 'overwrite'));
 }
 
+function selectedExecutionOptions(reviewed: BookingPlan, resume = false): RunOptions {
+  if (resume) return { executionProfile: state.run?.executionProfile ?? 'strict' };
+  const checkpointDates = input('pause-verification').checked ? verificationDates(reviewed) : undefined;
+  const selected = select('execution-profile').value === 'strict' ? 'strict' : 'fast-serial';
+  return { executionProfile: checkpointDates?.length ? 'strict' : selected, ...(checkpointDates?.length ? { checkpointDates } : {}) };
+}
+
+function executionScope(options: RunOptions, resume = false): string {
+  return resume ? state.run?.executionFingerprint ?? '' : executionFingerprint(options);
+}
+
+function renderExecutionDisclosure(): void {
+  const profile = confirmed?.options.executionProfile ?? executionProfile;
+  if ($('apply-execution-mode')) $('apply-execution-mode').textContent = profile === 'strict' ? t('Streng – jeden Tag einzeln prüfen') : t('Schnell – monatlich prüfen');
+  $('execution-disclosure').textContent = profile === 'fast-serial'
+    ? t('Der Monat wird vor und nach dem Lauf geprüft. Änderungen werden nacheinander gespeichert und erst nach dem Rücklesen als geprüft gezählt. Der Lauf ist keine gemeinsame Transaktion; bei einem Fehler können einzelne Tage bereits gespeichert sein.')
+    : t('Die Extension kontrolliert jeden gespeicherten Tag. Bei einer Abweichung stoppt der Lauf.');
+}
+
+function changeExecutionOptions(checkpoints = false): void {
+  if (checkpoints && input('pause-verification').checked) {
+    executionProfile = 'strict';
+    select('execution-profile').value = executionProfile;
+  }
+  if (confirmed) {
+    confirmed.options = selectedExecutionOptions(confirmed.plan, Boolean(confirmed.resumeJobId));
+    confirmed.executionFingerprint = executionScope(confirmed.options, Boolean(confirmed.resumeJobId));
+    input('account-confirmation').checked = false;
+    $('execution-consent-reset').hidden = false;
+    $('execution-consent-reset').textContent = checkpoints && input('pause-verification').checked
+      ? t('Kontrollpausen verwenden den strengen Modus. Bitte das Konto für diesen Ablauf erneut bestätigen.')
+      : t('Der Buchungsmodus wurde geändert. Bitte das Konto für diesen Ablauf erneut bestätigen.');
+  }
+  renderExecutionDisclosure();
+  updateConfirmationButton();
+}
+
 function currentConfirmation(): boolean {
   return Boolean(confirmed && approved() && !isRunning() && !rebuilding
     && (confirmed.resumeJobId ? pausedJob()?.id === confirmed.resumeJobId && pausedJob()?.checkpointId === confirmed.checkpointId : !isPaused())
     && confirmed.planRevision === planRevision() && sameJsonValue(confirmed.plan, plan)
     && sameJsonValue(confirmed.plan, state.plan) && sameJsonValue(confirmed.plan.snapshot, state.snapshot)
-    && confirmed.contextFingerprint === contextFingerprint(state.snapshot?.context));
+    && confirmed.contextFingerprint === contextFingerprint(state.snapshot?.context)
+    && Boolean(confirmed.executionFingerprint)
+    && confirmed.executionFingerprint === executionScope(selectedExecutionOptions(confirmed.plan, Boolean(confirmed.resumeJobId)), Boolean(confirmed.resumeJobId)));
 }
 
 function updateConfirmationButton(): void {
@@ -383,7 +433,7 @@ function receiveState(incoming: SessionState): void {
     // this dialog. A replacement event may arrive without an invalidation event.
     $('conflict-items').replaceChildren();
   }
-  if (confirmed && (!sameJsonValue(previous.connection, state.connection) || confirmed.planRevision !== planRevision() || !sameJsonValue(confirmed.plan, state.plan) || !sameJsonValue(confirmed.plan.snapshot, state.snapshot) || confirmed.contextFingerprint !== contextFingerprint(state.snapshot?.context) || activeJob() || (confirmed.resumeJobId ? pausedJob()?.id !== confirmed.resumeJobId || pausedJob()?.checkpointId !== confirmed.checkpointId : isPaused()))) closeConfirmation();
+  if (confirmed && (!sameJsonValue(previous.connection, state.connection) || confirmed.planRevision !== planRevision() || !sameJsonValue(confirmed.plan, state.plan) || !sameJsonValue(confirmed.plan.snapshot, state.snapshot) || confirmed.contextFingerprint !== contextFingerprint(state.snapshot?.context) || activeJob() || (confirmed.resumeJobId ? pausedJob()?.id !== confirmed.resumeJobId || pausedJob()?.checkpointId !== confirmed.checkpointId || confirmed.executionFingerprint !== state.run?.executionFingerprint : isPaused()))) closeConfirmation();
   if (approvedPlanRevision !== undefined && (approvedPlanRevision !== planRevision() || !sameJsonValue(plan, state.plan))) approvedPlanRevision = undefined;
   if (!initializing && !pendingDraft) {
     if (state.plan && state.snapshot && state.plan.settings.month === settings.month) {
@@ -391,6 +441,7 @@ function receiveState(incoming: SessionState): void {
       if (!sameJsonValue(settings, plan.settings)) { settings = storedSettings(plan.settings); fillSettings(); }
       choices = structuredClone(plan.choices);
       seed = plan.seed;
+      redistributeAll = plan.redistributeAll === true;
     } else {
       plan = undefined;
       choices = {};
@@ -420,7 +471,7 @@ async function refreshApproval(): Promise<void> {
       if (state.plan && state.snapshot?.month === settings.month && renderablePlan(state.plan) && !activeJob() && state.job?.status !== 'interrupted') {
         plan = state.plan;
         choices = structuredClone(plan.choices);
-        seed = plan.seed;
+        seed = plan.seed; redistributeAll = plan.redistributeAll === true;
         approvedPlanRevision = planRevision();
       }
       renderState();
@@ -502,7 +553,8 @@ function persistDemo(): void {
 
 async function rebuild(newSeed = false): Promise<void> {
   if (updating() || isPaused()) return;
-  const draft = beginDraft(newSeed);
+  if (newSeed) { redistributeAll = true; seed = freshSeed(); }
+  const draft = beginDraft();
   await processDraft(draft);
 }
 
@@ -511,14 +563,14 @@ function beginDraft(newSeed = false): Draft {
   if (newSeed) seed = freshSeed();
   const draft: Draft = {
     version: ++buildVersion, changeId: crypto.randomUUID(), settings: structuredClone(settings),
-    choices: structuredClone(choices), seed, preferencesSaved: false,
+    choices: structuredClone(choices), seed, redistributeAll, preferencesSaved: false,
   };
   pendingDraft = draft;
   revokeApproval();
   if (conflictDialog.open) conflictDialog.close();
   rebuilding = true;
   localError = '';
-  plan = state.snapshot?.month === settings.month ? buildMonthPlan(draft.settings, state.snapshot, draft.choices, draft.seed) : undefined;
+  plan = state.snapshot?.month === settings.month ? buildMonthPlan(draft.settings, state.snapshot, draft.choices, draft.seed, { redistributeAll: draft.redistributeAll }) : undefined;
   renderState();
   return draft;
 }
@@ -571,7 +623,7 @@ async function processDraft(draft: Draft, prepareOnly = false): Promise<void> {
       rebuilding = false;
       return;
     }
-    const next = buildMonthPlan(draft.settings, state.snapshot, draft.choices, draft.seed);
+    const next = buildMonthPlan(draft.settings, state.snapshot, draft.choices, draft.seed, { redistributeAll: draft.redistributeAll });
     plan = next;
     renderState();
     if (hasExtension) {
@@ -627,6 +679,8 @@ function renderState(): void {
   const paused = isPaused();
   if (!activeJob() && state.run?.status !== 'running') statePollError = '';
   const locked = running || paused || updating();
+  select('execution-profile').value = executionProfile;
+  select('execution-profile').disabled = locked || initializing || initializationFailed;
   const installedVersion = state.update?.installedVersion ?? packageVersion;
   const versionLabel = installedVersion === packageVersion ? (extensionManifest as { version_name?: string }).version_name ?? installedVersion : installedVersion;
   $('installed-version').textContent = t('Version {version}', { version: versionLabel });
@@ -693,7 +747,8 @@ function renderState(): void {
   $('scan-progress').hidden = !running || !progress;
   if (progress && running) {
     const label = node('div', undefined, 'progress-header');
-    label.append(node('span', localizeText(progress.message)), node('span', `${progress.completed}/${progress.total}`));
+    const stage = progress.stage ? { prepare: t('Prüfen'), write: t('Speichern'), verify: t('Kontrollieren') }[progress.stage] : '';
+    label.append(node('span', [stage, localizeText(progress.message)].filter(Boolean).join(' · ')), node('span', `${progress.completed}/${progress.total}`));
     const bar = node('progress');
     bar.max = progress.total || 1;
     bar.value = progress.completed;
@@ -709,8 +764,9 @@ function renderState(): void {
   $('booking-footer').hidden = (!plan || !state.snapshot) && !running && !paused;
   $('apply').hidden = paused;
   const finished = state.run?.status === 'complete' && state.run.planId === plan?.id;
-  $<HTMLButtonElement>('apply').disabled = !approved() || locked || rebuilding || finished;
-  $('apply').textContent = rebuilding ? t('Vorschau wird geprüft …') : running ? t('Bitte warten …') : finished ? t('Buchungen abgeschlossen') : canWrite() ? t('{count} Tage prüfen', { count: plan ? writableDays(plan).length : 0 }) : t('Plan prüfen');
+  const noChanges = Boolean(plan && !plan.errors.length && !writableDays(plan).length);
+  $<HTMLButtonElement>('apply').disabled = !approved() || locked || rebuilding || finished || noChanges;
+  $('apply').textContent = rebuilding ? t('Vorschau wird geprüft …') : running ? t('Bitte warten …') : finished ? t('Buchungen abgeschlossen') : noChanges ? t('Keine Buchung nötig') : canWrite() ? t('{count} Tage prüfen', { count: plan ? writableDays(plan).length : 0 }) : t('Plan prüfen');
   $('paused-card').hidden = !paused;
   $('paused-description').textContent = paused ? t('{date} ist gespeichert und geprüft. {verified} Tage geprüft, {remaining} noch offen. Prüfe die Buchung und bestätige anschließend das Fortsetzen.', { date: dateLabel(state.run?.checkpointDate ?? ''), verified: state.run?.results.filter(item => item.status === 'verified').length ?? 0, remaining: state.run?.results.filter(item => item.status !== 'verified' && item.status !== 'skipped').length ?? 0 }) : '';
   $<HTMLButtonElement>('continue-run').disabled = !paused || running || updating() || rebuilding;
@@ -748,12 +804,13 @@ function renderPreview(): void {
   if (!plan) return;
   const changed = plan.days.filter((day) => day.action === 'create' || day.action === 'overwrite');
   const excluded = plan.days.filter((day) => !day.eligible);
-  const conflictDays = plan.days.filter((day) => day.eligible && day.existing.length > 0);
+  const conflictDays = plan.days.filter((day) => day.eligible && day.existing.length > 0 && day.action !== 'unchanged');
   const total = plan.weeks.some(week => week.plannedMinutes === null) ? null : plan.weeks.reduce((minutes, week) => minutes + (week.plannedMinutes ?? 0), 0);
   const summaryItems = [[String(changed.length), isPaused() ? t('Tage im Monatsplan') : t('Tage zum Buchen')], [formatMinutes(total), t('Netto im Plan')], [String(excluded.length), t('ausgelassene Tage')]];
   $('preview-summary').replaceChildren(...summaryItems.map(([value, label]) => {
     const item = node('div'); item.append(node('strong', value), node('span', label)); return item;
   }));
+  if (!changed.length && !plan.errors.length) $('preview-summary').append(node('p', t('Alles passt – keine Buchung nötig'), 'no-changes'));
   if (conflictDays.length) {
     $('conflicts').hidden = false;
     const unresolved = conflictDays.filter((day) => !choices[day.date]).length;
@@ -824,8 +881,8 @@ function renderDay(day: DayPlan, expanded = false): HTMLElement {
     settingsChanged();
   });
   const dateText = node('span', undefined, 'day-date'); dateText.append(node('span', dateLabel(day.date)));
-  const labels: Record<DayPlan['action'], string> = { create: t('Neu'), overwrite: t('Ersetzen'), skip: t('Ausgelassen'), conflict: t('Entscheidung offen'), unchanged: t('Unverändert'), blocked: t('Prüfung erforderlich') };
-  if (day.action !== 'create') dateText.append(node('small', labels[day.action], `day-state ${day.action}`));
+  const labels: Record<DayPlan['action'], string> = { create: t('Neu'), overwrite: t('Ersetzen'), skip: t('Ausgelassen'), conflict: t('Änderung nötig'), unchanged: t('Passt bereits'), blocked: t('Prüfung erforderlich') };
+  dateText.append(node('small', labels[day.action], `day-state ${day.action}`));
   label.append(checkbox, dateText);
   const entries = (day.action === 'skip' || day.action === 'unchanged' ? day.existing : day.proposed).filter(entry => entry.type === 'work').sort((a, b) => a.start.localeCompare(b.start));
   head.append(label, node('span', entries.length ? `${entries[0].start}–${entries[entries.length - 1].end}` : '—', 'day-time'), node('span', day.eligible ? formatMinutes(day.netMinutes) : '', 'day-net'));
@@ -852,6 +909,9 @@ function renderRun(): void {
   const verified = run.results.filter((item) => item.status === 'verified').length;
   const status = { running: t('Buchungen laufen'), paused: t('Für Kontrolle pausiert'), complete: t('Lauf abgeschlossen'), stopped: t('Lauf angehalten'), failed: t('Lauf mit Fehler angehalten') }[run.status];
   $('run-status').textContent = t('{status} · {verified} von {total} Tagen verifiziert', { status, verified, total: run.results.filter((item) => item.status !== 'skipped').length });
+  const duration = run.timings?.totalMs;
+  $('run-timing').hidden = typeof duration !== 'number' || !Number.isFinite(duration) || run.status === 'running';
+  $('run-timing').textContent = typeof duration === 'number' && Number.isFinite(duration) ? t('Tatsächliche Laufzeit: {seconds} s', { seconds: new Intl.NumberFormat(locale(), { maximumFractionDigits: 1 }).format(duration / 1000) }) : '';
   $('run-uncertain').hidden = !run.results.some(result => result.status === 'uncertain');
   const uncertainNotice = t('Als unklar markierte Buchungen können bereits in HiBob gespeichert sein. Vor einem neuen Lauf den Monat einlesen und die betroffenen Tage prüfen.');
   if ($('run-uncertain').textContent !== uncertainNotice) $('run-uncertain').textContent = uncertainNotice;
@@ -861,6 +921,7 @@ function renderRun(): void {
     const description = node('div');
     if (result.status === 'uncertain') description.append(node('strong', t('Speicherstatus unklar'), 'run-outcome'));
     if (result.status === 'pending') description.append(node('strong', t('Noch nicht ausgeführt'), 'run-outcome'));
+    if (result.status === 'awaiting-verification') description.append(node('strong', t('Übertragen – Prüfung ausstehend'), 'run-outcome'));
     const message = localizeText(result.message);
     if (result.status !== 'pending' || message !== t('Keine Änderung.')) description.append(node('span', message));
     item.append(node('span', dateLabel(result.date, false)), description); return item;
@@ -878,14 +939,15 @@ function renderPreflight(): void {
 }
 
 function settingsChanged(): void {
-  void rebuild(true);
+  redistributeAll = false; seed = freshSeed();
+  void rebuild();
 }
 
 function openConflicts(): void {
   if (!plan || isPaused() || updating()) return;
   $('conflict-error').hidden = true;
   $('conflict-items').replaceChildren();
-  for (const day of plan.days.filter((item) => item.eligible && item.existing.length > 0)) {
+  for (const day of plan.days.filter((item) => item.eligible && item.existing.length > 0 && item.action !== 'unchanged')) {
     const article = node('section', undefined, 'conflict-item');
     article.dataset.date = day.date;
     article.append(node('h3', dateLabel(day.date)));
@@ -942,13 +1004,14 @@ async function saveChoices(): Promise<void> {
   }
   choices = next;
   conflictDialog.close();
-  await rebuild(true);
+  seed = freshSeed(); await rebuild();
 }
 
 async function scanMonth(): Promise<void> {
   if (!connected() || isRunning() || isPaused() || updating() || rebuilding) return;
   if (!revealInvalidSettings()) return;
   settings = readSettings();
+  redistributeAll = false;
   busy = true; demoCancelled = false; localError = ''; plan = undefined; choices = {}; preflightResult = undefined;
   if (isDemo) {
     state.run = undefined;
@@ -992,9 +1055,13 @@ function verificationDates(reviewed: BookingPlan): string[] {
 
 function openApply(resume = false): void {
   if (!approved() || !plan || isRunning() || rebuilding || (resume ? !pausedJob() : isPaused())) return;
+  if (resume && !state.run?.executionFingerprint?.trim()) { showError(t('Die Freigabe des pausierten Laufs ist nicht mehr verfügbar. Bitte den Lauf stoppen und den Monat erneut einlesen.')); return; }
   preflightResult = undefined;
   const days = resume ? remainingDays(plan) : writableDays(plan);
-  confirmed = { plan: structuredClone(plan), planRevision: planRevision(), contextFingerprint: contextFingerprint(plan.snapshot.context), preflightDate: days[0]?.date ?? '', ...(resume ? { resumeJobId: pausedJob()!.id, checkpointId: pausedJob()!.checkpointId } : {}) };
+  if (!days.length) return;
+  input('pause-verification').checked = false;
+  const options = selectedExecutionOptions(plan, resume);
+  confirmed = { plan: structuredClone(plan), planRevision: planRevision(), contextFingerprint: contextFingerprint(plan.snapshot.context), executionFingerprint: executionScope(options, resume), options, preflightDate: days[0]?.date ?? '', ...(resume ? { resumeJobId: pausedJob()!.id, checkpointId: pausedJob()!.checkpointId } : {}) };
   const reviewed = confirmed.plan;
   $('apply-title').textContent = resume ? t('Restliche Buchungen fortsetzen?') : canWrite() ? t('Buchungen jetzt speichern?') : t('Plan prüfen');
   const manual = needsAccountConfirmation(reviewed);
@@ -1012,12 +1079,16 @@ function openApply(resume = false): void {
   $('additional-checks').hidden = resume;
   $<HTMLDetailsElement>('additional-checks').open = !canWrite();
   $('checkpoint-description').textContent = t('Nach dem ersten gebuchten Tag und dem ersten zukünftigen Tag anhalten. Danach nur mit neuer Bestätigung fortsetzen.');
+  $('execution-consent-reset').hidden = true;
+  renderExecutionDisclosure();
   $('confirm-apply').hidden = !canWrite();
   $('confirm-apply').textContent = resume ? t('{count} restliche Tage buchen', { count: days.length }) : t('{count} Tage buchen', { count: days.length });
   const overwriteCount = days.filter((day) => day.action === 'overwrite').length;
   $('apply-description').textContent = isDemo ? t('Du startest eine lokale Simulation. Dein echtes HiBob-Konto wird nicht verändert.') : manual ? t('Prüfe das angezeigte Mitarbeiter- und Firmenkonto. Diese Bestätigung gilt nur für diesen Plan.') : t('Die folgenden Änderungen werden in deinem HiBob-Konto „{employee}“ gespeichert.', { employee: reviewed.snapshot.employeeLabel });
   const list = $('apply-details'); list.replaceChildren();
   detailsLine(list, t('Monat'), monthLabel(reviewed.settings.month));
+  detailsLine(list, t('Buchungsmodus'), options.executionProfile === 'strict' ? t('Streng – jeden Tag einzeln prüfen') : t('Schnell – monatlich prüfen'));
+  list.lastElementChild!.id = 'apply-execution-mode';
   if (!isDemo) detailsLine(list, t('HiBob-Konto'), accountLabel());
   detailsLine(list, t('Tage zum Buchen'), String(days.length));
   detailsLine(list, t('Netto'), formatMinutes(days.reduce((total, day) => total + (day.netMinutes ?? 0), 0)));
@@ -1031,7 +1102,7 @@ function openApply(resume = false): void {
 
 function accountConfirmation(review: NonNullable<typeof confirmed>): AccountConfirmation | undefined {
   return needsAccountConfirmation(review.plan) ? {
-    planId: review.plan.id, planRevision: review.planRevision, contextFingerprint: review.contextFingerprint, confirmed: true,
+    planId: review.plan.id, planRevision: review.planRevision, contextFingerprint: review.contextFingerprint, executionFingerprint: review.executionFingerprint, confirmed: true,
     ...(review.resumeJobId ? { checkpointId: review.checkpointId } : {}),
   } : undefined;
 }
@@ -1067,7 +1138,7 @@ async function checkPreflight(): Promise<void> {
     const response = isDemo ? undefined : await request({ type: 'PANEL_PREFLIGHT', plan: review.plan, expectedPlanRevision: review.planRevision, date: day.date, ...(confirmation ? { confirmation } : {}) });
     const result = isDemo ? await demoPreflight(day) : response?.preflight;
     const completedState = response?.state;
-    const invalidated = isDemo || Boolean(completedState && completedState.schemaVersion === 5 && completedState.connection?.generation === connectionGeneration
+    const invalidated = isDemo || Boolean(completedState && completedState.schemaVersion === 6 && completedState.connection?.generation === connectionGeneration
       && sameJsonValue(completedState.connection, reviewedConnection)
       && typeof completedState.revision === 'number' && completedState.revision > revision
       && typeof completedState.planRevision === 'number' && completedState.planRevision > review.planRevision
@@ -1089,15 +1160,15 @@ async function checkPreflight(): Promise<void> {
   }
 }
 
-async function demoApply(activePlan: BookingPlan, checkpointDates?: string[], continuing = false): Promise<void> {
+async function demoApply(activePlan: BookingPlan, options: RunOptions, continuing = false): Promise<void> {
   demoCancelled = false;
   const before = state.run?.planId === activePlan.id ? state.run : undefined;
-  if (!continuing) demoCheckpointDates = checkpointDates ?? [];
+  if (!continuing) demoCheckpointDates = options.checkpointDates ?? [];
   const checkpoints = demoCheckpointDates;
   const jobId = continuing ? pausedJob()?.id : crypto.randomUUID();
   state.job = undefined;
   state.run = {
-    planId: activePlan.id, status: 'running', startedAt: before?.startedAt || new Date().toISOString(), updatedAt: new Date().toISOString(),
+    planId: activePlan.id, status: 'running', executionProfile: options.executionProfile, executionFingerprint: continuing ? before?.executionFingerprint : executionFingerprint(options), startedAt: before?.startedAt || new Date().toISOString(), updatedAt: new Date().toISOString(),
     results: activePlan.days.map((day) => before?.results.find((result) => result.date === day.date) ?? ({ date: day.date, status: day.action === 'create' || day.action === 'overwrite' ? 'pending' : 'skipped', message: day.action === 'create' || day.action === 'overwrite' ? t('Wartet auf Buchung') : day.reason || t('Keine Änderung') })),
   };
   for (const result of state.run.results) {
@@ -1119,6 +1190,8 @@ async function demoApply(activePlan: BookingPlan, checkpointDates?: string[], co
   }
   state.run.status = demoCancelled ? 'stopped' : 'complete';
   state.run.updatedAt = new Date().toISOString();
+  const totalMs = Math.max(0, Date.parse(state.run.updatedAt) - Date.parse(state.run.startedAt));
+  state.run.timings = { preparationMs: 0, writingMs: totalMs, journalingMs: 0, verificationMs: 0, totalMs, requests: 0, writes: state.run.results.filter(result => result.status === 'verified').length };
   state.snapshot = undefined;
   state.job = undefined;
   plan = { ...activePlan, canReview: false };
@@ -1129,17 +1202,16 @@ async function applyPlan(): Promise<void> {
   const review = confirmed;
   if (!canWrite() || !review || !applyDialog.open || !currentConfirmation() || (needsAccountConfirmation(review.plan) && !input('account-confirmation').checked)) return;
   const confirmation = accountConfirmation(review);
-  const checkpointDates = !review.resumeJobId && input('pause-verification').checked ? verificationDates(review.plan) : undefined;
   closeConfirmation();
   const activePlan = review.plan;
   approvedPlanRevision = undefined;
   applying = true; localError = ''; renderState();
   try {
-    if (isDemo) await demoApply(activePlan, checkpointDates, Boolean(review.resumeJobId));
+    if (isDemo) await demoApply(activePlan, review.options, Boolean(review.resumeJobId));
     else {
       await message(review.resumeJobId
         ? { type: 'PANEL_CONTINUE', jobId: review.resumeJobId, planId: activePlan.id, expectedPlanRevision: review.planRevision, ...(confirmation ? { confirmation } : {}) }
-        : { type: 'PANEL_APPLY', plan: activePlan, expectedPlanRevision: review.planRevision, ...(confirmation ? { confirmation } : {}), ...(checkpointDates ? { options: { checkpointDates } } : {}) });
+        : { type: 'PANEL_APPLY', plan: activePlan, expectedPlanRevision: review.planRevision, ...(confirmation ? { confirmation } : {}), options: review.options });
     }
   } catch (error) { localError = errorText(error); }
   finally { applying = false; renderState(); persistDemo(); if (isPaused()) void refreshApproval(); }
@@ -1237,7 +1309,8 @@ async function importSettings(): Promise<void> {
   fillSettings();
   // Use the same invalidation, storage and acknowledged-plan path as any
   // ordinary settings edit. Importing can never initiate a scan or a booking.
-  await rebuild(true);
+  redistributeAll = false; seed = freshSeed();
+  await rebuild();
   if (!pendingDraft) transferStatus(t('Einstellungen übernommen. Prüfe vor dem Buchen die Monatsvorschau.'));
 }
 
@@ -1289,7 +1362,7 @@ async function initialize(retry = false): Promise<void> {
       if (savedState) { const parsed = JSON.parse(savedState); demoSnapshot = parsed.demoSnapshot; receiveState(parsed); }
     }
     if (state.plan && state.plan.settings.month === settings.month && renderablePlan(state.plan)) {
-      plan = state.plan; settings = storedSettings(plan.settings); choices = structuredClone(plan.choices); seed = plan.seed;
+      plan = state.plan; settings = storedSettings(plan.settings); choices = structuredClone(plan.choices); seed = plan.seed; redistributeAll = plan.redistributeAll === true;
       if (isDemo || sameJsonValue(initialResponse, state)) approvedPlanRevision = planRevision();
     }
     if (isDemo && (state.run?.status === 'running' || state.run?.status === 'paused')) {
@@ -1329,7 +1402,13 @@ $('continue-run').addEventListener('click', () => { void (async () => { if (!isP
 $('close-apply').addEventListener('click', closeConfirmation);
 applyDialog.addEventListener('cancel', closeConfirmation);
 input('account-confirmation').addEventListener('change', updateConfirmationButton);
-input('pause-verification').addEventListener('change', () => { input('account-confirmation').checked = false; updateConfirmationButton(); });
+input('pause-verification').addEventListener('change', () => changeExecutionOptions(true));
+select('execution-profile').addEventListener('change', () => {
+  if (isRunning() || isPaused() || updating()) { select('execution-profile').value = executionProfile; return; }
+  executionProfile = select('execution-profile').value === 'strict' ? 'strict' : 'fast-serial';
+  if (executionProfile === 'fast-serial') input('pause-verification').checked = false;
+  changeExecutionOptions();
+});
 select('draft-check-date').addEventListener('change', () => {
   if (!confirmed || !currentConfirmation()) return;
   const date = select('draft-check-date').value;

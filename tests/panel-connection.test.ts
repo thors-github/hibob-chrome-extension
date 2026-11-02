@@ -2,8 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Blob as NodeBlob } from 'node:buffer';
 import { buildMonthPlan, defaultSettings, formatMinutes, getMonthDates } from '../src/domain/index';
-import { contextFingerprint } from '../src/shared/context';
-import type { AccountConfirmation, BookingPlan, PreflightResult, MonthSnapshot, PlanEditLease, SessionState, Settings } from '../src/shared/types';
+import { contextFingerprint, executionFingerprint } from '../src/shared/context';
+import type { AccountConfirmation, BookingPlan, PreflightResult, MonthSnapshot, PlanEditLease, RunOptions, SessionState, Settings } from '../src/shared/types';
 
 const settings = defaultSettings('2026-11');
 function connection(generation = 'test-connection') { return { status: 'connected' as const, generation, employeeId: 'test-employee', companyId: 'test-company', employeeLabel: 'Thorsten Test', companyLabel: 'Test Company', transport: 'direct' as const, capabilities: { read: true, write: true, overwrite: true } }; }
@@ -32,10 +32,21 @@ function reviewedState(mode: 'stable-identity' | 'user-confirmed-ui' | 'api-sess
   scanned.days.find(day => day.date === '2026-11-02')!.reportedMinutes = 480;
   const plan = buildMonthPlan(settings, scanned, { '2026-11-02': 'skip' }, 123);
   expect(plan.canReview).toBe(true);
-  return { schemaVersion: 5, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan };
+  return { schemaVersion: 6, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan };
 }
 
-type Message = { type: string; date?: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; plan?: BookingPlan; planId?: string; jobId?: string; confirmation?: AccountConfirmation; options?: { checkpointDates: string[] } };
+function matchingState(): SessionState {
+  const scanned = snapshot('api-session');
+  const variable = { ...settings, variable: true, variationMinutes: 15 };
+  for (const day of scanned.days) {
+    if ([0, 6].includes(new Date(`${day.date}T12:00:00Z`).getUTCDay())) continue;
+    day.entries = [{ type: 'work', start: '08:07', end: '12:00' }, { type: 'break', start: '12:00', end: '12:30' }, { type: 'work', start: '12:30', end: '16:37' }];
+    day.reportedMinutes = 480; day.fingerprint = `retained:${day.date}`;
+  }
+  return { schemaVersion: 6, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan: buildMonthPlan(variable, scanned, {}, 73191) };
+}
+
+type Message = { type: string; date?: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; plan?: BookingPlan; planId?: string; jobId?: string; confirmation?: AccountConfirmation; options?: RunOptions };
 type Reply = { ok: boolean; state?: SessionState; error?: string; preflight?: PreflightResult };
 
 function mockChrome(options: {
@@ -46,7 +57,7 @@ function mockChrome(options: {
   onMessage?: (message: Message, state: SessionState) => Promise<Reply | undefined>;
 } = {}) {
   const listeners = new Set<StorageListener>();
-  let backend: SessionState = { schemaVersion: 5, revision: 0, planRevision: 0, ...structuredClone(options.state ?? {}) };
+  let backend: SessionState = { schemaVersion: 6, revision: 0, planRevision: 0, ...structuredClone(options.state ?? {}) };
   const sendMessage = vi.fn(async (message: Message): Promise<Reply> => {
     const custom = await options.onMessage?.(message, structuredClone(backend));
     if (custom) return custom;
@@ -87,7 +98,7 @@ function mockChrome(options: {
     sendMessage, addListener, setSettings,
     get state() { return structuredClone(backend); },
     emit(state: SessionState) {
-      backend = { schemaVersion: 5, revision: (backend.revision ?? 0) + 1, planRevision: (backend.planRevision ?? 0) + 1, ...structuredClone(state) };
+      backend = { schemaVersion: 6, revision: (backend.revision ?? 0) + 1, planRevision: (backend.planRevision ?? 0) + 1, ...structuredClone(state) };
       for (const listener of listeners) listener({ sessionState: { newValue: structuredClone(backend) } }, 'session');
     },
   };
@@ -426,7 +437,7 @@ describe('actual extension panel connection states', () => {
   });
 
   it.each(['scan', 'apply'] as const)('restores an active %s job and cancels only its canonical job id', async kind => {
-    const state: SessionState = { schemaVersion: 5, revision: 2, planRevision: 2, connection: connection(),
+    const state: SessionState = { schemaVersion: 6, revision: 2, planRevision: 2, connection: connection(),
       job: { id: `${kind}-job-7`, kind, status: 'running', connectionId: 'test-connection', month: '2026-11', startedAt: '2026-11-02T09:00:00Z', updatedAt: '2026-11-02T09:00:01Z' },
       progress: { phase: kind, completed: 7, total: 30, message: 'Local job fixture' } };
     const chrome = mockChrome({ state });
@@ -525,7 +536,7 @@ describe('actual extension panel connection states', () => {
     button('confirm-apply').click();
     await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(true));
     const sent = chrome.sendMessage.mock.calls.find(([message]) => message.type === 'PANEL_APPLY')![0];
-    expect(sent.confirmation).toEqual({ planId: initial.plan!.id, planRevision: 1, contextFingerprint: contextFingerprint(initial.snapshot!.context), confirmed: true });
+    expect(sent.confirmation).toEqual({ planId: initial.plan!.id, planRevision: 1, contextFingerprint: contextFingerprint(initial.snapshot!.context), executionFingerprint: executionFingerprint({ executionProfile: 'fast-serial' }), confirmed: true });
     expect(sent.plan?.snapshot.context).toEqual(initial.snapshot!.context);
     expect(field('account-confirmation').checked).toBe(false);
     expect(chrome.setSettings).not.toHaveBeenCalled();
@@ -626,7 +637,7 @@ describe('actual extension panel connection states', () => {
     await vi.waitFor(() => expect(document.getElementById('draft-check-result')?.hidden).toBe(false));
     const checked = chrome.sendMessage.mock.calls.filter(([message]) => message.type === 'PANEL_PREFLIGHT');
     expect(checked).toHaveLength(1);
-    expect(checked[0][0]).toMatchObject({ date: '2026-11-04', plan: initial.plan, expectedPlanRevision: 1, confirmation: { planId: initial.plan.id, planRevision: 1, contextFingerprint: contextFingerprint(initial.snapshot!.context), confirmed: true } });
+    expect(checked[0][0]).toMatchObject({ date: '2026-11-04', plan: initial.plan, expectedPlanRevision: 1, confirmation: { planId: initial.plan.id, planRevision: 1, contextFingerprint: contextFingerprint(initial.snapshot!.context), executionFingerprint: executionFingerprint({ executionProfile: 'fast-serial' }), confirmed: true } });
     expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
     expect(chrome.setSettings).not.toHaveBeenCalled();
     expect(field('variationMinutes').value).toBe('15');
@@ -685,9 +696,9 @@ describe('actual extension panel connection states', () => {
     await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
     button('apply').click(); button('check-draft').click();
     await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_PREFLIGHT')).toBe(true));
-    chrome.emit({ schemaVersion: 5, revision: 10, planRevision: 10, connection: connection('replacement-connection') });
+    chrome.emit({ schemaVersion: 6, revision: 10, planRevision: 10, connection: connection('replacement-connection') });
     const day = initial.plan!.days.find(day => day.date === '2026-11-03')!;
-    held.resolve({ ok: true, state: { schemaVersion: 5, revision: 2, planRevision: 2, connection: connection() }, preflight: { date: day.date, checked: true, netMinutes: day.netMinutes!, saved: false, serverValidated: false } });
+    held.resolve({ ok: true, state: { schemaVersion: 6, revision: 2, planRevision: 2, connection: connection() }, preflight: { date: day.date, checked: true, netMinutes: day.netMinutes!, saved: false, serverValidated: false } });
     await settleStartup();
     expect(document.getElementById('draft-check-result')?.hidden).toBe(true);
     expect(button('apply').disabled).toBe(true);
@@ -718,9 +729,9 @@ function checkpointState(checkpointId = 'checkpoint-one'): SessionState {
   const scanned = snapshot('api-session');
   const plan = buildMonthPlan(settings, scanned, {}, 123);
   const now = '2026-11-02T10:00:00Z';
-  return { schemaVersion: 5, revision: 2, planRevision: 1, connection: connection(), snapshot: scanned, plan,
+  return { schemaVersion: 6, revision: 2, planRevision: 1, connection: connection(), snapshot: scanned, plan,
     job: { id: 'paused-job', kind: 'apply', status: 'paused', connectionId: 'test-connection', checkpointId, month: settings.month, startedAt: now, updatedAt: now },
-    run: { runId: 'paused-job', planId: plan.id, status: 'paused', checkpointDate: '2026-11-02', startedAt: now, updatedAt: now,
+    run: { runId: 'paused-job', planId: plan.id, status: 'paused', executionProfile: 'strict', executionFingerprint: executionFingerprint({ executionProfile: 'strict', checkpointDates: ['2026-11-02', '2026-11-03'] }), checkpointDate: '2026-11-02', startedAt: now, updatedAt: now,
       results: plan.days.map(day => ({ date: day.date, status: day.date === '2026-11-02' ? 'verified' : day.eligible ? 'pending' : 'skipped', message: day.date === '2026-11-02' ? 'Saved and verified' : 'Pending' })) } };
 }
 
@@ -956,7 +967,7 @@ describe('compact monthly flow and verification checkpoints', () => {
   it('lets an explicitly selected unreadable workday be excluded without silently dropping its target', async () => {
     const scanned = snapshot('api-session'); const broken = scanned.days.find(day => day.date === '2026-11-03')!;
     broken.editable = false; broken.unsupportedReason = 'Unsupported local fixture entry';
-    const initial: SessionState = { schemaVersion: 5, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan: buildMonthPlan(settings, scanned, {}, 123) };
+    const initial: SessionState = { schemaVersion: 6, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan: buildMonthPlan(settings, scanned, {}, 123) };
     const chrome = mockChrome({ state: initial }); await mount();
     await vi.waitFor(() => expect(document.querySelector('[data-date="2026-11-03"]')).not.toBeNull());
     expect(field('include-2026-11-03').checked).toBe(true);
@@ -983,7 +994,7 @@ describe('compact monthly flow and verification checkpoints', () => {
     button('confirm-apply').click();
     await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(true));
     const command = chrome.sendMessage.mock.calls.find(([message]) => message.type === 'PANEL_APPLY')![0];
-    expect(command.options).toEqual({ checkpointDates: ['2026-11-02', '2026-11-03'] });
+    expect(command.options).toEqual({ executionProfile: 'strict', checkpointDates: ['2026-11-02', '2026-11-03'] });
     expect(command.confirmation?.checkpointId).toBeUndefined();
     expect(field('pause-verification').checked).toBe(false);
     expect(chrome.setSettings).not.toHaveBeenCalled(); vi.useRealTimers();
@@ -1020,5 +1031,101 @@ describe('compact monthly flow and verification checkpoints', () => {
     chrome.emit({ ...replacement, revision: 3, planRevision: 1 });
     expect(dialog('apply-dialog').open).toBe(false); expect(field('account-confirmation').checked).toBe(false);
     expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_CONTINUE')).toBe(false);
+  });
+});
+
+describe('monthly execution profiles and idempotent preview', () => {
+  it('requires the exact canonical execution scope when resuming a checkpoint', async () => {
+    const initial = checkpointState(); const chrome = mockChrome({ state: initial }); await mount();
+    await vi.waitFor(() => expect(document.getElementById('paused-card')!.hidden).toBe(false));
+    button('continue-run').click(); await vi.waitFor(() => expect(dialog('apply-dialog').open).toBe(true));
+    field('account-confirmation').click(); button('confirm-apply').click();
+    await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_CONTINUE')).toBe(true));
+    const sent = chrome.sendMessage.mock.calls.find(([message]) => message.type === 'PANEL_CONTINUE')![0];
+    expect(sent.confirmation?.executionFingerprint).toBe(initial.run!.executionFingerprint);
+    expect(JSON.parse(sent.confirmation!.executionFingerprint!).checkpointDates).toEqual(['2026-11-02', '2026-11-03']);
+  });
+
+  it('blocks continuation if the canonical execution scope is missing', async () => {
+    const missing = checkpointState(); delete missing.run!.executionFingerprint;
+    const chrome = mockChrome({ state: missing }); await mount();
+    await vi.waitFor(() => expect(document.getElementById('paused-card')!.hidden).toBe(false));
+    button('continue-run').click();
+    await vi.waitFor(() => expect(document.getElementById('main-error')!.textContent).toContain('Lauf stoppen'));
+    expect(dialog('apply-dialog').open).toBe(false);
+    expect(chrome.sendMessage.mock.calls.filter(([message]) => message.type === 'PANEL_CONTINUE')).toHaveLength(0);
+  });
+
+  it('defaults to fast serial and binds consent to the exact execution profile', async () => {
+    const initial = reviewedState('api-session'); const chrome = mockChrome({ state: initial }); await mount();
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    expect(field('execution-profile').value).toBe('fast-serial');
+    expect(document.getElementById('more-options')!.contains(field('execution-profile'))).toBe(true);
+    button('apply').click();
+    expect(document.getElementById('execution-disclosure')!.textContent).toContain('keine gemeinsame Transaktion');
+    field('account-confirmation').click();
+    expect(button('confirm-apply').disabled).toBe(false);
+    field('execution-profile').value = 'strict'; field('execution-profile').dispatchEvent(new Event('change'));
+    expect(field('account-confirmation').checked).toBe(false); expect(button('confirm-apply').disabled).toBe(true);
+    expect(document.getElementById('execution-consent-reset')!.textContent).toContain('erneut bestätigen');
+    expect(document.getElementById('apply-execution-mode')!.textContent).toContain('Streng');
+    field('account-confirmation').click(); button('confirm-apply').click();
+    await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(true));
+    const sent = chrome.sendMessage.mock.calls.find(([message]) => message.type === 'PANEL_APPLY')![0];
+    expect(sent.options).toEqual({ executionProfile: 'strict' });
+    expect(sent.confirmation?.executionFingerprint).toBe(executionFingerprint(sent.options));
+    expect(chrome.setSettings).not.toHaveBeenCalled();
+  });
+
+  it('rejects a silently changed profile even if the earlier account checkbox stays checked', async () => {
+    const chrome = mockChrome({ state: reviewedState('api-session') }); await mount();
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false)); button('apply').click(); field('account-confirmation').click();
+    field('execution-profile').value = 'strict';
+    // No change event: the final action still compares the captured fingerprint.
+    button('confirm-apply').dispatchEvent(new Event('click'));
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
+  });
+
+  it('shows no work needed and preserves compatible variable times across a repeated scan', async () => {
+    const initial = matchingState(); const chrome = mockChrome({ state: initial }); await mount();
+    await vi.waitFor(() => expect(document.getElementById('preview-summary')!.textContent).toContain('Alles passt'));
+    expect(initial.plan!.days.filter(day => day.action === 'unchanged')).toHaveLength(21);
+    expect(document.getElementById('conflicts')!.hidden).toBe(true); expect(button('apply').disabled).toBe(true);
+    expect(button('apply').textContent).toBe('Keine Buchung nötig');
+    expect(document.querySelector('[data-date="2026-11-03"]')!.textContent).toContain('Passt bereits');
+    button('refresh-month').click();
+    await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_SCAN')).toBe(true));
+    await vi.waitFor(() => expect(chrome.state.plan?.days.filter(day => day.action === 'unchanged')).toHaveLength(21));
+    expect(chrome.state.plan?.redistributeAll).toBeUndefined();
+    expect(chrome.state.plan!.snapshot.days).toEqual(initial.snapshot!.days);
+    expect(document.getElementById('conflicts')!.hidden).toBe(true);
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
+  });
+
+  it('redistributes compatible entries only through the explicit advanced action, then resets on a settings edit', async () => {
+    const initial = matchingState(); const chrome = mockChrome({ state: initial }); await mount();
+    await vi.waitFor(() => expect(document.getElementById('preview-summary')!.textContent).toContain('Alles passt'));
+    expect(document.getElementById('more-options')!.contains(button('redistribute'))).toBe(true);
+    expect(button('redistribute').textContent).toBe('Alles neu verteilen'); button('redistribute').click();
+    await vi.waitFor(() => expect(chrome.state.plan?.redistributeAll).toBe(true));
+    expect(chrome.state.plan!.days.filter(day => day.action === 'conflict')).toHaveLength(21);
+    expect(document.getElementById('conflicts')!.textContent).toContain('21 vorhandene');
+    change('variationMinutes', '14');
+    await vi.waitFor(() => expect(chrome.state.plan?.redistributeAll).toBeUndefined());
+    expect(chrome.state.plan!.days.filter(day => day.action === 'unchanged')).toHaveLength(21);
+  });
+
+  it('does not count acknowledged days as verified and shows the actual duration above ten seconds', async () => {
+    const initial = reviewedState('api-session'); const chrome = mockChrome({ state: initial }); await mount();
+    await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    const base = { runId: 'stage-test', planId: initial.plan!.id, status: 'running' as const, executionProfile: 'fast-serial' as const, startedAt: '2026-11-02T08:00:00Z', updatedAt: '2026-11-02T08:00:01Z', results: [{ date: '2026-11-03', status: 'awaiting-verification' as const, message: 'Übertragen – Abschlussprüfung steht aus.' }] };
+    chrome.emit({ ...initial, revision: 3, run: base, progress: { phase: 'apply', stage: 'verify', completed: 0, total: 1, message: 'Gesendete Buchungen unabhängig aus HiBob zurücklesen …' } });
+    expect(document.getElementById('run-status')!.textContent).toContain('0 von 1');
+    expect(document.getElementById('scan-progress')!.textContent).toContain('Kontrollieren');
+    expect(document.querySelector('[data-status="awaiting-verification"]')!.textContent).toContain('Prüfung ausstehend');
+    chrome.emit({ ...initial, revision: 4, run: { ...base, status: 'complete', results: [{ date: '2026-11-03', status: 'verified', message: 'Geprüft' }], timings: { preparationMs: 1000, writingMs: 10000, journalingMs: 50, verificationMs: 1295, totalMs: 12345, requests: 8, writes: 1 } } });
+    expect(document.getElementById('run-timing')!.hidden).toBe(false);
+    expect(document.getElementById('run-timing')!.textContent).toContain('12,3 s');
+    expect(document.getElementById('run-status')!.textContent).toContain('1 von 1');
   });
 });

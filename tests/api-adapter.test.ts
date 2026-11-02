@@ -84,11 +84,11 @@ function authorization(plan: BookingPlan, revision = 7): ApplyAuthorization {
   const fingerprint = contextFingerprint(plan.snapshot.context);
   return { planId: plan.id, planRevision: revision, contextFingerprint: fingerprint, confirmation: { planId: plan.id, planRevision: revision, contextFingerprint: fingerprint, confirmed: true } };
 }
-async function setup(server = new Server(), choices: ConflictChoices = {}) {
+async function setup(server = new Server(), choices: ConflictChoices = {}, redistributeAll = false) {
   const adapter = new HiBobApiAdapter({ client: server, now: () => new Date('2026-12-01T12:00:00Z') });
   const connection = await adapter.connect();
   const snapshot = await adapter.scanMonth(connection, server.month);
-  const plan = buildMonthPlan(defaultSettings(server.month), snapshot, choices, 1234);
+  const plan = buildMonthPlan(defaultSettings(server.month), snapshot, choices, 1234, { redistributeAll });
   const day = plan.days.find(item => item.date === (server.month === '2026-11' ? target : `${server.month}-03`))!;
   const consent = authorization(plan);
   server.calls.length = 0;
@@ -251,7 +251,7 @@ describe('single-request API writes with independent readback', () => {
 
   it('only replaces explicitly selected conflicts, reusing every stable ID and confirming note removal through readback', async () => {
     const server = new Server(); server.setEntries(target, entries());
-    const app = await setup(server, { [target]: 'overwrite' });
+    const app = await setup(server, { [target]: 'overwrite' }, true);
     expect(app.day.action).toBe('overwrite'); expect(app.day.existing[0].note).toBe('Original private fixture note');
     await expect(apply(app)).resolves.toHaveProperty('reportedMinutes', 480);
     const payload = server.mutations[0].request.body as ApiEntry[];
@@ -261,7 +261,8 @@ describe('single-request API writes with independent readback', () => {
   });
 
   it('does not write unresolved overwrite conflicts', async () => {
-    const server = new Server(); server.setEntries(target, entries()); const app = await setup(server);
+    const server = new Server(); const original = entries(); original[2].end = `${target}T16:00`;
+    server.setEntries(target, original); const app = await setup(server);
     expect(app.day.action).toBe('conflict'); await expect(apply(app)).rejects.toThrow(); expect(server.mutations).toHaveLength(0);
   });
 

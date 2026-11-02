@@ -14,9 +14,10 @@ export function isHiBobOrigin(url?: string): boolean {
 }
 
 export function assertWritablePlan(plan: BookingPlan): void {
-  if (!plan || !plan.canReview || plan.errors.length || plan.days.some(d => d.action === 'conflict' || d.action === 'blocked') || plan.weeks.some(w => w.errors.length)) throw new Error(t('Die Vorschau enthält noch offene Konflikte oder Fehler.'));
-  if (plan.snapshot.source !== 'hibob') throw new Error(t('Testdaten dürfen nicht an HiBob gesendet werden.'));
+  if (!plan || plan.redistributeAll !== undefined && typeof plan.redistributeAll !== 'boolean' || plan.errors.length || plan.days.some(d => d.action === 'conflict' || d.action === 'blocked') || plan.weeks.some(w => w.errors.length)) throw new Error(t('Die Vorschau enthält noch offene Konflikte oder Fehler.'));
   if (!plan.days.some(d => d.action === 'create' || d.action === 'overwrite')) throw new Error(t('Es sind keine Änderungen ausgewählt.'));
+  if (!plan.canReview) throw new Error(t('Die Vorschau enthält noch offene Konflikte oder Fehler.'));
+  if (plan.snapshot.source !== 'hibob') throw new Error(t('Testdaten dürfen nicht an HiBob gesendet werden.'));
   const seen = new Set<string>();
   for (const day of plan.days) {
     if (seen.has(day.date) || !day.date.startsWith(`${plan.settings.month}-`)) throw new Error(t('Ungültige Tageszuordnung im Buchungsplan.'));

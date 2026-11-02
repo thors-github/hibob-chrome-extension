@@ -1,6 +1,10 @@
 import { t } from '../i18n';
 import { canonicalJson } from './json';
-import type { ApplyAuthorization, AttendanceContext } from './types';
+import type { ApplyAuthorization, AttendanceContext, RunOptions } from './types';
+
+export function executionFingerprint(options: RunOptions = {}): string {
+  return canonicalJson({ executionProfile: options.executionProfile ?? (options.checkpointDates?.length ? 'strict' : 'fast-serial'), checkpointDates: [...(options.checkpointDates ?? [])].sort() })!;
+}
 
 const OWN_ATTENDANCE_URL = 'https://app.hibob.com/attendance/my-attendance';
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
@@ -27,7 +31,7 @@ export function assertApplyAuthorization(context: AttendanceContext | undefined,
   }
   const confirmation = authorization.confirmation;
   if (context.mode === 'api-session' || context.mode === 'user-confirmed-ui' || confirmation !== undefined) {
-    if (!confirmation || confirmation.confirmed !== true || confirmation.planId !== authorization.planId || confirmation.planRevision !== authorization.planRevision || confirmation.contextFingerprint !== authorization.contextFingerprint) {
+    if (!confirmation || confirmation.confirmed !== true || confirmation.planId !== authorization.planId || confirmation.planRevision !== authorization.planRevision || confirmation.contextFingerprint !== authorization.contextFingerprint || authorization.executionFingerprint !== undefined && confirmation.executionFingerprint !== authorization.executionFingerprint) {
       throw new Error(t('Bitte das eigene HiBob-Konto für diese Vorschau ausdrücklich bestätigen.'));
     }
   }

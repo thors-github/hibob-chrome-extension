@@ -1,4 +1,5 @@
 /** Session-authenticated transport. Credentials stay with Chrome, never in extension storage. */
+import type { ExecutionProfile } from '../shared/types';
 export type ApiHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 export interface ApiHttpRequest { method: ApiHttpMethod; path: string; body?: unknown }
 export interface ApiEndpointRule { method: ApiHttpMethod; path: string | RegExp; mutation: boolean }
@@ -136,6 +137,11 @@ export class SessionClient {
   private requestQueue: Promise<void> = Promise.resolve();
   private lastDispatchAt = -Infinity;
   private cooldownUntil = 0;
+  private profile: ExecutionProfile = 'strict';
+  private dispatches = 0;
+  private mutationDispatches = 0;
+  /** Aggregate counters only; no request bodies, paths or account data. */
+  requestCounts(): { requests: number; writes: number } { return { requests: this.dispatches, writes: this.mutationDispatches }; }
   constructor(private readonly options: SessionClientOptions) {
     this.browser = options.chrome ?? chrome;
     this.fetcher = options.fetch ?? fetch;
@@ -161,7 +167,7 @@ export class SessionClient {
   }
   private async beforeDispatch(signal?: AbortSignal): Promise<void> {
     this.check(signal); this.checkCooldown();
-    const configured = this.options.minRequestIntervalMs ?? 1000;
+    const configured = this.profile === 'fast-serial' ? 0 : this.options.minRequestIntervalMs ?? 1000;
     const interval = Number.isFinite(configured) && configured >= 0 ? Math.min(configured, 60_000) : 1000;
     const delay = Math.min(interval, Math.max(0, this.lastDispatchAt + interval - Date.now()));
     if (delay > 0) {
@@ -264,19 +270,21 @@ export class SessionClient {
     try { stable = JSON.parse(JSON.stringify(request)) as ApiHttpRequest; } catch { throw new SessionClientError('REQUEST_DENIED'); }
     const input: WireInput = { request: stable, rules: this.rules, maxBytes: this.options.maxResponseBytes ?? 5_000_000, timeoutMs: this.options.requestTimeoutMs ?? 20_000, ...(tab ? { expectedUrl: tab.url } : {}) };
     let dispatched = false;
+    const count = () => { dispatched = true; this.dispatches++; if (rule.mutation) this.mutationDispatches++; };
     try {
       let wire: WireResult;
       if (tab) {
         await this.owned(tab);
         await this.beforeDispatch(signal);
-        dispatched = true;
+        count();
         const results = await this.browser.scripting.executeScript({ target: { tabId: tab.id, documentIds: [tab.documentId] }, world: 'MAIN', func: performWireRequest, args: [input] });
         const frame = results.find(item => item.frameId === 0);
         if (!frame || frame.documentId !== tab.documentId || !frame.result) throw new SessionClientError('DOCUMENT_CHANGED', rule.mutation);
         wire = frame.result;
         this.rememberRateLimit(wire);
         await this.owned(tab);
-      } else { await this.beforeDispatch(signal); dispatched = true; wire = await performWireRequest(input, this.fetcher, signal); this.rememberRateLimit(wire); }
+      } else { await this.beforeDispatch(signal); count(); wire = await performWireRequest(input, this.fetcher, signal); this.rememberRateLimit(wire); }
+      if (!wire.dispatched) { this.dispatches--; if (rule.mutation) this.mutationDispatches--; }
       if (!tab) dispatched = wire.dispatched;
       if (signal?.aborted) throw new SessionClientError('CANCELLED', rule.mutation && dispatched);
       if (!wire.ok) throw new SessionClientError(wire.code, rule.mutation && wire.dispatched, wire.status, wire.retryAfterMs);
@@ -310,6 +318,7 @@ export class SessionClient {
   }
   async connect(signal?: AbortSignal): Promise<SessionConnection> {
     if (this.operation || this.opening) throw new SessionClientError('BUSY');
+    this.profile = 'strict';
     this.connection = undefined;
     const controller = new AbortController(); this.opening = controller; const unlink = this.link(signal, controller);
     let selected: { connection: SessionConnection; tab?: OwnedTab } | undefined;
@@ -356,8 +365,10 @@ export class SessionClient {
       unlink(); if (this.opening === controller) this.opening = undefined;
     }
   }
-  async openOperation(signal?: AbortSignal): Promise<SessionConnection> {
+  async openOperation(signal?: AbortSignal, profile: ExecutionProfile = 'strict'): Promise<SessionConnection> {
     if (this.operation || this.opening) throw new SessionClientError('BUSY');
+    if (profile !== 'strict' && profile !== 'fast-serial') throw new SessionClientError('REQUEST_DENIED');
+    this.profile = profile;
     const controller = new AbortController(); this.opening = controller; const unlink = this.link(signal, controller);
     let selected: { connection: SessionConnection; tab?: OwnedTab } | undefined;
     try {
@@ -367,7 +378,7 @@ export class SessionClient {
       this.operation = { ...selected, controller, closing: false, pending: new Set(), detachSignal: unlink };
       return { ...selected.connection };
     } catch (error) { await this.closeOwned(selected?.tab); throw error; }
-    finally { if (this.operation?.controller !== controller) unlink(); if (this.opening === controller) this.opening = undefined; }
+    finally { if (this.operation?.controller !== controller) { unlink(); this.profile = 'strict'; } if (this.opening === controller) this.opening = undefined; }
   }
   request<T = unknown>(request: ApiHttpRequest, signal?: AbortSignal): Promise<T> {
     const operation = this.operation;
@@ -380,13 +391,13 @@ export class SessionClient {
   cancel() { this.opening?.abort(); this.operation?.controller.abort(); }
   async closeOperation(): Promise<void> {
     const operation = this.operation;
-    if (!operation) return;
+    if (!operation) { if (!this.opening) this.profile = 'strict'; return; }
     operation.closing = true;
     if (operation.pending.size) operation.controller.abort();
     await Promise.allSettled([...operation.pending]);
     await this.closeOwned(operation.tab);
     operation.detachSignal();
-    if (this.operation === operation) this.operation = undefined;
+    if (this.operation === operation) { this.operation = undefined; this.profile = 'strict'; }
   }
   async disconnect(): Promise<void> { this.cancel(); await this.closeOperation(); this.connection = undefined; }
 }
