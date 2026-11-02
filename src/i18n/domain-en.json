@@ -43,5 +43,8 @@
   "Sachsen": "Saxony",
   "Sachsen-Anhalt": "Saxony-Anhalt",
   "Schleswig-Holstein": "Schleswig-Holstein",
-  "Thüringen": "Thuringia"
+  "Thüringen": "Thuringia",
+  "Der HiBob-Kontokontext ist nicht eindeutig bestätigt. Die Vorschau ist verfügbar; Buchen bleibt gesperrt.": "The HiBob account context has not been verified. You can review the preview, but booking is blocked.",
+  "Die gemeldeten HiBob-Stunden stimmen nicht mit den vollständigen Einträgen überein.": "The reported HiBob hours do not match the complete entries.",
+  "{date}: {reason}. Bitte den Tag prüfen oder ausdrücklich ausschließen.": "{date}: {reason}. Check the day or explicitly exclude it."
 }

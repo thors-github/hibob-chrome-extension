@@ -6,8 +6,8 @@ import { isHiBobAttendance, isHiBobOrigin } from '../src/shared/validation';
 
 function snapshot(): MonthSnapshot {
   return {
-    month: '2026-11', employeeLabel: 'Testperson', periodLabel: '01/11/2026–30/11/2026', scannedAt: '2026-11-02T10:00:00Z', source: 'hibob',
-    days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, fingerprint: `empty-${date}` })),
+    month: '2026-11', employeeLabel: 'Testperson', periodLabel: '01/11/2026–30/11/2026', scannedAt: '2026-11-02T10:00:00Z', source: 'hibob', context: { documentId: 'doc-review', employeeKey: 'employee-review', tenantKey: 'tenant-review', verified: true },
+    days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: `empty-${date}` })),
   };
 }
 
@@ -25,6 +25,13 @@ async function setup(initial?: SessionState) {
   if (!initial) { await controller.bindTab(42); await controller.scan('2026-11'); }
   return { controller, bridge, stored: () => stored };
 }
+
+async function review(controller: BookingController, input: BookingPlan) {
+  const state = await controller.invalidatePlan(controller.state.planRevision ?? 0, crypto.randomUUID());
+  return controller.savePlan(input, state.editLease!);
+}
+
+function applyReviewed(controller: BookingController, input: BookingPlan) { return controller.apply(input, controller.state.planRevision!); }
 
 function planFor(controller: BookingController): BookingPlan {
   return buildMonthPlan(defaultSettings('2026-11'), controller.state.snapshot!, {}, 1234);
@@ -44,46 +51,47 @@ describe('write queue and recovery', () => {
     const { controller, bridge } = await setup();
     const source = controller.state.snapshot!;
     source.days[1].entries = [{ type: 'work', start: '08:00', end: '16:00', note: undefined }];
-    source.days[1].absence = undefined;
+    source.days[1].absence = undefined; source.days[1].reportedMinutes = 480;
     const settings = { ...defaultSettings('2026-11'), variable: true };
     const input = buildMonthPlan(settings, chromeStored(source), { '2026-11-02': 'skip' }, 1234);
     expect(JSON.stringify(input.snapshot)).not.toBe(JSON.stringify(source));
-    await controller.savePlan(input);
+    await review(controller, input);
     const reviewed = chromeStored(controller.state.plan!);
     expect(JSON.stringify(reviewed)).not.toBe(JSON.stringify(controller.state.plan));
-    await controller.apply(reviewed);
+    await applyReviewed(controller, reviewed);
     expect(controller.state.run?.status).toBe('complete');
     expect(bridge.applyDay).toHaveBeenCalledTimes(20);
   });
 
   it('still rejects modified nested times and reordered day arrays after storage roundtrip', async () => {
     const { controller, bridge } = await setup();
-    await controller.savePlan(chromeStored(planFor(controller)));
+    await review(controller, chromeStored(planFor(controller)));
     const changed = chromeStored(controller.state.plan!);
     changed.days.find(day => day.action === 'create')!.proposed[0].start = '00:00';
-    await expect(controller.apply(changed)).rejects.toThrow('Vorschau');
+    await expect(applyReviewed(controller, changed)).rejects.toThrow('Vorschau');
     const reordered = chromeStored(controller.state.plan!);
     reordered.days.reverse();
-    await expect(controller.apply(reordered)).rejects.toThrow('Vorschau');
+    await expect(applyReviewed(controller, reordered)).rejects.toThrow('Vorschau');
     const stale = chromeStored(planFor(controller));
     stale.snapshot.days[1].fingerprint = 'changed';
-    await expect(controller.savePlan(stale)).rejects.toThrow('Lesestand');
+    await expect(review(controller, stale)).rejects.toThrow('Lesestand');
     expect(bridge.applyDay).not.toHaveBeenCalled();
   });
 
   it('clears a previous scan and reviewed plan when the tab is unbound or changed', async () => {
     const { controller, bridge, stored } = await setup();
-    await controller.savePlan(planFor(controller));
+    await review(controller, planFor(controller));
     const original = structuredClone(controller.state.plan!);
     await controller.bindTab(undefined, 'Bitte HiBob öffnen.');
-    expect(stored()).toEqual({ error: 'Bitte HiBob öffnen.' });
+    expect(stored()).toMatchObject({ error: 'Bitte HiBob öffnen.', schemaVersion: 2 });
+    expect(stored()?.tabId).toBeUndefined();
     await expect(controller.scan('2026-11')).rejects.toThrow('Extension-Symbol');
-    await expect(controller.apply(original)).rejects.toThrow('Vorschau');
+    await expect(applyReviewed(controller, original)).rejects.toThrow('Vorschau');
     expect(bridge.applyDay).not.toHaveBeenCalled();
     await controller.bindTab(99);
-    expect(controller.state).toEqual({ tabId: 99, error: undefined });
+    expect(controller.state).toMatchObject({ tabId: 99, error: undefined, schemaVersion: 2 });
     await controller.scan('2026-11');
-    await controller.savePlan(planFor(controller));
+    await review(controller, planFor(controller));
     await controller.bindTab(100);
     expect(controller.state.snapshot).toBeUndefined();
     expect(controller.state.plan).toBeUndefined();
@@ -96,7 +104,7 @@ describe('write queue and recovery', () => {
     const forged = structuredClone(plan);
     const day = forged.days.find(d => d.action === 'create')!;
     day.proposed = [{ type: 'work', start: '00:00', end: '23:59' }];
-    await controller.savePlan(forged);
+    await review(controller, forged);
     expect(controller.state.plan!.days.find(d => d.date === day.date)!.proposed).not.toEqual(day.proposed);
     expect(controller.state.plan).toEqual(plan);
   });
@@ -105,28 +113,28 @@ describe('write queue and recovery', () => {
     const { controller } = await setup();
     const plan = structuredClone(planFor(controller));
     plan.snapshot.scannedAt = 'different-scan';
-    await expect(controller.savePlan(plan)).rejects.toThrow('Lesestand');
+    await expect(review(controller, plan)).rejects.toThrow('Lesestand');
   });
 
   it('stops after an uncertain write and requires a new scan before any retry', async () => {
     const { controller, bridge } = await setup();
     const plan = planFor(controller);
-    await controller.savePlan(plan);
+    await review(controller, plan);
     vi.mocked(bridge.applyDay).mockRejectedValueOnce(Object.assign(new Error('Verbindung unterbrochen'), { uncertain: true }));
-    await controller.apply(controller.state.plan!);
+    await applyReviewed(controller, controller.state.plan!);
     expect(bridge.applyDay).toHaveBeenCalledTimes(1);
     expect(controller.state.run?.status).toBe('failed');
     expect(controller.state.run?.results.filter(r => r.status === 'uncertain')).toHaveLength(1);
     expect(controller.state.snapshot).toBeUndefined();
     expect(controller.state.plan?.canApply).toBe(false);
-    await expect(controller.apply(plan)).rejects.toThrow();
-    await expect(controller.savePlan(plan)).rejects.toThrow('Lesestand');
+    await expect(applyReviewed(controller, plan)).rejects.toThrow();
+    await expect(review(controller, plan)).rejects.toThrow('Lesestand');
     expect(bridge.applyDay).toHaveBeenCalledTimes(1);
   });
 
   it('serializes writes, rejects duplicate starts and cancels between days', async () => {
     const { controller, bridge } = await setup();
-    await controller.savePlan(planFor(controller));
+    await review(controller, planFor(controller));
     const plan = structuredClone(controller.state.plan!);
     let resolveFirst!: (day: DaySnapshot) => void;
     let started!: () => void;
@@ -135,9 +143,9 @@ describe('write queue and recovery', () => {
       started();
       return new Promise<DaySnapshot>(resolve => { resolveFirst = resolve; });
     });
-    const running = controller.apply(plan);
+    const running = applyReviewed(controller, plan);
     await entered;
-    await expect(controller.apply(plan)).rejects.toThrow('bereits');
+    await expect(applyReviewed(controller, plan)).rejects.toThrow('bereits');
     await expect(controller.bindTab(99)).rejects.toThrow('bereits');
     await controller.cancel();
     const first = plan.days.find(d => d.action === 'create')!;
@@ -163,17 +171,17 @@ describe('write queue and recovery', () => {
 
   it('completes once and will not apply the same scan twice', async () => {
     const { controller, bridge } = await setup();
-    await controller.savePlan(planFor(controller));
+    await review(controller, planFor(controller));
     const plan = structuredClone(controller.state.plan!);
-    await controller.apply(plan);
+    await applyReviewed(controller, plan);
     expect(controller.state.run?.status).toBe('complete');
     expect(bridge.applyDay).toHaveBeenCalledTimes(plan.days.filter(d => d.action === 'create').length);
-    await expect(controller.apply(plan)).rejects.toThrow();
+    await expect(applyReviewed(controller, plan)).rejects.toThrow();
   });
 
   it('honours cancellation while waiting for the pre-write journal', async () => {
     const { controller, bridge } = await setup();
-    await controller.savePlan(planFor(controller));
+    await review(controller, planFor(controller));
     let release!: () => void;
     let entered!: () => void;
     const journalEntered = new Promise<void>(resolve => { entered = resolve; });
@@ -185,7 +193,7 @@ describe('write queue and recovery', () => {
       }
       await originalSave(state);
     });
-    const active = controller.apply(structuredClone(controller.state.plan!));
+    const active = applyReviewed(controller, structuredClone(controller.state.plan!));
     await journalEntered;
     await controller.cancel();
     release();
@@ -199,9 +207,9 @@ describe('write queue and recovery', () => {
     vi.mocked(bridge.save).mockRejectedValueOnce(new Error('Speicher nicht verfügbar'));
     await expect(controller.scan('2026-11')).rejects.toThrow('Speicher');
     await expect(controller.scan('2026-11')).resolves.toHaveProperty('snapshot');
-    await controller.savePlan(planFor(controller));
+    await review(controller, planFor(controller));
     vi.mocked(bridge.save).mockRejectedValueOnce(new Error('Journal nicht verfügbar'));
-    await expect(controller.apply(structuredClone(controller.state.plan!))).rejects.toThrow('Journal');
+    await expect(applyReviewed(controller, structuredClone(controller.state.plan!))).rejects.toThrow('Journal');
     expect(bridge.applyDay).not.toHaveBeenCalled();
     await expect(controller.scan('2026-11')).resolves.toHaveProperty('snapshot');
   });
@@ -213,5 +221,173 @@ describe('origin boundaries', () => {
     for (const url of ['https://app.hibob.com.evil.test/attendance/my-attendance', 'http://app.hibob.com/attendance/my-attendance', 'https://app.hibob.com/attendance/people', 'https://evil.test', 'not a url']) expect(isHiBobAttendance(url)).toBe(false);
     expect(isHiBobOrigin('https://app.hibob.com/home')).toBe(true);
     expect(isHiBobOrigin('https://app.hibob.com:444/home')).toBe(false);
+  });
+});
+
+describe('canonical edit leases, journaling, and job recovery', () => {
+  it('globally revokes another panel approval and treats only the current change id as idempotent', async () => {
+    const { controller, bridge } = await setup();
+    await review(controller, planFor(controller));
+    const previousPlan = structuredClone(controller.state.plan!);
+    const previousRevision = controller.state.planRevision!;
+    const invalid = await controller.invalidatePlan(previousRevision, 'new-settings');
+    expect(invalid.plan).toBeUndefined();
+    await expect(controller.apply(previousPlan, previousRevision)).rejects.toThrow('Vorschau');
+    const idempotent = await controller.invalidatePlan(previousRevision, 'new-settings');
+    expect(idempotent.planRevision).toBe(invalid.planRevision);
+    await expect(controller.invalidatePlan(previousRevision, 'late-other-settings')).rejects.toThrow('Vorschau');
+    expect(bridge.applyDay).not.toHaveBeenCalled();
+  });
+
+  it('does not approve an older save that completes after a newer invalidation', async () => {
+    const { controller, bridge } = await setup();
+    const input = planFor(controller);
+    const first = await controller.invalidatePlan(controller.state.planRevision!, 'first-edit');
+    let entered!: () => void; let release!: () => void;
+    const saving = new Promise<void>(resolve => { entered = resolve; });
+    const original = bridge.save;
+    vi.mocked(bridge.save).mockImplementationOnce(async state => { entered(); await new Promise<void>(resolve => { release = resolve; }); await original(state); });
+    const oldSave = controller.savePlan(input, first.editLease!).then(() => undefined, error => error as Error);
+    await saving;
+    const newerInvalidation = controller.invalidatePlan(first.planRevision!, 'newer-edit');
+    release();
+    expect(await oldSave).toBeInstanceOf(Error);
+    const newer = await newerInvalidation;
+    expect(controller.state.plan).toBeUndefined();
+    await expect(controller.apply(input, first.planRevision!)).rejects.toThrow('Vorschau');
+    const next = buildMonthPlan({ ...defaultSettings('2026-11'), start: '09:00', end: '17:30' }, controller.state.snapshot!, {}, 1234);
+    await controller.savePlan(next, newer.editLease!);
+    expect(controller.state.plan?.settings.start).toBe('09:00');
+  });
+
+  it('requires successful canonical persistence and permits the same proposal and seed to be retried', async () => {
+    const { controller, bridge } = await setup();
+    const input = planFor(controller);
+    const invalid = await controller.invalidatePlan(controller.state.planRevision!, 'retry-edit');
+    vi.mocked(bridge.save).mockRejectedValueOnce(new Error('canonical storage failed'));
+    await expect(controller.savePlan(input, invalid.editLease!)).rejects.toThrow('storage');
+    const failedPublication = vi.mocked(bridge.save).mock.calls.at(-1)![0];
+    expect(controller.state.revision).toBeGreaterThan(failedPublication.revision!);
+    expect(controller.state.error).toBe('canonical storage failed');
+    await expect(controller.apply(input, invalid.planRevision!)).rejects.toThrow('Vorschau');
+    await controller.savePlan(input, invalid.editLease!);
+    expect(controller.state.plan?.seed).toBe(input.seed);
+    expect(controller.state.plan?.canApply).toBe(true);
+    await controller.apply(controller.state.plan!, invalid.planRevision!);
+    expect(bridge.applyDay).toHaveBeenCalledTimes(21);
+  });
+
+  it('retains verified remote outcomes when the following local journal update fails', async () => {
+    const { controller, bridge, stored } = await setup();
+    await review(controller, planFor(controller));
+    let failed = false;
+    const original = bridge.save;
+    bridge.save = vi.fn(async (state: SessionState) => {
+      if (!failed && state.run?.results.some(result => result.status === 'verified')) { failed = true; throw new Error('post-verification storage failed'); }
+      await original(state);
+    });
+    await applyReviewed(controller, structuredClone(controller.state.plan!));
+    expect(bridge.applyDay).toHaveBeenCalledTimes(1);
+    expect(controller.state.run?.status).toBe('failed');
+    expect(controller.state.run?.results.filter(result => result.status === 'verified')).toHaveLength(1);
+    expect(controller.state.run?.results.some(result => result.status === 'failed')).toBe(false);
+    expect(stored()?.run?.journalError).toContain('post-verification');
+    expect(controller.state.snapshot).toBeUndefined();
+  });
+
+  it('preserves the primary remote error if final journal persistence also fails', async () => {
+    const { controller, bridge } = await setup();
+    await review(controller, planFor(controller));
+    vi.mocked(bridge.applyDay).mockRejectedValueOnce(Object.assign(new Error('REMOTE_PRIMARY'), { uncertain: true }));
+    const original = bridge.save;
+    bridge.save = vi.fn(async (state: SessionState) => { if (state.run?.status === 'failed') throw new Error('JOURNAL_SECONDARY'); await original(state); });
+    await expect(applyReviewed(controller, structuredClone(controller.state.plan!))).rejects.toThrow('REMOTE_PRIMARY');
+    expect(controller.state.error).toContain('JOURNAL_SECONDARY');
+    expect(controller.state.run?.results.find(result => result.status === 'uncertain')?.message).toBe('REMOTE_PRIMARY');
+  });
+
+  it('migrates a legacy interrupted scan to explicit recovery and checks adapter idleness before a new scan', async () => {
+    const { controller, bridge } = await setup({ tabId: 42, progress: { phase: 'scan', completed: 12, total: 30, message: 'Reading' } });
+    const oldJob = controller.state.job!;
+    expect(oldJob.status).toBe('interrupted');
+    expect(controller.state.progress).toBeUndefined();
+    bridge.recover = vi.fn(async () => {});
+    await controller.scan('2026-11');
+    expect(bridge.recover).toHaveBeenCalledWith(42, oldJob.id);
+    expect(controller.state.job).toBeUndefined();
+    expect(controller.state.schemaVersion).toBe(2);
+  });
+
+  it('persists an active scan, rejects stale progress and cancellation, and ignores progress after completion', async () => {
+    const { controller, bridge, stored } = await setup();
+    let entered!: () => void; let release!: (value: MonthSnapshot) => void;
+    const scanning = new Promise<void>(resolve => { entered = resolve; });
+    vi.mocked(bridge.scan).mockImplementationOnce(async () => { entered(); return new Promise<MonthSnapshot>(resolve => { release = resolve; }); });
+    const running = controller.scan('2026-11'); await scanning;
+    const job = controller.state.job!;
+    expect(stored()?.job).toMatchObject({ id: job.id, kind: 'scan', status: 'running' });
+    await expect(controller.bindTab(42)).resolves.toBeUndefined();
+    await expect(controller.bindTab(99)).rejects.toThrow('bereits');
+    await expect(controller.bindTab(undefined)).rejects.toThrow('bereits');
+    expect(controller.state.job?.id).toBe(job.id);
+    await controller.reportProgress({ jobId: 'old-job', phase: 'scan', completed: 12, total: 30, message: 'stale' });
+    expect(controller.state.progress?.completed).toBe(0);
+    await controller.reportProgress({ jobId: job.id, phase: 'scan', completed: 12, total: 30, message: 'current' });
+    expect(stored()?.progress?.completed).toBe(12);
+    await expect(controller.cancel('old-job')).rejects.toThrow('geändert');
+    expect(bridge.cancel).not.toHaveBeenCalled();
+    release(snapshot()); await running;
+    await controller.reportProgress({ jobId: job.id, phase: 'scan', completed: 29, total: 30, message: 'late' });
+    expect(controller.state.progress).toBeUndefined();
+  });
+
+  it('keeps publication revisions increasing across binding resets and rejects malformed stored jobs', async () => {
+    const { controller } = await setup();
+    const prior = controller.state.revision!;
+    await controller.bindTab(undefined);
+    expect(controller.state.revision).toBeGreaterThan(prior);
+    await controller.bindTab(99);
+    expect(controller.state.revision).toBeGreaterThan(prior + 1);
+    await expect(setup({ schemaVersion: 2, job: { id: 'bad', kind: 'other' } as never })).rejects.toThrow('ungültig');
+    await expect(setup({ run: { status: 'unknown', results: [] } as never })).rejects.toThrow('ungültig');
+  });
+});
+
+describe('recovery publication and cold canonical state', () => {
+  it('publishes a running scan while recovering an old adapter and allows cancellation before scanning', async () => {
+    const { controller, bridge, stored } = await setup({ tabId: 42, progress: { phase: 'scan', completed: 12, total: 30, message: 'old' } });
+    const oldJobId = controller.state.job!.id;
+    let entered!: () => void; let release!: () => void;
+    const recovering = new Promise<void>(resolve => { entered = resolve; });
+    bridge.recover = vi.fn(async () => { entered(); await new Promise<void>(resolve => { release = resolve; }); });
+    const scan = controller.scan('2026-11').then(() => undefined, error => error as Error);
+    await recovering;
+    const current = stored()?.job!;
+    expect(current).toMatchObject({ kind: 'scan', status: 'running' });
+    expect(current.id).not.toBe(oldJobId);
+    await controller.cancel(current.id);
+    release();
+    expect(await scan).toBeInstanceOf(Error);
+    expect(bridge.scan).not.toHaveBeenCalled();
+    expect(controller.state.job).toBeUndefined();
+  });
+
+  it('restores only a durable canonical proposal and rejects modified persisted plan contents', async () => {
+    const { controller } = await setup();
+    const varied = buildMonthPlan({ ...defaultSettings('2026-11'), variable: true }, controller.state.snapshot!, {}, 1234);
+    await review(controller, varied);
+    const durable = chromeStored(controller.state);
+    const restored = await setup(durable);
+    expect(restored.controller.state.plan?.id).toBe(varied.id);
+    expect(restored.controller.state.plan?.seed).toBe(varied.seed);
+    expect(restored.controller.state.plan?.days.map(day => day.proposed)).toEqual(varied.days.map(day => day.proposed));
+    await restored.controller.apply(restored.controller.state.plan!, durable.planRevision!);
+    expect(restored.bridge.applyDay).toHaveBeenCalledTimes(21);
+    const corrupted = structuredClone(durable);
+    corrupted.plan!.days.find(day => day.action === 'create')!.proposed[0].start = '00:00';
+    const rejected = await setup(corrupted);
+    expect(rejected.controller.state.plan?.canApply).toBe(false);
+    await expect(rejected.controller.apply(corrupted.plan!, corrupted.planRevision!)).rejects.toThrow('Vorschau');
+    expect(rejected.bridge.applyDay).not.toHaveBeenCalled();
   });
 });

@@ -99,6 +99,23 @@ test('regional requirements, manual exclusions and impossible weekly target', as
   await expect(page.locator('[data-date="2026-11-04"]')).toContainText('Manuell ausgeschlossen');
 });
 
+test('keyboard day selection keeps focus and the viewport through asynchronous preview rebuilds', async ({ page }) => {
+  await openDemo(page);
+  await scan(page);
+  await skipConflicts(page);
+  const day = page.locator('#include-2026-11-18');
+  await day.scrollIntoViewIfNeeded();
+  await day.focus();
+  const scrollBefore = await page.evaluate(() => document.scrollingElement!.scrollTop);
+  await page.keyboard.press('Space');
+  await expect(page.locator('[data-date="2026-11-18"]')).toContainText('Manuell ausgeschlossen');
+  await expect(page.locator('#apply')).toBeEnabled();
+  await expect(page.locator('#include-2026-11-18')).toBeFocused();
+  expect(await page.evaluate(() => document.scrollingElement!.scrollTop)).toBeCloseTo(scrollBefore, 0);
+  await page.keyboard.press('Tab');
+  await expect(page.locator('#include-2026-11-19')).toBeFocused();
+});
+
 for (const width of [320, 700]) {
   test(`readable responsive panel at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });

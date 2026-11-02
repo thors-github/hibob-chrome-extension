@@ -39,18 +39,27 @@ test('the packaged MV3 extension starts with its declared permissions and CSP', 
     const info = await worker.evaluate(() => ({ permissions: chrome.runtime.getManifest().permissions, csp: chrome.runtime.getManifest().content_security_policy, state: chrome.storage.session.get('sessionState') }));
     expect(info.permissions).toEqual(['sidePanel', 'storage', 'activeTab', 'scripting']);
     expect(info.csp).toEqual({ extension_pages: "script-src 'self'; object-src 'none'; connect-src 'none'" });
-    expect(await worker.evaluate(() => chrome.runtime.getManifest().version)).toBe('1.1.1');
+    expect(await worker.evaluate(() => chrome.runtime.getManifest().version)).toBe('1.2.0');
     await expect(page.locator('#connection-title')).toHaveText(labels.unbound);
     await expect(page.locator('#scan')).toBeDisabled();
+    // A top-level extension tab is not the native side panel. The production
+    // sender guard deliberately rejects its initialization RPC. That failure
+    // must remain visible and must not enable scan/write controls via events.
+    const onlyPanel = german ? 'Diese Aktion ist nur im Extension-Seitenpanel verfügbar.' : 'This action is only available in the extension’s side panel.';
+    await expect(page.locator('#main-error')).toHaveText(onlyPanel);
+    await expect(page.locator('#retry-connection')).toBeVisible();
     await worker.evaluate(async () => { await chrome.storage.session.set({ sessionState: { tabId: 9 } }); });
     await expect(page.locator('#connection-title')).toHaveText(labels.bound);
     await expect(page.locator('#connection-detail')).toContainText(labels.scan);
-    await expect(page.locator('#scan')).toBeEnabled();
+    await expect(page.locator('#scan')).toBeDisabled();
     await expect(page.locator('#apply')).toBeDisabled();
+    await page.locator('#retry-connection').click();
+    await expect(page.locator('#main-error')).toHaveText(onlyPanel);
+    await expect(page.locator('#scan')).toBeDisabled();
     // These fixture events exercise the packaged UI, not the controller's action
     // handler. A selected-tab cold reopen is tested with a consistent backend in
     // panel-connection.test.ts; directly seeding storage does not bind its writer.
-    await page.locator('#connection').screenshot({ path: '/tmp/hibob-connection-1.1.0.png' });
+    await page.locator('#connection').screenshot({ path: '/tmp/hibob-connection-1.2.0.png' });
     await worker.evaluate(async () => {
       await chrome.storage.session.set({ sessionState: {
         tabId: 9,

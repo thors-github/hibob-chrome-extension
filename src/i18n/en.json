@@ -122,5 +122,15 @@
   "{time} geplant": "{time} planned",
   "±{minutes} Min.": "±{minutes} min",
   "Überschreiben · Vorschau übernehmen": "Overwrite · Use the preview",
-  "Überspringen · Bestehendes behalten": "Skip · Keep current entries"
+  "Überspringen · Bestehendes behalten": "Skip · Keep current entries",
+  "Vorschau erneut prüfen": "Retry preview validation",
+  "Der gespeicherte Plan ist ungültig. Bitte den Monat erneut einlesen.": "The stored plan is invalid. Read the month again.",
+  "Die Vorschau wurde inzwischen geändert. Bitte erneut prüfen.": "The preview has changed. Review it again.",
+  "Die Änderungen sind noch nicht bestätigt. {error}": "The changes have not been confirmed yet. {error}",
+  "Für {month} ist noch kein Monat eingelesen. Bitte „Monat einlesen“ wählen.": "No data has been read for {month} yet. Choose “Read month”.",
+  "Der letzte Vorgang wurde unterbrochen. Bitte den Monat erneut einlesen.": "The last operation was interrupted. Read the month again.",
+  "Prüfung erforderlich": "Review required",
+  "Verbindung erneut prüfen": "Retry connection",
+  "Vorschau erstellen": "Create preview",
+  "Der Monat ist eingelesen. Erstelle jetzt die prüfbare Vorschau.": "The month has been read. Create the preview to review it."
 }

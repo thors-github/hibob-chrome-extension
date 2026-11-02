@@ -2,6 +2,8 @@
 
 A Chrome extension for preparing and recording your own HiBob attendance for an entire month. Review work periods and breaks before saving them through HiBob’s normal forms, using your existing login. No API key is required. The extension interface is available in English and German.
 
+**Version 1.2.0 validation gate:** reading and previews remain available, but booking requires a verified employee and tenant identity in the attendance page. The currently observed HiBob page does not expose a stable employee identifier through its visible DOM, so this build deliberately blocks production booking. An avatar, a display name or a company logo is not accepted as an employee identity. A regular 1.2.0 release is withheld until this integration requirement can be verified.
+
 **[Download the latest release](https://github.com/thors-github/hibob-chrome-extension/releases/latest)** to install the extension. Extract the release ZIP, then use Chrome’s **Load unpacked** option to select the extracted folder containing `manifest.json`.
 
 ## Installation
@@ -18,6 +20,8 @@ The extension is installed locally and is not published in the Chrome Web Store.
 
 If the panel says **Select a HiBob tab**, click the extension icon while viewing HiBob. The status changes to **HiBob tab selected**, with an instruction to **Read month**. A successful scan changes it to **Month read**. Opening the extension on another website clears the previous tab selection and preview.
 
+After choosing a different month, the panel asks you to read that selected month. A previous scan does not approve a new month. If saving settings or session state fails, booking remains blocked: use the displayed retry action after the storage issue is resolved. Retrying the same settings preserves the generated time distribution.
+
 ## Usage
 
 1. Choose a month, German federal state, work times and break. Defaults are Hesse, Monday to Friday, **08:00–16:30**, with a **12:00–12:30** break.
@@ -27,6 +31,10 @@ If the panel says **Select a HiBob tab**, click the extension icon while viewing
 5. Click **Book now** to review the final summary. Only **Start booking** saves attendance. The extension then reopens each saved day and checks its persisted segments and hours.
 
 Keep the HiBob tab open while reading or saving attendance, and avoid editing it manually at the same time. **Cancel** stops before the next save; a save already in progress is still verified. Previously confirmed days are not rolled back. After completion, cancellation or an error, read the month again before starting another run. The extension never clicks HiBob’s **Submit** button to submit a timesheet.
+
+Reopening the panel during a scan or booking run shows the active operation and its cancel control. Restarting Chrome or its extension worker never resumes writes automatically. Interrupted operations require a fresh scan. If a saved day was read back successfully but writing the local run log then fails, it stays labelled as verified for the current session and the run stops. After a restart, an older persisted log may instead require checking that day again.
+
+If a scan finished while another panel was opening, **Create preview** prepares a review from the stored scan without reading the month again. **Retry connection** retries failed initialization; it does not start a booking or reset saved run history.
 
 ## Variable times
 
@@ -53,6 +61,9 @@ The icon combines a gold clock with a green confirmation tick. Its editable sour
 ## Compatibility and limitations
 
 - The adapter was checked against the observed **English HiBob interface**, using `DD/MM/YYYY` dates and 24-hour start/end times. It stops with a message if the interface changes or required columns are missing. Holidays, absences, start/end times, hours, reasons, notes and projects must be shown in HiBob for the scan. Enlarge the browser window or scroll horizontally if needed.
+- Booking requires the same verified employee, tenant and content document as the reviewed scan. Unknown or changed identity is read-only. Reloading HiBob invalidates an earlier document binding. The current native employee-identity integration remains unresolved, as described above; synthetic identity fixtures do not establish production support.
+- Reported hours must be readable and agree exactly with complete work and break entries. An unknown format, unsupported marker or inconsistent day blocks the plan until it is checked or explicitly excluded. Such a day does not silently reduce a variable week's target. Meaningful absence labels on buttons, links and chips are retained.
+- A changed period label alone does not mean its table has finished loading. The reader waits for complete, stable month data and stops with a loading error on timeout. Virtual rows are revealed using measured scroll positions rather than assuming equal row heights.
 - Overwriting edits existing segments in the day’s form and adds missing ones. If replacement would require removing saved work or break segments individually, the day is stopped before saving. Individual deletion behaviour has not been verified on the real account, so the extension does not delete persisted segments individually. Amend the affected day manually if necessary, then read the month again.
 - Existing notes can be removed after confirmation. Reasons that cannot be safely removed, project assignments and unknown entry types are reported as unsupported. An already open day editor is neither taken over nor discarded.
 - Only monthly periods offered by HiBob and available for editing can be used. Future days can be prepared, but HiBob may reject them depending on its policy. The public API has different access requirements and excludes future attendance entries; this extension does not use it. See the [HiBob Attendance documentation](https://apidocs.hibob.com/docs/explore-attendance-api).
@@ -62,6 +73,7 @@ The icon combines a gold clock with a green confirmation tick. Its editable sour
 
 ## Version notes
 
+- **1.2.0 (pending validation)** invalidates booking approval before settings change, guards revisions across panels, preserves verified results when local journaling fails, restores active progress after reopening, and improves grid readiness, absence parsing and keyboard focus. Old session previews are discarded during migration; preferences and run history are retained.
 - **1.1.1** fixes preview comparisons after Chrome storage operations reorder object keys. Equivalent data remains valid; actual changes to days, time values or fingerprints are still rejected.
 - **1.1.0** adds automatic German/English localisation and the clock-and-tick icon.
 - **1.0.1** distinguishes a selected HiBob tab from a successfully read month and clears the previous tab selection and preview when the extension is opened on another website.
@@ -82,7 +94,7 @@ npm run build
 npm run test:e2e
 ```
 
-`npm run check` runs tests, type checking, translation validation, the build and browser checks. `npm run build` creates `dist` and `release/hibob-monatsbuchung-1.1.1.zip`. Dependency versions are locked in `package-lock.json`.
+`npm run check` runs tests, type checking, translation validation, the build and browser checks. `npm run build` creates `dist` and `release/hibob-monatsbuchung-1.2.0.zip`. Dependency versions are locked in `package-lock.json`.
 
 Start the local development server with:
 

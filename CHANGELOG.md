@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.0 — Pending native validation
+
+- Revoke booking approval before changing settings, persist a revisioned invalidation, and reject stale or conflicting edits from other panels. Final confirmation uses the immutable reviewed plan.
+- Keep booking blocked after a preference or session-storage failure; retry the same configuration without redistributing its generated times.
+- Add employee, tenant and document context guards. Unknown identity permits read-only previews but blocks writes. The currently observed native page does not expose a reliable employee identifier, so the regular release remains gated.
+- Reconcile reported hours with complete day entries before writing. Unsupported selected days block the plan without silently reducing weekly targets.
+- Wait for complete, stable month grids, reveal virtual rows without assuming equal heights, and retain meaningful interactive absence labels.
+- Separate verified HiBob outcomes from local journal failures, retry failed initialization safely, and retain active scan/apply progress across panel reopening.
+- Add session migration, revision and job guards; interrupted jobs never resume writes automatically.
+- Preserve keyboard focus and scroll position when changing day selections, and show when the newly selected month still needs reading.
+- Keep the existing permissions and German/English language selection. Regression tests use local fixtures; no real attendance write is included in this validation.
+
 ## 1.1.1
 
 - Fix false stale-preview errors caused by Chrome reordering object keys in session storage. Real changes to snapshots, planned times and fingerprints still invalidate the preview.

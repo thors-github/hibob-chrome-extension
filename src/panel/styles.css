@@ -102,7 +102,7 @@ details .field { margin-top: 10px; }
 .day-date { font-size: 13px; font-weight: 600; }
 .status { font-size: 10px; font-weight: 600; color: #3a6555; background: #e6efe9; border-radius: 4px; padding: 2px 6px; flex-shrink: 0; }
 .status.skip { color: #647077; background: #e9edef; }
-.status.conflict { color: #8e5f12; background: #fff0ce; }
+.status.conflict, .status.blocked { color: #8e5f12; background: #fff0ce; }
 .status.overwrite { color: #8c4e25; background: #fae8db; }
 .day-lines { margin: 0 0 0 25px; display: grid; grid-template-columns: 48px minmax(0,1fr); gap: 3px 6px; font-size: 11px; line-height: 1.45; }
 .day-lines dt { color: #738087; }
