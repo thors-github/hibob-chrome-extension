@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { BookingController, type ControllerBridge } from '../src/controller';
 import { buildMonthPlan, defaultSettings, getMonthDates } from '../src/domain/index';
-import type { BookingPlan, DayPlan, DaySnapshot, MonthSnapshot, SessionState } from '../src/shared/types';
+import type { BookingPlan, DayPlan, DaySnapshot, DraftCheckResult, MonthSnapshot, SessionState } from '../src/shared/types';
 import { isHiBobAttendance, isHiBobOrigin } from '../src/shared/validation';
 import { contextFingerprint } from '../src/shared/context';
 import type { AccountConfirmation } from '../src/shared/types';
@@ -20,6 +20,7 @@ async function setup(initial?: SessionState) {
     save: vi.fn(async state => { stored = structuredClone(state); }),
     scan: vi.fn(async () => snapshot()),
     applyDay: vi.fn(async (_tabId: number, day: DayPlan) => ({ date: day.date, editable: true, entries: day.proposed, fingerprint: 'saved' })),
+    checkDayDraft: vi.fn(async (_tabId: number, day: DayPlan) => ({ date: day.date, entries: day.proposed, netMinutes: day.netMinutes!, saved: false as const, unchanged: true as const })),
     cancel: vi.fn(async () => {}),
   };
   const controller = new BookingController(bridge);
@@ -47,6 +48,111 @@ function chromeStored<T>(input: T): T {
     ? Object.fromEntries(Object.entries(item).reverse().map(([key, child]) => [key, reorder(child)])) : item;
   return reorder(value) as T;
 }
+
+describe('single-day draft checks without booking', () => {
+  async function reviewedDraft(manual = false) {
+    const app = await setup();
+    if (manual) app.controller.state.snapshot!.context = { mode: 'user-confirmed-ui', documentId: 'draft-document', pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: 'draft-markers' };
+    app.controller.state.run = { planId: 'previous-real-run', status: 'failed', startedAt: '2026-11-02', updatedAt: '2026-11-02', results: [{ date: '2026-11-02', status: 'failed', message: 'Original booking failed before Save' }] };
+    await review(app.controller, planFor(app.controller));
+    const plan = structuredClone(app.controller.state.plan!);
+    const revision = app.controller.state.planRevision!;
+    const day = plan.days.find(item => item.action === 'create')!;
+    const history = structuredClone(app.controller.state.run);
+    const confirmation: AccountConfirmation = { planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context), confirmed: true };
+    vi.mocked(app.bridge.save).mockClear();
+    return { ...app, plan, revision, day, history, confirmation };
+  }
+
+  it('returns transient exact-plan evidence, preserves real history and always requires a fresh scan', async () => {
+    const app = await reviewedDraft(true);
+    vi.mocked(app.bridge.checkDayDraft).mockImplementationOnce(async (_tabId, day) => ({ date: day.date, entries: [...day.proposed].reverse(), netMinutes: day.netMinutes!, saved: false, unchanged: true }));
+    const response = await app.controller.checkDraft(app.plan, app.revision, app.day.date, app.confirmation);
+    expect(response.draftCheck).toMatchObject({ date: app.day.date, netMinutes: 480, saved: false, unchanged: true });
+    expect(app.bridge.checkDayDraft).toHaveBeenCalledWith(42, app.day, app.plan.snapshot.context, expect.any(String), { planId: app.plan.id, planRevision: app.revision, contextFingerprint: app.confirmation.contextFingerprint, confirmation: app.confirmation });
+    expect(app.bridge.applyDay).not.toHaveBeenCalled();
+    expect(response.state.run).toEqual(app.history);
+    expect(response.state.snapshot).toBeUndefined(); expect(response.state.plan?.canReview).toBe(false);
+    expect(response.state.planRevision).toBeGreaterThan(app.revision);
+    for (const [state] of vi.mocked(app.bridge.save).mock.calls) {
+      expect(state.run).toEqual(app.history);
+      expect((state as SessionState & { draftCheck?: unknown }).draftCheck).toBeUndefined();
+    }
+    await expect(app.controller.checkDraft(app.plan, app.revision, app.day.date, app.confirmation)).rejects.toThrow('Vorschau');
+  });
+
+  it('rejects missing/stale consent, stale plans and unselected dates before creating a job', async () => {
+    const app = await reviewedDraft(true);
+    await expect(app.controller.checkDraft(app.plan, app.revision, app.day.date)).rejects.toThrow('ausdrücklich');
+    await expect(app.controller.checkDraft(app.plan, app.revision, app.day.date, { ...app.confirmation, planRevision: app.revision - 1 })).rejects.toThrow('ausdrücklich');
+    await expect(app.controller.checkDraft(app.plan, app.revision - 1, app.day.date, app.confirmation)).rejects.toThrow('Vorschau');
+    const forged = structuredClone(app.plan); forged.days[1].proposed = [];
+    await expect(app.controller.checkDraft(forged, app.revision, app.day.date, app.confirmation)).rejects.toThrow('Vorschau');
+    for (const date of ['2026-12-03', '2026-11-01', 'not-a-date']) await expect(app.controller.checkDraft(app.plan, app.revision, date, app.confirmation)).rejects.toThrow('nicht zum Schreiben');
+    expect(app.bridge.checkDayDraft).not.toHaveBeenCalled(); expect(app.bridge.applyDay).not.toHaveBeenCalled();
+    expect(app.controller.state.job).toBeUndefined(); expect(app.controller.state.snapshot).toBeDefined();
+  });
+
+  it.each(['date', 'entries', 'netMinutes', 'saved', 'unchanged', 'missing'] as const)('rejects invalid %s evidence and keeps prior booking history', async field => {
+    const app = await reviewedDraft();
+    const result: DraftCheckResult = { date: app.day.date, entries: app.day.proposed, netMinutes: app.day.netMinutes!, saved: false, unchanged: true };
+    const wrong = field === 'date' ? { ...result, date: '2026-12-03' } : field === 'entries' ? { ...result, entries: [] } : field === 'netMinutes' ? { ...result, netMinutes: 481 } : field === 'saved' ? { ...result, saved: true } : field === 'unchanged' ? { ...result, unchanged: false } : undefined;
+    vi.mocked(app.bridge.checkDayDraft).mockResolvedValueOnce(wrong as DraftCheckResult);
+    await expect(app.controller.checkDraft(app.plan, app.revision, app.day.date)).rejects.toThrow('eindeutige Bestätigung');
+    expect(app.controller.state.run).toEqual(app.history); expect(app.controller.state.snapshot).toBeUndefined();
+    expect(app.controller.state.plan?.canReview).toBe(false); expect(app.bridge.applyDay).not.toHaveBeenCalled();
+  });
+
+  it('holds the shared job/update lock and honours cancellation until cleanup completes', async () => {
+    const app = await reviewedDraft();
+    let entered!: () => void; let release!: (result: DraftCheckResult) => void;
+    const held = new Promise<void>(resolve => { entered = resolve; });
+    vi.mocked(app.bridge.checkDayDraft).mockImplementationOnce(async () => { entered(); return new Promise(resolve => { release = resolve; }); });
+    const checking = app.controller.checkDraft(app.plan, app.revision, app.day.date);
+    await held;
+    const job = structuredClone(app.controller.state.job!);
+    expect(job.kind).toBe('apply'); expect(app.controller.state.progress).toMatchObject({ date: app.day.date, total: 1 });
+    await expect(app.controller.activateUpdate()).rejects.toThrow('laufenden Vorgangs');
+    await expect(app.controller.apply(app.plan, app.revision)).rejects.toThrow('läuft bereits');
+    await expect(app.controller.scan('2026-11')).rejects.toThrow('läuft bereits');
+    await expect(app.controller.cancel('stale-job')).rejects.toThrow('geändert');
+    await app.controller.cancel(job.id);
+    expect(app.bridge.cancel).toHaveBeenCalledWith(42, job.id);
+    expect(app.controller.state.job?.status).toBe('cancelling');
+    release({ date: app.day.date, entries: app.day.proposed, netMinutes: 480, saved: false, unchanged: true });
+    await expect(checking).rejects.toThrow('abgebrochen');
+    expect(app.controller.state.run).toEqual(app.history); expect(app.controller.state.job).toBeUndefined();
+    expect(app.bridge.applyDay).not.toHaveBeenCalled();
+  });
+
+  it.each(['initial', 'final'] as const)('fails closed on %s journal errors without modifying real history', async phase => {
+    const app = await reviewedDraft();
+    if (phase === 'initial') vi.mocked(app.bridge.save).mockRejectedValueOnce(new Error('CHECK_INITIAL_STORAGE'));
+    else {
+      const save = app.bridge.save;
+      app.bridge.save = vi.fn(async state => { if (!state.job && !state.snapshot) throw new Error('CHECK_FINAL_STORAGE'); await save(state); });
+    }
+    await expect(app.controller.checkDraft(app.plan, app.revision, app.day.date)).rejects.toThrow(phase === 'initial' ? 'CHECK_INITIAL_STORAGE' : 'CHECK_FINAL_STORAGE');
+    expect(app.bridge.checkDayDraft).toHaveBeenCalledTimes(phase === 'initial' ? 0 : 1);
+    expect(app.bridge.applyDay).not.toHaveBeenCalled(); expect(app.controller.state.run).toEqual(app.history);
+    expect(app.controller.state.snapshot).toBeUndefined(); expect(app.controller.state.plan?.canReview).toBe(false);
+  });
+
+  it('recovers an interrupted draft job without relabelling real history or restoring draft evidence', async () => {
+    const app = await reviewedDraft();
+    const inherited = structuredClone(app.controller.state) as SessionState & { draftCheck?: DraftCheckResult };
+    inherited.job = { id: 'interrupted-draft', kind: 'apply', status: 'running', tabId: 42, month: app.plan.settings.month, startedAt: '2026-11-02', updatedAt: '2026-11-02' };
+    inherited.progress = { jobId: inherited.job.id, phase: 'apply', completed: 0, total: 1, message: 'Checking draft' };
+    inherited.draftCheck = { date: app.day.date, entries: app.day.proposed, netMinutes: 480, saved: false, unchanged: true };
+    const recovered = await setup(inherited);
+    expect(recovered.controller.state.job).toMatchObject({ id: 'interrupted-draft', status: 'interrupted' });
+    expect(recovered.controller.state.run).toEqual(app.history);
+    expect(recovered.controller.state.snapshot).toBeUndefined(); expect(recovered.controller.state.plan?.canReview).toBe(false);
+    expect((recovered.stored() as typeof inherited).draftCheck).toBeUndefined();
+    await expect(recovered.controller.checkDraft(app.plan, app.revision, app.day.date)).rejects.toThrow('Vorschau');
+    expect(recovered.bridge.checkDayDraft).not.toHaveBeenCalled(); expect(recovered.bridge.applyDay).not.toHaveBeenCalled();
+  });
+});
 
 describe('write queue and recovery', () => {
   it('accepts reviewed snapshots and plans after Chrome storage reorders nested object keys', async () => {

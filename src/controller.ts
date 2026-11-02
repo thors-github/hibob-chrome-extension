@@ -2,15 +2,17 @@ import { t } from './i18n/index';
 import { buildMonthPlan } from './domain/index';
 import { assertWritablePlan } from './shared/validation';
 import { sameJsonValue } from './shared/json';
+import { netMinutes } from './shared/entries';
 import { assertApplyAuthorization, contextFingerprint } from './shared/context';
 import { isExtensionVersion, isNewerExtensionVersion } from './shared/updates';
-import type { AccountConfirmation, AdapterProgress, ApplyAuthorization, AttendanceContext, BookingPlan, DayPlan, DaySnapshot, JobState, MonthSnapshot, PlanEditLease, RunState, SessionState } from './shared/types';
+import type { AccountConfirmation, AdapterProgress, ApplyAuthorization, AttendanceContext, BookingPlan, DayPlan, DaySnapshot, DraftCheckResult, JobState, MonthSnapshot, PlanEditLease, RunState, SessionState } from './shared/types';
 
 export interface ControllerBridge {
   load(): Promise<SessionState | undefined>;
   save(state: SessionState): Promise<void>;
   scan(tabId: number, month: string, jobId: string): Promise<MonthSnapshot>;
   applyDay(tabId: number, day: DayPlan, context: AttendanceContext | undefined, jobId: string, authorization: ApplyAuthorization): Promise<DaySnapshot>;
+  checkDayDraft(tabId: number, day: DayPlan, context: AttendanceContext | undefined, jobId: string, authorization: ApplyAuthorization): Promise<DraftCheckResult>;
   cancel(tabId: number, jobId: string): Promise<void>;
   recover?(tabId: number, jobId: string): Promise<void>;
   checkUpdateIdle?(tabId: number | undefined): Promise<void>;
@@ -56,7 +58,7 @@ export class BookingController {
     validateStoredState(restored);
     // Consent is deliberately ephemeral, including when loading unknown extra fields.
     for (const item of [restored, restored.plan, restored.snapshot, restored.run]) if (object(item)) {
-      delete item.confirmation; delete item.accountConfirmation; delete item.authorization;
+      delete item.confirmation; delete item.accountConfirmation; delete item.authorization; delete item.draftCheck;
     }
     if (restored.run && (!Array.isArray(restored.run.results) || !restored.run.results.every(result => object(result) && typeof result.date === 'string' && typeof result.status === 'string'))) throw new Error(t('Der gespeicherte Buchungsverlauf ist ungültig. Vor weiteren Buchungen den HiBob-Zustand prüfen.'));
     if (restored.snapshot && (!object(restored.snapshot) || !Array.isArray(restored.snapshot.days))) throw new Error(t('Der gespeicherte Sitzungszustand ist ungültig. Bitte die Erweiterung neu laden.'));
@@ -228,14 +230,7 @@ export class BookingController {
 
   async apply(input: BookingPlan, expectedPlanRevision: number, confirmation?: AccountConfirmation): Promise<SessionState> {
     if (this.busy) throw new Error(t('Ein Vorgang läuft bereits.'));
-    const plan = this.state.plan;
-    if (expectedPlanRevision !== this.planRevision || this.approvedPlanRevision !== this.planRevision || !plan || !this.state.snapshot || input.id !== plan.id || !sameJsonValue(input, plan)) throw stalePlan();
-    assertWritablePlan(plan);
-    const authorization: ApplyAuthorization = {
-      planId: plan.id, planRevision: expectedPlanRevision, contextFingerprint: contextFingerprint(plan.snapshot.context),
-      ...(confirmation ? { confirmation: clone(confirmation) } : {}),
-    };
-    assertApplyAuthorization(plan.snapshot.context, authorization);
+    const { plan, authorization } = this.authorizePlan(input, expectedPlanRevision, confirmation);
     const tabId = this.requireTab(); this.busy = true; this.cancelRequested = false; this.state.error = undefined;
     const job = this.newJob('apply', tabId, plan.settings.month); this.state.job = job;
     const changes = plan.days.filter(day => day.action === 'create' || day.action === 'overwrite');
@@ -272,6 +267,53 @@ export class BookingController {
       finally { this.busy = false; }
     }
     if (failure) throw new Error(this.state.error || errorText(failure)); return clone(this.state);
+  }
+
+  /** Exercises the native writer's staging path without entering its Save branch. */
+  async checkDraft(input: BookingPlan, expectedPlanRevision: number, date: string, confirmation?: AccountConfirmation): Promise<{ state: SessionState; draftCheck: DraftCheckResult }> {
+    if (this.busy) throw new Error(t('Ein Vorgang läuft bereits.'));
+    const { plan, authorization } = this.authorizePlan(input, expectedPlanRevision, confirmation);
+    const day = plan.days.find(item => item.date === date);
+    if (!day?.eligible || !['create', 'overwrite'].includes(day.action) || !day.proposed.length) throw new Error(t('Dieser Tag ist nicht zum Schreiben freigegeben.'));
+    const tabId = this.requireTab(); this.busy = true; this.cancelRequested = false; this.state.error = undefined;
+    const job = this.newJob('apply', tabId, plan.settings.month); this.state.job = job;
+    this.state.progress = { jobId: job.id, phase: 'apply', completed: 0, total: 1, date, message: t('Tagesentwurf wird ohne Speichern geprüft …') };
+    let result: DraftCheckResult | undefined; let failure: unknown;
+    try {
+      await this.persist();
+      if (this.cancelRequested) throw new Error(t('Vorgang abgebrochen.'));
+      const checked = await this.bridge.checkDayDraft(tabId, day, plan.snapshot.context, job.id, authorization);
+      if (this.cancelRequested) throw new Error(t('Vorgang abgebrochen.'));
+      this.assertDraftCheck(day, checked);
+      result = { date: checked.date, entries: clone(checked.entries), netMinutes: checked.netMinutes, saved: false, unchanged: true };
+    } catch (error) { failure = error; this.state.error = errorText(error); }
+    finally {
+      this.state.progress = undefined;
+      if (this.state.job?.id === job.id) this.state.job = undefined;
+      this.invalidateScan();
+      try { await this.persist(); }
+      catch (error) { this.state.error ||= errorText(error); failure ??= error; this.touch(); }
+      finally { this.busy = false; }
+    }
+    if (failure) throw new Error(this.state.error || errorText(failure));
+    return { state: clone(this.state), draftCheck: result! };
+  }
+
+  private authorizePlan(input: BookingPlan, expectedPlanRevision: number, confirmation?: AccountConfirmation): { plan: BookingPlan; authorization: ApplyAuthorization } {
+    const plan = this.state.plan;
+    if (expectedPlanRevision !== this.planRevision || this.approvedPlanRevision !== this.planRevision || !plan || !this.state.snapshot || input.id !== plan.id || !sameJsonValue(input, plan)) throw stalePlan();
+    assertWritablePlan(plan);
+    const authorization: ApplyAuthorization = { planId: plan.id, planRevision: expectedPlanRevision, contextFingerprint: contextFingerprint(plan.snapshot.context), ...(confirmation ? { confirmation: clone(confirmation) } : {}) };
+    assertApplyAuthorization(plan.snapshot.context, authorization);
+    return { plan, authorization };
+  }
+
+  private assertDraftCheck(day: DayPlan, result: DraftCheckResult): void {
+    const validEntries = Array.isArray(result?.entries) && result.entries.every(entry => object(entry) && ['work', 'break'].includes(entry.type) && typeof entry.start === 'string' && typeof entry.end === 'string');
+    const ordered = (entries: DraftCheckResult['entries']) => [...entries].sort((a, b) => a.start.localeCompare(b.start) || a.end.localeCompare(b.end) || a.type.localeCompare(b.type));
+    if (!object(result) || result.date !== day.date || result.saved !== false || result.unchanged !== true || !validEntries || !Number.isSafeInteger(result.netMinutes) || result.netMinutes !== day.netMinutes || netMinutes(result.entries) !== day.netMinutes || !sameJsonValue(ordered(result.entries), ordered(day.proposed))) {
+      throw new Error(t('Die Entwurfsprüfung hat keine eindeutige Bestätigung für den unveränderten Tag geliefert. Bitte den Monat erneut einlesen.'));
+    }
   }
 
   async cancel(jobId?: string): Promise<void> {

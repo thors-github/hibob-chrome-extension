@@ -80,6 +80,28 @@ test('cancellation stops the local queue and cannot blindly resume', async ({ pa
   await expect(page.locator('#apply')).toBeDisabled();
 });
 
+test('local draft-only checking preserves example attendance and never persists its result', async ({ page }) => {
+  await openDemo(page);
+  await scan(page);
+  await skipConflicts(page);
+  const before = await page.evaluate(() => JSON.parse(sessionStorage.getItem('hibob-demo-session')!));
+  await page.locator('#apply').click();
+  await page.locator('#check-draft').click();
+  await expect(page.locator('#draft-check-result')).toBeVisible();
+  await expect(page.locator('#draft-check-result-title')).toContainText('nicht gespeichert');
+  await expect(page.locator('#apply')).toBeDisabled();
+  await expect(page.locator('#scan')).toBeEnabled();
+  const after = await page.evaluate(() => JSON.parse(sessionStorage.getItem('hibob-demo-session')!));
+  expect(after.demoSnapshot).toEqual(before.demoSnapshot);
+  expect(after.run).toEqual(before.run);
+  expect(after.snapshot).toBeUndefined();
+  expect(after.plan).toBeUndefined();
+  expect(JSON.stringify(after)).not.toContain('draftCheck');
+  await page.reload();
+  await expect(page.locator('#draft-check-result')).not.toBeVisible();
+  await expect(page.locator('#apply')).toBeDisabled();
+});
+
 test('regional requirements, manual exclusions and impossible weekly target', async ({ page }) => {
   await openDemo(page);
   await page.getByLabel('Bundesland', { exact: true }).selectOption('BY');

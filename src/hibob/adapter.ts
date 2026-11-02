@@ -1,9 +1,9 @@
 import { t } from '../i18n/index';
 import { netMinutes } from '../shared/entries';
 import { assertApplyAuthorization, contextFingerprint, isReviewableContext } from '../shared/context';
-import type { AdapterProgress, ApplyAuthorization, AttendanceContext, AttendanceEntry, DayPlan, DaySnapshot, MonthSnapshot } from '../shared/types';
+import type { AdapterProgress, ApplyAuthorization, AttendanceContext, AttendanceEntry, DayPlan, DaySnapshot, DraftCheckResult, MonthSnapshot } from '../shared/types';
 import type { AttendanceContextEvidence } from './context-reader';
-import { editorKey, fieldValue, inventoryKey, sameInventory, subtractInventory, type EditorValue } from './editor-inventory';
+import { changedFieldNames, editorKey, fieldValue, inventoryKey, sameInventory, subtractInventory, type EditorValue } from './editor-inventory';
 
 const PREFIX = 'time_attendance_employee_timesheet.';
 const PANEL = '#attendance-right-panel';
@@ -70,10 +70,8 @@ interface EditTarget {
   kind: 'work' | 'break';
   value: EditorValue;
   protectedValues: EditorValue[];
-  note: string;
-  reason: string;
-  metadata: string[];
 }
+interface PreparedDraft { panel: Element; before: DaySnapshot; completed: EditorValue[] }
 
 export class HiBobDomAdapter {
   private readonly doc: Document;
@@ -89,6 +87,8 @@ export class HiBobDomAdapter {
   private ownedPanel: Element | null = null;
   private ownedDate: string | null = null;
   private ownedContext: string | null = null;
+  private editPhase = 'prepare';
+  private editField = 'inventory';
 
   constructor(options: AdapterOptions = {}) {
     this.doc = options.document ?? document;
@@ -412,6 +412,7 @@ export class HiBobDomAdapter {
     const safeCell = this.cell(row, 'hoursWorked');
     if (!safeCell || !row.classList.contains('row-clickable')) throw new AdapterError(t('Der {date} bietet keinen unterstützten Tagesdialog.', { date: day.date }));
     // Start/end contains an Add entry action. A plain Hours worked cell opens only the read view.
+    this.assertNoManualForm(); // A manual form may have opened while account hashing awaited.
     this.click(safeCell);
     const panel = await this.waitFor(() => this.panel(), t('HiBob hat den Tagesdialog nicht geöffnet.'), signal);
     this.ownedPanel = panel;
@@ -492,15 +493,24 @@ export class HiBobDomAdapter {
     }));
   }
 
-  private draftError(kind: 'work' | 'break', reason: string): AdapterError {
-    return new DraftConflictError(t('HiBob-Tagesentwurf {date} ({type}): {reason}. Es wurde nicht gespeichert.', { date: this.ownedDate ?? '?', type: kind === 'work' ? t('Arbeit') : t('Pause'), reason }));
+  private draftError(kind: 'work' | 'break', reason: string, fields: string[] = []): AdapterError {
+    const phases: Record<string, string> = {
+      prepare: t('Beim Vorbereiten des Tagesentwurfs'), focus: t('Beim Fokussieren des Eingabefelds'), input: t('Nach der Zeiteingabe'),
+      focusout: t('Nach Verlassen des Eingabefelds'), settle: t('Beim Abwarten der HiBob-Verarbeitung'), add: t('Nach Hinzufügen eines Eintrags'), 'final-check': t('Bei der abschließenden Entwurfsprüfung'),
+    };
+    const labels: Record<string, string> = {
+      'clock-in-hours': t('Beginn: Stunden'), 'clock-in-minutes': t('Beginn: Minuten'), 'clock-out-hours': t('Ende: Stunden'), 'clock-out-minutes': t('Ende: Minuten'),
+      note: t('Notiz'), reason: t('Grund'), metadata: t('Zusatzdaten'), 'card-identity': t('Eintragszuordnung'), inventory: t('Eintragsübersicht'),
+    };
+    const diagnostic = t('Prüfschritt: {phase}. Betroffene Felder: {fields}.', { phase: phases[this.editPhase] ?? phases.prepare, fields: (fields.length ? fields : [this.editField]).map(field => labels[field] ?? labels.inventory).join(', ') });
+    return new DraftConflictError(`${t('HiBob-Tagesentwurf {date} ({type}): {reason}. Es wurde nicht gespeichert.', { date: this.ownedDate ?? '?', type: kind === 'work' ? t('Arbeit') : t('Pause'), reason: reason.replace(/[.!?]+$/, '') })} ${diagnostic}`);
   }
 
   private guardEdit(signal?: AbortSignal) { this.assertPage(signal); this.assertOwnedPanel(); }
 
   private target(panel: Element, value: EditorValue, protectedValues: EditorValue[]): EditTarget {
     if (value.kind !== 'work' && value.kind !== 'break') throw new AdapterError(t('Unbekannter HiBob-Eintragstyp.'));
-    const target: EditTarget = { kind: value.kind, value, protectedValues, note: value.note, reason: value.reason, metadata: [...value.metadata] };
+    const target: EditTarget = { kind: value.kind, value, protectedValues };
     this.resolveTarget(panel, target);
     return target;
   }
@@ -510,9 +520,9 @@ export class HiBobDomAdapter {
     const cards = this.readEditorCards(panel);
     if (cards.length < target.protectedValues.length + 1) throw new EditorShapeError(t('HiBob-Zeitfelder haben sich geändert.'));
     const remainder = subtractInventory(cards.map(card => card.value), target.protectedValues);
-    if (!remainder || remainder.length !== 1) throw this.draftError(target.kind, t('Vorhandene Einträge wurden unerwartet verändert'));
+    if (!remainder || remainder.length !== 1) throw this.draftError(target.kind, t('Vorhandene Einträge wurden unerwartet verändert'), changedFieldNames(target.protectedValues, cards.map(card => card.value)));
     const value = remainder[0];
-    if (editorKey(value) !== editorKey(target.value)) throw this.draftError(target.kind, t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
+    if (editorKey(value) !== editorKey(target.value)) throw this.draftError(target.kind, t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'), changedFieldNames([target.value], [value]));
     const candidates = cards.filter(card => editorKey(card.value) === editorKey(value));
     if (candidates.length !== 1) throw this.draftError(target.kind, t('Der neue Eintrag ist nicht eindeutig zuordenbar'));
     target.value = value;
@@ -535,43 +545,69 @@ export class HiBobDomAdapter {
     throw this.draftError(target.kind, t('Die Eintragsfelder sind nicht vollständig lesbar'));
   }
 
-  private async dispatchTargetEvent(panel: Element, target: EditTarget, field: number | 'note', name: 'input' | 'change' | 'blur', signal?: AbortSignal) {
+  private async guardEditingContext(signal?: AbortSignal): Promise<void> {
     this.guardEdit(signal);
+    const current = await this.context();
+    this.guardEdit(signal);
+    if (this.contextSignature(current) !== this.ownedContext) throw new AdapterError(t('Das HiBob-Konto oder das Browserdokument hat sich seit der Vorschau geändert. Bitte neu einlesen.'));
+  }
+
+  private targetControl(panel: Element, target: EditTarget, field: number | 'note'): HTMLInputElement | HTMLTextAreaElement {
     const card = this.resolveTarget(panel, target);
     const control = field === 'note' ? card.element.querySelector<HTMLTextAreaElement>('textarea') : this.editorFields(card.element)[field];
-    if (!control || control.disabled || control.readOnly) throw new AdapterError(t('HiBob-Zeitfeld ist nicht bearbeitbar.'));
-    const win = this.doc.defaultView!;
-    control.dispatchEvent(name === 'blur' ? new win.FocusEvent('blur', { bubbles: true }) : new win.Event(name, { bubbles: true }));
+    if (!control || !control.isConnected || control.disabled || control.readOnly) throw new AdapterError(t('HiBob-Zeitfeld ist nicht bearbeitbar.'));
+    return control;
+  }
+
+  /** HiBob commits timepicker state on native focusout, not synthetic blur/change. */
+  private async fillControl(panel: Element, target: EditTarget, field: number | 'note', value: string, signal?: AbortSignal) {
+    this.editField = field === 'note' ? 'note' : ['clock-in-hours', 'clock-in-minutes', 'clock-out-hours', 'clock-out-minutes'][field];
+    this.editPhase = 'focus';
+    const deadline = Date.now() + this.timeout;
+    while (true) {
+      await this.guardEditingContext(signal);
+      await this.refreshTarget(panel, target, signal);
+      const attempted = this.targetControl(panel, target, field);
+      attempted.focus({ preventScroll: true });
+      await this.guardEditingContext(signal);
+      await this.refreshTarget(panel, target, signal);
+      const current = this.targetControl(panel, target, field);
+      if (this.doc.activeElement === current) break;
+      if ((attempted.isConnected && attempted === current) || (this.doc.activeElement && this.doc.activeElement !== this.doc.body && this.doc.activeElement !== this.doc.documentElement)) throw this.draftError(target.kind, t('HiBob konnte das Zeitfeld nicht fokussieren.'));
+      if (Date.now() >= deadline) throw this.draftError(target.kind, t('HiBob konnte das Zeitfeld nicht fokussieren.'));
+      // A previous control's focusout may replace the prospective focus node.
+      // Only focus acquisition is repeated; values and input are never replayed.
+      await this.tick(signal);
+    }
+    this.guardEdit(signal);
+    const focused = this.targetControl(panel, target, field);
+    if (this.doc.activeElement !== focused) throw this.draftError(target.kind, t('HiBob konnte das Zeitfeld nicht fokussieren.'));
+    const prototype = field === 'note' ? this.doc.defaultView!.HTMLTextAreaElement.prototype : this.doc.defaultView!.HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, 'value')!.set!.call(focused, value);
+    target.value = field === 'note' ? { ...target.value, note: value } : { ...target.value, fields: target.value.fields.map((current, index) => index === field ? fieldValue(value) : current) as EditorValue['fields'] };
+    this.editPhase = 'input';
+    // The component may synchronously advance focus to minutes or blur minutes.
+    this.targetControl(panel, target, field).dispatchEvent(new this.doc.defaultView!.Event('input', { bubbles: true }));
+    await this.guardEditingContext(signal);
     await this.refreshTarget(panel, target, signal);
     this.guardEdit(signal);
+    this.editPhase = 'focusout';
+    const current = this.targetControl(panel, target, field);
+    if (this.doc.activeElement === current) current.blur();
+    await this.guardEditingContext(signal);
+    await this.refreshTarget(panel, target, signal);
+    this.editPhase = 'settle';
+    await this.tick(signal);
+    await this.guardEditingContext(signal);
+    await this.refreshTarget(panel, target, signal);
   }
 
   private async fillTarget(panel: Element, target: EditTarget, proposed: AttendanceEntry, signal?: AbortSignal) {
     const values = [...proposed.start.split(':'), ...proposed.end.split(':')].map(fieldValue);
-    for (let index = 0; index < 4; index++) {
-      this.guardEdit(signal);
-      const card = this.resolveTarget(panel, target);
-      const input = this.editorFields(card.element)[index];
-      if (fieldValue(input.value) !== values[index]) {
-        if (!input.isConnected || input.disabled || input.readOnly) throw new AdapterError(t('HiBob-Zeitfeld ist nicht bearbeitbar.'));
-        Object.getOwnPropertyDescriptor(this.doc.defaultView!.HTMLInputElement.prototype, 'value')!.set!.call(input, values[index]);
-        target.value = { ...target.value, fields: target.value.fields.map((value, field) => field === index ? values[index] : value) as EditorValue['fields'] };
-        for (const event of ['input', 'change', 'blur'] as const) await this.dispatchTargetEvent(panel, target, index, event, signal);
-        await this.tick(signal);
-        await this.refreshTarget(panel, target, signal);
-      }
-    }
+    // Matching displayed values must still receive a genuine focus/commit cycle.
+    for (let index = 0; index < 4; index++) await this.fillControl(panel, target, index, values[index], signal);
     this.guardEdit(signal);
-    const card = this.resolveTarget(panel, target);
-    const note = card.element.querySelector<HTMLTextAreaElement>('textarea');
-    if (note?.value) {
-      if (note.disabled || note.readOnly) throw new AdapterError(t('Eine bestehende Notiz kann nicht sicher entfernt werden.'));
-      target.note = '';
-      Object.getOwnPropertyDescriptor(this.doc.defaultView!.HTMLTextAreaElement.prototype, 'value')!.set!.call(note, '');
-      target.value = { ...target.value, note: '' };
-      for (const event of ['input', 'change', 'blur'] as const) await this.dispatchTargetEvent(panel, target, 'note', event, signal);
-      await this.tick(signal);
-    }
+    if (this.resolveTarget(panel, target).value.note) await this.fillControl(panel, target, 'note', '', signal);
     await this.refreshTarget(panel, target, signal);
   }
 
@@ -616,6 +652,9 @@ export class HiBobDomAdapter {
   private async cancelOwned() {
     const panel = this.panel();
     if (!panel || panel !== this.ownedPanel || localDateFromUi(text(panel.querySelector('.sticky-header p.b-display-3'))) !== this.ownedDate || this.contextSignature(await this.context()) !== this.ownedContext) { this.ownedPanel = null; this.ownedDate = null; this.ownedContext = null; return; }
+    // Context hashing awaits. A user may have opened a different day in this
+    // same sidebar while it ran; never close that newly selected form.
+    if (this.panel() !== panel || panel !== this.ownedPanel || localDateFromUi(text(panel.querySelector('.sticky-header p.b-display-3'))) !== this.ownedDate) { this.ownedPanel = null; this.ownedDate = null; this.ownedContext = null; return; }
     const cancel = [...panel.querySelectorAll<HTMLElement>('button')].find(button => text(button) === 'Cancel');
     const close = cancel ?? panel.querySelector<HTMLElement>('#rpp-close-btn');
     if (!close) throw new AdapterError(t('Eigener HiBob-Dialog hat keine unterstützte Schließen-Funktion.'));
@@ -667,7 +706,8 @@ export class HiBobDomAdapter {
   }
 
   private async addEntry(panel: Element, type: 'work' | 'break', expected: EditorValue[], signal?: AbortSignal): Promise<EditorValue> {
-    this.guardEdit(signal);
+    this.editPhase = 'add'; this.editField = 'inventory';
+    await this.guardEditingContext(signal);
     if (!sameInventory(this.readEditorCards(panel).map(card => card.value), expected)) throw this.draftError(type, t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
     let control = panel.querySelector<HTMLElement>(`button[data-icon-before="${type === 'work' ? 'clock-add' : 'break-add'}"]`);
     if (!control && type === 'work' && !expected.length) control = this.button(panel, ['Add entry']);
@@ -685,7 +725,7 @@ export class HiBobDomAdapter {
         else if (values.length > expected.length && Date.now() - stableSince >= this.settle) {
           if (values.length !== expected.length + 1) throw this.draftError(type, t('HiBob hat keine einzelne zusätzliche Eintragszeile bereitgestellt'));
           const added = subtractInventory(values, expected);
-          if (!added || added.length !== 1) throw this.draftError(type, t('Vorhandene Einträge wurden unerwartet verändert'));
+          if (!added || added.length !== 1) throw this.draftError(type, t('Vorhandene Einträge wurden unerwartet verändert'), changedFieldNames(expected, values));
           const value = added[0];
           if (value.kind !== type) throw this.draftError(type, t('HiBob hat einen anderen Eintragstyp hinzugefügt'));
           if (value.note || value.reason || value.metadata.length || value.fields.some((field, index) => field && (!/^\d{2}$/.test(field) || +field > (index % 2 ? 59 : 23)))) throw this.draftError(type, t('Der neue Eintrag enthält nicht unterstützte Zusatzdaten'));
@@ -738,69 +778,101 @@ export class HiBobDomAdapter {
     return shape(a) === shape(b);
   }
 
-  async applyDay(day: DayPlan, onProgress?: (progress: AdapterProgress) => void, signal?: AbortSignal, expectedContext?: AttendanceContext, authorization?: ApplyAuthorization): Promise<DaySnapshot> {
+  /** Shared native staging path. It never clicks Save or Submit. */
+  private async prepareDayDraft(day: DayPlan, onProgress?: (progress: AdapterProgress) => void, signal?: AbortSignal, expectedContext?: AttendanceContext, authorization?: ApplyAuthorization): Promise<PreparedDraft> {
+    this.editPhase = 'prepare'; this.editField = 'inventory';
     this.assertPage(signal);
     this.assertNoManualForm();
     await this.assertContext(expectedContext, authorization);
     if (!['create', 'overwrite'].includes(day.action) || !day.eligible || !/^\d{4}-\d{2}-\d{2}$/.test(day.date)) throw new AdapterError(t('Dieser Tag ist nicht zum Schreiben freigegeben.'));
     this.validateProposed(day.proposed);
     await this.selectMonth(day.date.slice(0, 7), signal);
+    const current = await this.findDay(day.date, signal);
+    if (current.absence || current.nonWorking) throw new AdapterError(t('In HiBob ist inzwischen eine Abwesenheit oder ein arbeitsfreier Tag eingetragen.'));
+    const panel = await this.openDay(current, signal, expectedContext);
+    await this.assertContext(expectedContext, authorization);
+    const before = await this.inspectDay(current, panel, signal);
+    if (before.fingerprint !== day.fingerprint || !before.editable || before.unsupportedReason) throw new AdapterError(t('Der Tag hat sich seit der Vorschau geändert oder ist nicht vollständig bearbeitbar. Bitte neu einlesen.'));
+    if (day.action === 'create' && before.entries.length) throw new AdapterError(t('Der Tag enthält inzwischen Einträge.'));
+    await this.assertContext(expectedContext, authorization);
+    await this.enterEdit(panel, signal);
+    // Only empty drafts created by opening the editor may be removed. Saved segments are never deleted.
+    if (before.entries.length) await this.removeEmptyDrafts(panel, signal);
+    const available = this.readEditorCards(panel).map(card => card.value);
+    if (available.some(value => value.kind !== 'work' && value.kind !== 'break')) throw new AdapterError(t('Unbekannter HiBob-Eintragstyp.'));
+    if (!before.entries.length && available.some(value => value.note || value.reason || value.metadata.length)) throw this.draftError('work', t('Der neue Eintrag enthält nicht unterstützte Zusatzdaten'));
+    for (const type of ['work', 'break'] as const) {
+      const existingCount = available.filter(entry => entry.kind === type).length;
+      if (existingCount > day.proposed.filter(entry => entry.type === type).length) throw new AdapterError(t('Der Austausch würde gespeicherte Segmente einzeln löschen. Diese HiBob-Variante wird vorsichtshalber nicht automatisch überschrieben; bitte den Tag manuell bereinigen und neu einlesen.'));
+    }
+    onProgress?.({ phase: 'apply', date: day.date, completed: 0, total: 1, message: t('Prüfe und fülle Tagesentwurf') });
+    const completed: EditorValue[] = [];
+    for (const proposed of day.proposed) {
+      this.guardEdit(signal);
+      const ledger = [...completed, ...available];
+      if (!sameInventory(this.readEditorCards(panel).map(card => card.value), ledger)) throw this.draftError(proposed.type, t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
+      const candidates = available.filter(candidate => candidate.kind === proposed.type).sort((a, b) => editorKey(a).localeCompare(editorKey(b)));
+      let value: EditorValue;
+      if (candidates.length) {
+        value = candidates[0];
+        available.splice(available.indexOf(value), 1);
+      } else value = await this.addEntry(panel, proposed.type, ledger, signal);
+      const target = this.target(panel, value, [...completed, ...available]);
+      await this.fillTarget(panel, target, proposed, signal);
+      completed.push(target.value);
+    }
+    this.guardEdit(signal);
+    if (available.length || !sameInventory(this.readEditorCards(panel).map(card => card.value), completed)) throw this.draftError('work', t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
+    this.assertPreparedDraft(panel, completed, day.proposed, signal);
+    return { panel, before, completed };
+  }
+
+  /** Synchronous final gate; callers must not await between this check and Save. */
+  private assertPreparedDraft(panel: Element, completed: EditorValue[], proposed: AttendanceEntry[], signal?: AbortSignal): HTMLElement {
+    this.editPhase = 'final-check'; this.editField = 'inventory';
+    this.guardEdit(signal);
+    if (!sameInventory(this.readEditorCards(panel).map(card => card.value), completed)) throw this.draftError('work', t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
+    if (!this.sameEntries(this.readPanelEntries(panel), proposed)) throw new AdapterError(t('Der HiBob-Entwurf einschließlich Notizen und Gründen stimmt nicht mit der Vorschau überein.'));
+    const error = this.validationError(panel);
+    if (error) throw new AdapterError(t('HiBob lehnt den Entwurf ab: {error}', { error }));
+    const save = this.button(panel, ['Save']);
+    if (save.hasAttribute('disabled') || save.getAttribute('aria-disabled') === 'true' || save.closest('[data-disabled="true"]')) throw new AdapterError(t('Das HiBob-Steuerelement ist nicht verfügbar.'));
+    return save;
+  }
+
+  async checkDayDraft(day: DayPlan, onProgress?: (progress: AdapterProgress) => void, signal?: AbortSignal, expectedContext?: AttendanceContext, authorization?: ApplyAuthorization): Promise<DraftCheckResult> {
+    try {
+      const prepared = await this.prepareDayDraft(day, onProgress, signal, expectedContext, authorization);
+      await this.assertContext(expectedContext, authorization);
+      this.assertPreparedDraft(prepared.panel, prepared.completed, day.proposed, signal);
+      const entries = this.readPanelEntries(prepared.panel).sort((a, b) => a.start.localeCompare(b.start) || a.type.localeCompare(b.type));
+      const minutes = netMinutes(entries);
+      if (minutes === null) throw new AdapterError(t('Die geplanten Einträge sind unvollständig, überlappend oder nicht chronologisch.'));
+      await this.cancelOwned();
+      this.assertPage(signal);
+      await this.assertContext(expectedContext, authorization);
+      const afterRow = await this.findDay(day.date, signal);
+      const verification = await this.openDay(afterRow, signal, expectedContext);
+      await this.inspectDay(afterRow, verification, signal);
+      await this.assertContext(expectedContext, authorization);
+      this.guardEdit(signal);
+      const after = this.readSnapshot(afterRow, verification);
+      if (after.fingerprint !== prepared.before.fingerprint || after.reportedMinutes !== prepared.before.reportedMinutes) throw new AdapterError(t('HiBob hat den ursprünglichen Tageszustand nach dem Entwurfstest nicht unverändert zurückgegeben. Bitte den Tag manuell prüfen.'), true);
+      await this.cancelOwned();
+      onProgress?.({ phase: 'apply', date: day.date, completed: 1, total: 1, message: t('Tagesentwurf geprüft und unverändert verworfen') });
+      return { date: day.date, entries, netMinutes: minutes, saved: false, unchanged: true };
+    } finally { await this.cancelOwned(); }
+  }
+
+  async applyDay(day: DayPlan, onProgress?: (progress: AdapterProgress) => void, signal?: AbortSignal, expectedContext?: AttendanceContext, authorization?: ApplyAuthorization): Promise<DaySnapshot> {
     let saveClicked = false;
     let verificationOpened = false;
     try {
-      const current = await this.findDay(day.date, signal);
-      if (current.absence || current.nonWorking) throw new AdapterError(t('In HiBob ist inzwischen eine Abwesenheit oder ein arbeitsfreier Tag eingetragen.'));
-      const panel = await this.openDay(current, signal, expectedContext);
+      const { panel, completed } = await this.prepareDayDraft(day, onProgress, signal, expectedContext, authorization);
       await this.assertContext(expectedContext, authorization);
-      const before = await this.inspectDay(current, panel, signal);
-      if (before.fingerprint !== day.fingerprint || !before.editable || before.unsupportedReason) throw new AdapterError(t('Der Tag hat sich seit der Vorschau geändert oder ist nicht vollständig bearbeitbar. Bitte neu einlesen.'));
-      if (day.action === 'create' && before.entries.length) throw new AdapterError(t('Der Tag enthält inzwischen Einträge.'));
-      await this.assertContext(expectedContext, authorization);
-      await this.enterEdit(panel, signal);
-      // Only empty drafts created by opening the editor may be removed. Saved segments are never deleted.
-      if (before.entries.length) await this.removeEmptyDrafts(panel, signal);
-      const available = this.readEditorCards(panel).map(card => card.value);
-      if (available.some(value => value.kind !== 'work' && value.kind !== 'break')) throw new AdapterError(t('Unbekannter HiBob-Eintragstyp.'));
-      if (!before.entries.length && available.some(value => value.note || value.reason || value.metadata.length)) throw this.draftError('work', t('Der neue Eintrag enthält nicht unterstützte Zusatzdaten'));
-      for (const type of ['work', 'break'] as const) {
-        const existingCount = available.filter(entry => entry.kind === type).length;
-        if (existingCount > day.proposed.filter(entry => entry.type === type).length) throw new AdapterError(t('Der Austausch würde gespeicherte Segmente einzeln löschen. Diese HiBob-Variante wird vorsichtshalber nicht automatisch überschrieben; bitte den Tag manuell bereinigen und neu einlesen.'));
-      }
-      onProgress?.({ phase: 'apply', date: day.date, completed: 0, total: 1, message: t('Prüfe und fülle Tagesentwurf') });
-      const completed: EditorValue[] = [];
-      for (const proposed of day.proposed) {
-        this.guardEdit(signal);
-        const ledger = [...completed, ...available];
-        if (!sameInventory(this.readEditorCards(panel).map(card => card.value), ledger)) throw this.draftError(proposed.type, t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
-        const candidates = available.filter(candidate => candidate.kind === proposed.type).sort((a, b) => editorKey(a).localeCompare(editorKey(b)));
-        let value: EditorValue;
-        if (candidates.length) {
-          value = candidates[0];
-          available.splice(available.indexOf(value), 1);
-        } else value = await this.addEntry(panel, proposed.type, ledger, signal);
-        const target = this.target(panel, value, [...completed, ...available]);
-        await this.fillTarget(panel, target, proposed, signal);
-        completed.push(target.value);
-      }
-      this.guardEdit(signal);
-      if (available.length || !sameInventory(this.readEditorCards(panel).map(card => card.value), completed)) throw this.draftError('work', t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
-      const draft = this.readPanelEntries(panel);
-      if (!this.sameEntries(draft, day.proposed)) throw new AdapterError(t('Der HiBob-Entwurf einschließlich Notizen und Gründen stimmt nicht mit der Vorschau überein.'));
-      const error = this.validationError(panel);
-      if (error) throw new AdapterError(t('HiBob lehnt den Entwurf ab: {error}', { error }));
-      this.assertPage(signal); // Cancellation is honoured until this exact boundary.
-      this.assertOwnedPanel();
-      await this.assertContext(expectedContext, authorization);
-      this.assertPage(signal);
-      this.assertOwnedPanel();
-      // Context hashing is asynchronous. Re-read the complete draft after that
-      // await so edits made while hashing cannot slip past the final Save gate.
-      if (!sameInventory(this.readEditorCards(panel).map(card => card.value), completed)) throw this.draftError('work', t('Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein'));
-      if (!this.sameEntries(this.readPanelEntries(panel), day.proposed)) throw new AdapterError(t('Der HiBob-Entwurf einschließlich Notizen und Gründen stimmt nicht mit der Vorschau überein.'));
-      const finalError = this.validationError(panel);
-      if (finalError) throw new AdapterError(t('HiBob lehnt den Entwurf ab: {error}', { error: finalError }));
-      const save = this.button(panel, ['Save']);
-      if (save.hasAttribute('disabled') || save.getAttribute('aria-disabled') === 'true' || save.closest('[data-disabled="true"]')) throw new AdapterError(t('Das HiBob-Steuerelement ist nicht verfügbar.'));
+      // Staging and context checks await. Re-read every field after those awaits,
+      // with no asynchronous boundary between the final gate and the Save click.
+      const save = this.assertPreparedDraft(panel, completed, day.proposed, signal);
       saveClicked = true;
       this.click(save);
       await this.waitFor(() => !this.panel(), t('HiBob hat den Speichervorgang nicht eindeutig abgeschlossen.'));
@@ -837,3 +909,5 @@ export class HiBobDomAdapter {
 
 export const scanMonth = (month: string, onProgress?: (progress: AdapterProgress) => void, signal?: AbortSignal) => new HiBobDomAdapter().scanMonth(month, onProgress, signal);
 export const applyDay = (day: DayPlan, onProgress?: (progress: AdapterProgress) => void, signal?: AbortSignal, expectedContext?: AttendanceContext, authorization?: ApplyAuthorization) => new HiBobDomAdapter().applyDay(day, onProgress, signal, expectedContext, authorization);
+
+export const checkDayDraft = (day: DayPlan, onProgress?: (progress: AdapterProgress) => void, signal?: AbortSignal, expectedContext?: AttendanceContext, authorization?: ApplyAuthorization) => new HiBobDomAdapter().checkDayDraft(day, onProgress, signal, expectedContext, authorization);

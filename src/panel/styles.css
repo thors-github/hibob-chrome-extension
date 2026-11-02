@@ -143,6 +143,13 @@ dialog::backdrop { background: #20333e66; }
 .ack-label input { margin-top: 2px; }
 .account-confirmation { margin-top: 16px; }
 .account-confirmation .ack-label { margin-top: 0; line-height: 1.5; }
+.draft-check-controls { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.draft-check-controls .hint { margin: 0; }
+.draft-check-controls .button { margin-top: 4px; }
+.draft-check-result { margin-top: 16px; }
+.draft-check-result h2 { font-size: 15px; }
+.draft-check-result .confirm-details { grid-template-columns: minmax(0, 95px) minmax(0, 1fr); font-size: 12px; }
+.draft-check-result .confirm-details dd { min-width: 0; font-weight: 500; }
 .confirm-details { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin: 17px 0; font-size: 13px; }
 .confirm-details dd { margin: 0; font-weight: 600; }
 .confirm-details dt { color: var(--muted); }

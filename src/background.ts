@@ -35,7 +35,7 @@ async function ensureAdapter(tabId: number, allowHomeNavigation = false): Promis
     catch { throw new Error(t('Der Zugriff auf den HiBob-Tab ist abgelaufen. Bitte dort erneut auf das Extension-Symbol klicken.')); }
     try { ping = await chrome.tabs.sendMessage(tabId, { type: 'PING' } satisfies AdapterCommand); } catch { /* Report a protocol-safe recovery action below. */ }
   }
-  if (!ping?.ok || ping.protocolVersion !== 3 || ping.extensionVersion !== adapterBuildVersion) throw new Error(t('Der HiBob-Tab verwendet eine ältere oder nicht erreichbare Verbindung. Bitte den HiBob-Tab neu laden und die Erweiterung dort erneut öffnen.'));
+  if (!ping?.ok || ping.protocolVersion !== 4 || ping.extensionVersion !== adapterBuildVersion) throw new Error(t('Der HiBob-Tab verwendet eine ältere oder nicht erreichbare Verbindung. Bitte den HiBob-Tab neu laden und die Erweiterung dort erneut öffnen.'));
   return ping;
 }
 
@@ -70,6 +70,7 @@ const controller = new BookingController({
   save: async state => { await chrome.storage.session.set({ sessionState: state }); },
   scan: async (tabId, month, jobId) => { const response = await request(tabId, { type: 'SCAN_MONTH', month, jobId }); if (!response.snapshot) throw new Error(t('Kein Monatsstand empfangen.')); return response.snapshot; },
   applyDay: async (tabId, day, context, jobId, authorization) => { const response = await request(tabId, { type: 'APPLY_DAY', day, context, jobId, authorization }); if (!response.day) throw new TransportError(t('Keine Lesebestätigung nach dem Speichern empfangen.'), true); return response.day; },
+  checkDayDraft: async (tabId, day, context, jobId, authorization) => { const response = await request(tabId, { type: 'CHECK_DAY_DRAFT', day, context, jobId, authorization }); if (!response.draftCheck) throw new TransportError(t('Die Entwurfsprüfung hat keine eindeutige Bestätigung für den unveränderten Tag geliefert. Bitte den Monat erneut einlesen.')); return response.draftCheck; },
   cancel: async (tabId, jobId) => { cancellationGeneration++; await chrome.tabs.sendMessage(tabId, { type: 'CANCEL', jobId } satisfies AdapterCommand); },
   recover: recoverAdapter,
   checkUpdateIdle: async tabId => {
@@ -113,7 +114,7 @@ chrome.action.onClicked.addListener(tab => {
 
 chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
   if (!message || typeof message !== 'object' || !('type' in message) || typeof message.type !== 'string') return;
-  const m = message as { type: string; month?: string; plan?: BookingPlan; progress?: AdapterProgress; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation };
+  const m = message as { type: string; month?: string; date?: string; plan?: BookingPlan; progress?: AdapterProgress; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation };
   if (m.type === 'ADAPTER_PROGRESS') {
     void ensureInitialized().then(async () => { if (sender.id === chrome.runtime.id && sender.tab?.id === controller.state.tabId && m.progress) await controller.reportProgress(m.progress); }).catch(() => {});
     return;
@@ -122,7 +123,11 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
   if (sender.id !== chrome.runtime.id || sender.tab || !sender.url?.startsWith(chrome.runtime.getURL('sidepanel.html'))) { sendResponse({ ok: false, error: t('Diese Aktion ist nur im Extension-Seitenpanel verfügbar.') }); return; }
   void (async () => {
     await ensureInitialized();
-    switch (m.type) {
+    if (m.type === 'PANEL_CHECK_DRAFT') {
+      if (!m.plan) throw new Error(t('Vorschau fehlt.'));
+      return { ok: true, ...await controller.checkDraft(m.plan, m.expectedPlanRevision ?? -1, m.date ?? '', m.confirmation) };
+    }
+    const state = await (async () => { switch (m.type) {
       case 'PANEL_GET_STATE': return controller.state;
       case 'PANEL_SCAN': return controller.scan(m.month ?? '');
       case 'PANEL_INVALIDATE_PLAN': return controller.invalidatePlan(m.expectedPlanRevision ?? -1, m.changeId ?? '');
@@ -131,7 +136,8 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       case 'PANEL_CANCEL': if (!m.jobId) throw new Error(t('Der laufende Vorgang wurde geändert. Bitte den aktuellen Status prüfen.')); await controller.cancel(m.jobId); return controller.state;
       case 'PANEL_ACTIVATE_UPDATE': return controller.activateUpdate();
       default: throw new Error(t('Unbekannte Aktion.'));
-    }
-  })().then(state => sendResponse({ ok: true, state })).catch(error => sendResponse({ ok: false, state: controller.state, error: error instanceof Error ? error.message : String(error) }));
+    } })();
+    return { ok: true, state };
+  })().then(response => sendResponse(response)).catch(error => sendResponse({ ok: false, state: controller.state, error: error instanceof Error ? error.message : String(error) }));
   return true;
 });

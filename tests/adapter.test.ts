@@ -19,7 +19,7 @@ function fixture(options: {
   rerenderOnEvent?: boolean; reverseTimeControls?: boolean; reorderCards?: boolean; normalizeHours?: boolean;
   initialPrefill?: AttendanceEntry; addedPrefill?: AttendanceEntry; addDelayMs?: number; transientUnmountMs?: number;
   addBehavior?: 'none' | 'multiple' | 'wrong-kind' | 'change-existing' | 'duplicate' | 'extras';
-  onEditorEvent?: (name: string) => void; onAdd?: () => void;
+  onEditorEvent?: (name: string) => void; onAdd?: () => void; onNoteInput?: () => void; focusFailure?: boolean; cancelBehavior?: 'ok' | 'timeout' | 'changes-persisted';
   timing?: { settleMs?: number; timeoutMs?: number; pollMs?: number; stabilityMs?: number; readinessTimeoutMs?: number; rowSeekTimeoutMs?: number };
 } = {}) {
   const identity: Extract<AttendanceContext, { mode: 'stable-identity' }> = { mode: 'stable-identity', documentId: crypto.randomUUID(), employeeKey: 'fixture-profile-A', tenantKey: 'fixture-tenant-A' };
@@ -95,33 +95,51 @@ function fixture(options: {
       forms.append(element);
       const fields = ['start', 'end'].flatMap(endpoint => ['hours', 'minutes'].map(part => element.querySelector<HTMLInputElement>(`[data-endpoint="${endpoint}"] .btmpckr-input-${part}`)!));
       const values = [...(entry.start ? entry.start.split(':') : ['', '']), ...(entry.end ? entry.end.split(':') : ['', ''])];
-      const update = () => {
-        staged[index].start = fields[0].value || fields[1].value ? `${fields[0].value}:${fields[1].value}` : '';
-        staged[index].end = fields[2].value || fields[3].value ? `${fields[2].value}:${fields[3].value}` : '';
+      const rerender = () => {
+        if (options.rerenderOnEvent === false) return;
+        if (options.transientUnmountMs) { forms.innerHTML = ''; setTimeout(editor, options.transientUnmountMs); } else editor();
       };
       fields.forEach((input, i) => {
         input.value = options.normalizeHours && i % 2 === 0 && values[i] ? String(+values[i]) : values[i];
-        for (const name of ['input', 'change', 'blur']) input.addEventListener(name, () => {
-          update();
-          if (options.rerenderOnEvent !== false) {
-            if (options.transientUnmountMs) { forms.innerHTML = ''; setTimeout(editor, options.transientUnmountMs); } else editor();
-          }
-          if (name === 'input') options.onInput?.();
-          options.onEditorEvent?.(name);
+        if (options.focusFailure) input.focus = () => {};
+        input.addEventListener('focusin', () => options.onEditorEvent?.('focus'));
+        // Native HiBob stores the component values on host focusout only.
+        input.addEventListener('focusout', () => {
+          // Destroyed Angular components unsubscribe their native listeners.
+          if (!input.isConnected) return;
+          const model = [...(staged[index].start ? staged[index].start.split(':') : ['', '']), ...(staged[index].end ? staged[index].end.split(':') : ['', ''])];
+          model[i] = input.value ? String(+input.value).padStart(2, '0') : '';
+          staged[index].start = model[0] || model[1] ? `${model[0]}:${model[1]}` : '';
+          staged[index].end = model[2] || model[3] ? `${model[2]}:${model[3]}` : '';
+          rerender();
+          options.onEditorEvent?.('focusout');
+        });
+        input.addEventListener('input', () => {
+          if (!input.isConnected) return;
+          // The real component advances from a two-digit hour to minutes, and
+          // blurs two-digit minutes. Synthetic blur/change do not commit state.
+          if (input.value.length > 1) { if (i % 2 === 0) fields[i + 1].focus(); else input.blur(); }
+          options.onInput?.();
+          options.onEditorEvent?.('input');
         });
       });
       const note = element.querySelector('textarea')!;
       note.value = entry.note ?? '';
-      for (const name of ['input', 'change', 'blur']) note.addEventListener(name, () => {
+      note.addEventListener('input', () => {
         staged[index].note = note.value;
-        if (options.rerenderOnEvent !== false) editor();
-        options.onEditorEvent?.(name);
+        rerender();
+        options.onNoteInput?.();
+        options.onEditorEvent?.('note-input');
       });
       element.querySelector('[data-icon-before="delete"]')!.addEventListener('click', () => { if (staged[index].start || staged[index].end) deletes++; staged.splice(index, 1); editor(); options.onEditorEvent?.('delete'); });
     });
     panel.querySelector('[data-icon-before="clock-add"]')!.addEventListener('click', () => appendEntry('work'));
     panel.querySelector('[data-icon-before="break-add"]')!.addEventListener('click', () => appendEntry('break'));
-    [...panel.querySelectorAll('button')].find(b => b.textContent === 'Cancel')!.addEventListener('click', () => panel.setAttribute('aria-hidden', 'true'));
+    [...panel.querySelectorAll('button')].find(b => b.textContent === 'Cancel')!.addEventListener('click', () => {
+      if (options.cancelBehavior === 'timeout') return;
+      if (options.cancelBehavior === 'changes-persisted') { persisted = [work('09:00', '17:00')]; renderRows(); }
+      panel.setAttribute('aria-hidden', 'true');
+    });
     [...panel.querySelectorAll('button')].find(b => b.textContent === 'Save')!.addEventListener('click', () => {
       saves++;
       if (options.save === 'timeout') return;
@@ -187,7 +205,7 @@ function fixture(options: {
     });
   }
   renderRows();
-  return { replaceViewport, get viewport() { return viewport; }, identity, reviewedContext: undefined as AttendanceContext | undefined, reviewedAuthorization: undefined as ApplyAuthorization | undefined, adapter: new HiBobDomAdapter({ document, location: () => 'https://app.hibob.com/attendance/my-attendance', settleMs: 1, timeoutMs: 60, pollMs: 1, stabilityMs: 1, readinessTimeoutMs: 3000, rowSeekTimeoutMs: 1000, documentId: identity.documentId, readContext, ...options.timing }), saves: () => saves, opens: () => opens, deletes: () => deletes, additions: () => additions, entries: () => persisted, panel };
+  return { replaceViewport, get viewport() { return viewport; }, identity, reviewedContext: undefined as AttendanceContext | undefined, reviewedAuthorization: undefined as ApplyAuthorization | undefined, adapter: new HiBobDomAdapter({ document, location: () => 'https://app.hibob.com/attendance/my-attendance', settleMs: 1, timeoutMs: 60, pollMs: 1, stabilityMs: 1, readinessTimeoutMs: 3000, rowSeekTimeoutMs: 1000, documentId: identity.documentId, readContext, ...options.timing }), saves: () => saves, opens: () => opens, deletes: () => deletes, additions: () => additions, entries: () => persisted, staged: () => structuredClone(staged), panel };
 }
 
 function toMinutes(time: string) { return +time.slice(0, 2) * 60 + +time.slice(3); }
@@ -631,7 +649,8 @@ describe('final draft integrity after asynchronous context hashing', () => {
     const contextReader = async (): Promise<AttendanceContextEvidence> => {
       const panels = [...document.querySelectorAll('.entry-panel')];
       const filled = panels.length === 3 && panels.every(panel => [...panel.querySelectorAll<HTMLInputElement>('input[type="tel"]')].every(input => input.value));
-      if (filled && !paused) { paused = true; reached(); await gate; }
+      const finalCheck = (app.adapter as unknown as { editPhase: string }).editPhase === 'final-check';
+      if (filled && finalCheck && !paused) { paused = true; reached(); await gate; }
       return { mode: 'user-confirmed-ui', pageUrl: attendanceUrl, markerFingerprint: 'same-visible-markers' };
     };
     const app = fixture({ contextReader });
@@ -702,7 +721,7 @@ describe('semantic draft inventory across native rerenders', () => {
     expect(app.additions()).toBe(0);
     expect(app.entries()).toEqual([work('08:00', '12:00'), work('08:00', '12:00')]);
   });
-  it.each(['input', 'change', 'blur', 'delete', 'add'] as const)('honours cancellation immediately after the native %s event', async name => {
+  it.each(['input', 'focus', 'focusout', 'delete', 'add'] as const)('honours cancellation immediately after the native %s event', async name => {
     const controller = new AbortController();
     const app = fixture({
       ...(name === 'delete' ? { entries: [work()] } : {}),
@@ -753,10 +772,11 @@ describe('note staging cancellation after a native rerender', () => {
     const controller = new AbortController();
     const original = [{ ...planned[0], note: 'Reviewed old note' }];
     const events: string[] = [];
-    const app = fixture({ entries: original, onEditorEvent: name => { events.push(name); if (name === 'input') controller.abort(); } });
+    const app = fixture({ entries: original, onEditorEvent: name => { events.push(name); }, onNoteInput: () => controller.abort() });
     const plan = await planFor(app);
     await expect(applyPlan(app, plan, undefined, controller.signal)).rejects.toThrow();
-    expect(events).toEqual(['delete', 'input']);
+    expect(events.at(-1)).toBe('note-input');
+    expect(events.filter(name => name === 'note-input')).toHaveLength(1);
     expect(app.saves()).toBe(0);
     expect(app.entries()).toEqual(original);
     expect(app.panel.getAttribute('aria-hidden')).toBe('true');
@@ -771,5 +791,199 @@ describe('transient native editor mounts', () => {
     expect(app.entries()).toEqual(planned);
     expect(app.saves()).toBe(1);
     expect(app.additions()).toBe(2);
+  });
+});
+
+describe('native focusout timepicker commit contract', () => {
+  it('reproduces the old Break failure when only synthetic input/change/blur are emitted', async () => {
+    const app = fixture({ rerenderOnEvent: false });
+    const plan = await planFor(app);
+    type LegacyTarget = { value: { kind: string; fields: [string, string, string, string]; note: string; reason: string; metadata: string[] } };
+    const internal = app.adapter as unknown as {
+      fillControl(panel: Element, target: LegacyTarget, field: number | 'note', value: string, signal?: AbortSignal): Promise<void>;
+      targetControl(panel: Element, target: LegacyTarget, field: number | 'note'): HTMLInputElement;
+      refreshTarget(panel: Element, target: LegacyTarget, signal?: AbortSignal): Promise<void>;
+    };
+    // Recreate the former event path without changing production source. The
+    // fixture's component model commits only real focusout, exactly as HiBob.
+    internal.fillControl = async (panel, target, field, value, signal) => {
+      const input = internal.targetControl(panel, target, field);
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
+      target.value = { ...target.value, fields: target.value.fields.map((current, index) => index === field ? value : current) as LegacyTarget['value']['fields'] };
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      input.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+      await internal.refreshTarget(panel, target, signal);
+    };
+    await expect(applyPlan(app, plan)).rejects.toThrow(/\((Pause|Break)\).*unerwartet verändert/);
+    expect(app.additions()).toBe(1);
+    expect(app.saves()).toBe(0);
+    expect(app.entries()).toEqual([]);
+  });
+  it('commits the same input model with real focusout before Add rebuilds cards', async () => {
+    const app = fixture({ rerenderOnEvent: false });
+    await applyPlan(app, await planFor(app));
+    expect(app.entries()).toEqual(planned);
+    expect(app.saves()).toBe(1);
+  });
+  it('focuses and commits all fields even when every displayed time already matches', async () => {
+    const commits: string[] = [];
+    const app = fixture({ entries: planned, rerenderOnEvent: false, onEditorEvent: event => commits.push(event) });
+    const plan = await planFor(app);
+    commits.length = 0;
+    await applyPlan(app, plan);
+    expect(commits.filter(event => event === 'focusout')).toHaveLength(12);
+    expect(commits.filter(event => event === 'input')).toHaveLength(12);
+    expect(app.entries()).toEqual(planned);
+    expect(app.saves()).toBe(1);
+  });
+  it('stops before input if a connected control cannot take focus', async () => {
+    let inputs = 0;
+    const app = fixture({ focusFailure: true, onInput: () => inputs++ });
+    await expect(applyPlan(app, await planFor(app))).rejects.toThrow('fokussieren');
+    expect(inputs).toBe(0);
+    expect(app.saves()).toBe(0);
+    expect(app.entries()).toEqual([]);
+  });
+  it('honours cancellation while focusout replaces the prospective next control', async () => {
+    const controller = new AbortController();
+    let focusouts = 0;
+    let inputs = 0;
+    const app = fixture({ onInput: () => inputs++, onEditorEvent: event => {
+      if (event === 'focusout' && ++focusouts === 1) controller.abort();
+    } });
+    await expect(applyPlan(app, await planFor(app), undefined, controller.signal)).rejects.toThrow('abgebrochen');
+    expect(inputs).toBe(1);
+    expect(app.saves()).toBe(0);
+    expect(app.entries()).toEqual([]);
+  });
+});
+
+describe('shared writer draft-only checks', () => {
+  it('stages all segments, cancels, reopens and proves the original empty day unchanged', async () => {
+    const app = fixture({ reverseTimeControls: true, reorderCards: true });
+    const plan = await planFor(app);
+    const result = await app.adapter.checkDayDraft(plan, undefined, undefined, app.reviewedContext, app.reviewedAuthorization);
+    expect(result).toEqual({ date: plan.date, entries: planned.map(entry => ({ ...entry, note: undefined, reason: undefined })), netMinutes: 480, saved: false, unchanged: true });
+    expect(app.saves()).toBe(0);
+    expect(app.entries()).toEqual([]);
+    expect(app.panel.getAttribute('aria-hidden')).toBe('true');
+  });
+  it('preserves original entries and notes after an overwrite rehearsal', async () => {
+    const original = [{ ...work(), note: 'Original reviewed note' }];
+    const app = fixture({ entries: original });
+    const plan = await planFor(app);
+    const result = await app.adapter.checkDayDraft(plan, undefined, undefined, app.reviewedContext, app.reviewedAuthorization);
+    expect(result.saved).toBe(false);
+    expect(result.unchanged).toBe(true);
+    expect(result.entries.map(({ type, start, end }) => ({ type, start, end }))).toEqual(planned);
+    expect(app.entries()).toEqual(original);
+    expect(app.saves()).toBe(0);
+    expect(app.panel.getAttribute('aria-hidden')).toBe('true');
+  });
+  it('requires the same account confirmation as a real booking', async () => {
+    const app = fixture({ contextMode: 'user-confirmed-ui' });
+    const plan = await planFor(app);
+    await expect(app.adapter.checkDayDraft(plan, undefined, undefined, app.reviewedContext, app.reviewedAuthorization)).rejects.toThrow();
+    expect(app.additions()).toBe(0);
+    expect(app.saves()).toBe(0);
+  });
+  it('does not claim unchanged if Cancel leaves different reported hours or entries', async () => {
+    const app = fixture({ cancelBehavior: 'changes-persisted' });
+    const plan = await planFor(app);
+    let error: unknown;
+    try { await app.adapter.checkDayDraft(plan, undefined, undefined, app.reviewedContext, app.reviewedAuthorization); } catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(AdapterError);
+    expect((error as AdapterError).uncertain).toBe(true);
+    expect((error as Error).message).toContain('ursprünglichen Tageszustand');
+    expect(app.saves()).toBe(0);
+  });
+  it('surfaces an unresolved Cancel instead of reporting a successful check', async () => {
+    const app = fixture({ cancelBehavior: 'timeout' });
+    const plan = await planFor(app);
+    await expect(app.adapter.checkDayDraft(plan, undefined, undefined, app.reviewedContext, app.reviewedAuthorization)).rejects.toThrow('geschlossen');
+    expect(app.saves()).toBe(0);
+    expect(app.panel.getAttribute('aria-hidden')).toBe('false');
+  });
+  it('cancels a draft-only check before Save and leaves original data untouched', async () => {
+    const controller = new AbortController();
+    const app = fixture({ onInput: () => controller.abort() });
+    const plan = await planFor(app);
+    await expect(app.adapter.checkDayDraft(plan, undefined, controller.signal, app.reviewedContext, app.reviewedAuthorization)).rejects.toThrow('abgebrochen');
+    expect(app.saves()).toBe(0);
+    expect(app.entries()).toEqual([]);
+    expect(app.panel.getAttribute('aria-hidden')).toBe('true');
+  });
+});
+
+describe('draft check cleanup ownership after asynchronous context verification', () => {
+  it('does not cancel a different day opened while cleanup awaits account hashing', async () => {
+    let reached!: () => void;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { reached = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let shouldHold = false;
+    let paused = false;
+    let cancels = 0;
+    const controller = new AbortController();
+    let app!: ReturnType<typeof fixture>;
+    app = fixture({
+      contextReader: async () => {
+        if (shouldHold && !paused) { paused = true; reached(); await gate; }
+        return app.identity;
+      },
+      onInput: () => { shouldHold = true; controller.abort(); },
+    });
+    const plan = await planFor(app);
+    const running = app.adapter.checkDayDraft(plan, undefined, controller.signal, app.reviewedContext, app.reviewedAuthorization);
+    await held;
+    [...app.panel.querySelectorAll('button')].find(button => button.textContent === 'Cancel')!.addEventListener('click', () => cancels++);
+    app.panel.querySelector('.b-display-3')!.textContent = 'Tue, 03/02/2026';
+    release();
+    await expect(running).rejects.toThrow('abgebrochen');
+    expect(cancels).toBe(0);
+    expect(app.saves()).toBe(0);
+    expect(app.panel.getAttribute('aria-hidden')).toBe('false');
+  });
+  it('reports safe localized field names instead of changed note contents', async () => {
+    const app = fixture({ addBehavior: 'change-existing' });
+    let message = '';
+    try { await applyPlan(app, await planFor(app)); } catch (error) { message = (error as Error).message; }
+    expect(message).toContain('Nach Hinzufügen eines Eintrags');
+    expect(message).toContain('Notiz');
+    expect(message).not.toContain('Unexpected old-card mutation');
+    expect(message).not.toContain('phase=');
+    expect(app.saves()).toBe(0);
+  });
+});
+
+
+describe('opening a day after asynchronous account verification', () => {
+  it('does not replace a manual form opened while the native open check awaits', async () => {
+    let reached!: () => void;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { reached = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let opening = false;
+    let paused = false;
+    let app!: ReturnType<typeof fixture>;
+    app = fixture({ contextReader: async () => {
+      if (opening && !paused) { paused = true; reached(); await gate; }
+      return app.identity;
+    } });
+    const plan = await planFor(app);
+    const internal = app.adapter as unknown as { openDay(day: unknown, signal?: AbortSignal, context?: AttendanceContext): Promise<Element> };
+    const original = internal.openDay.bind(app.adapter);
+    internal.openDay = async (day, signal, context) => { opening = true; return original(day, signal, context); };
+    const beforeOpens = app.opens();
+    const running = app.adapter.checkDayDraft(plan, undefined, undefined, app.reviewedContext, app.reviewedAuthorization);
+    await held;
+    app.panel.innerHTML = '<div class="sticky-header"><p class="b-display-3">Tue, 03/02/2026</p></div><button>Cancel</button>';
+    app.panel.setAttribute('aria-hidden', 'false');
+    release();
+    await expect(running).rejects.toThrow('bereits offen');
+    expect(app.opens()).toBe(beforeOpens);
+    expect(app.saves()).toBe(0);
+    expect(app.panel.getAttribute('aria-hidden')).toBe('false');
   });
 });
