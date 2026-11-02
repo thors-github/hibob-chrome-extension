@@ -34,8 +34,8 @@ test('the packaged API-first MV3 extension starts with narrow permissions and a 
     const manifest = await worker.evaluate(() => chrome.runtime.getManifest());
     expect(manifest.name).toBe(nativeName);
     expect(manifest.icons?.['128']).toBe('icons/icon-128.png');
-    expect(manifest.version).toBe('1.4.0');
-    expect(manifest.version_name).toBe('1.4.0-beta.1');
+    expect(manifest.version).toBe('1.4.1');
+    expect(manifest.version_name).toBe('1.4.1-beta.1');
     expect(manifest.permissions).toEqual(['sidePanel', 'storage', 'activeTab', 'scripting']);
     expect(manifest.host_permissions).toEqual(['https://app.hibob.com/*']);
     expect(manifest.optional_host_permissions).toBeUndefined();

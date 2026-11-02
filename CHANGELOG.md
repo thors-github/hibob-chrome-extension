@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.1-beta.1
+
+- Remove duplicated API preparation before each day and consume successful transport identity proofs only within the operation that obtained them. Preserve fresh final account/permission/day validation and full independent saved-data readback.
+- Keep one-second dispatch spacing, server cooldowns, cancellation isolation, checkpoint consent and no automatic write retries.
+- Pin production request counts and timing with a local HTTP ledger. Document why the variable monthly plan is still a sequential operation and why the observed uniform Quick Fix template is not substituted.
+- Keep permissions, adapter protocol and session format unchanged. Native write acceptance of the optimized sequence remains separate; stable and Store publication stay blocked.
+
 ## 1.4.0-beta.1
 
 - Simplify the monthly workflow: show the month, connected account and a compact schedule summary first. Move schedule, location and exclusion controls behind a labelled settings button; show advanced controls only when needed.

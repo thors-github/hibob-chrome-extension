@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
-  "version": "1.4.0",
+  "version": "1.4.1",
   "stableReleaseReady": false,
-  "bootstrapTag": "v1.4.0-beta.1",
+  "bootstrapTag": "v1.4.1-beta.1",
   "blockers": [
-    "The internal HiBob API is not a supported public integration contract. Live overwrite, interactive SSO, temporary-tab fallback and an uninterrupted native run exceeding five minutes without DevTools have not received native acceptance."
+    "The internal HiBob API is not a supported public integration contract. The optimized 1.4.1 writer, live overwrite, interactive SSO, temporary-tab fallback and an uninterrupted native run exceeding five minutes without DevTools have not received native write acceptance."
   ],
   "validationEvidence": [
-    "Automated unit, API-ledger and browser tests cover ownership, realistic save responses, weekly targets, checkpoints, retained-entry reconciliation and failure recovery.",
-    "Native Chrome acceptance covers existing-session/direct connection, complete month read, current and future creation, verification checkpoints and independent saved-data reconciliation. Private acceptance reports and personal attendance data are kept outside Git."
+    "Automated coverage preserves ownership, final day/account/permission checks, full independent readback, rate limiting, cancellation and uncertain outcomes. A production SessionClient HTTP ledger checks request counts and dispatch spacing.",
+    "Earlier 1.4.0 native acceptance covered current and future creation and complete saved-data reconciliation. Private reports and personal attendance data remain outside Git; the optimized writer is not validated by repeating those real writes."
   ]
 }
