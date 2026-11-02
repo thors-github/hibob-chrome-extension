@@ -2,7 +2,7 @@ import { t } from './i18n/index';
 import { BookingController } from './controller';
 import { HiBobApiAdapter } from './hibob/api-adapter';
 import { isNewerExtensionVersion } from './shared/updates';
-import type { AccountConfirmation, AdapterProgress, BookingPlan, PlanEditLease, SessionState } from './shared/types';
+import type { AccountConfirmation, AdapterProgress, BookingPlan, PlanEditLease, RunOptions, SessionState } from './shared/types';
 
 const manifest = chrome.runtime.getManifest();
 const installedVersion = manifest.version;
@@ -61,9 +61,33 @@ function isPanelSender(url?: string): boolean {
   catch { return false; }
 }
 
+/**
+ * A monthly queue outlives Chrome's per-message event limit. Acknowledge its
+ * exclusive controller job immediately; session storage publishes its result.
+ * Chrome documents this bounded API pulse for exceptional long operations:
+ * https://developer.chrome.com/docs/extensions/develop/migrate/to-service-workers#keep-a-service-worker-alive
+ */
+function acknowledgeRun(start: () => Promise<SessionState>): Promise<SessionState> {
+  const previousId = controller.state.job?.id, previousStatus = controller.state.job?.status;
+  // Authorization and the exclusive job lock execute before the first await.
+  const pending = start();
+  const job = controller.state.job;
+  if (job?.kind !== 'apply' || job.status !== 'running' || previousId === job.id && previousStatus === 'running') return pending;
+  const pulse = setInterval(() => {
+    // Never extends a paused, completed or rejected operation, and does not
+    // dispatch attendance requests or restart a terminated worker.
+    void chrome.runtime.getPlatformInfo().catch(() => {});
+  }, 20_000);
+  const finish = () => clearInterval(pulse);
+  // The controller journals asynchronous failures. Consume rejection here so
+  // a closed panel cannot create an unhandled promise rejection.
+  void pending.then(finish, finish);
+  return Promise.resolve(structuredClone(controller.state));
+}
+
 chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
   if (!message || typeof message !== 'object' || !('type' in message) || typeof message.type !== 'string') return;
-  const m = message as { type: string; month?: string; date?: string; plan?: BookingPlan; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation };
+  const m = message as { type: string; month?: string; date?: string; plan?: BookingPlan; planId?: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation; options?: RunOptions };
   if (!m.type.startsWith('PANEL_')) return;
   if (sender.id !== chrome.runtime.id || sender.tab || !isPanelSender(sender.url)) { sendResponse({ ok: false, error: t('Diese Aktion ist nur im Extension-Seitenpanel verfügbar.') }); return; }
   void (async () => {
@@ -79,7 +103,8 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       case 'PANEL_SCAN': return controller.scan(m.month ?? '');
       case 'PANEL_INVALIDATE_PLAN': return controller.invalidatePlan(m.expectedPlanRevision ?? -1, m.changeId ?? '');
       case 'PANEL_SAVE_PLAN': if (!m.plan || !m.lease) throw new Error(t('Vorschau fehlt.')); return controller.savePlan(m.plan, m.lease);
-      case 'PANEL_APPLY': if (!m.plan) throw new Error(t('Vorschau fehlt.')); return controller.apply(m.plan, m.expectedPlanRevision ?? -1, m.confirmation);
+      case 'PANEL_APPLY': if (!m.plan) throw new Error(t('Vorschau fehlt.')); return acknowledgeRun(() => controller.apply(m.plan!, m.expectedPlanRevision ?? -1, m.confirmation, m.options));
+      case 'PANEL_CONTINUE': if (!m.jobId || !m.planId) throw new Error(t('Der laufende Vorgang wurde geändert. Bitte den aktuellen Status prüfen.')); return acknowledgeRun(() => controller.continueRun(m.jobId!, m.planId!, m.expectedPlanRevision ?? -1, m.confirmation));
       case 'PANEL_CANCEL': if (!m.jobId) throw new Error(t('Der laufende Vorgang wurde geändert. Bitte den aktuellen Status prüfen.')); await controller.cancel(m.jobId); return controller.state;
       case 'PANEL_ACTIVATE_UPDATE': return controller.activateUpdate();
       default: throw new Error(t('Unbekannte Aktion.'));

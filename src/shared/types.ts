@@ -35,6 +35,8 @@ export interface AccountConfirmation {
   planRevision: number;
   contextFingerprint: string;
   confirmed: true;
+  /** Fresh, public scope marker for one paused checkpoint; never reusable consent. */
+  checkpointId?: string;
 }
 
 /** Produced by the controller after checking the current reviewed plan and consent. */
@@ -53,8 +55,9 @@ export interface PlanEditLease {
 export interface JobState {
   id: string;
   kind: 'scan' | 'apply';
-  status: 'running' | 'cancelling' | 'interrupted';
+  status: 'running' | 'cancelling' | 'paused' | 'interrupted';
   connectionId?: string;
+  checkpointId?: string;
   /** Legacy migration input only. New jobs bind to connectionId. */
   tabId?: number;
   month: string;
@@ -159,12 +162,19 @@ export interface DayResult {
 }
 
 export interface RunState {
+  runId?: string;
   planId: string;
-  status: 'running' | 'complete' | 'stopped' | 'failed';
+  status: 'running' | 'paused' | 'complete' | 'stopped' | 'failed';
+  checkpointDate?: LocalDate;
   results: DayResult[];
   startedAt: string;
   updatedAt: string;
   journalError?: string;
+}
+
+/** Execution boundaries leave the reviewed monthly allocation unchanged. */
+export interface RunOptions {
+  checkpointDates?: LocalDate[];
 }
 
 export interface AdapterProgress {
@@ -194,7 +204,7 @@ export interface UpdateStatus {
 
 export interface SessionState {
   /** Optional on input only, for migration from older sessions. */
-  schemaVersion?: 2 | 3 | 4;
+  schemaVersion?: 2 | 3 | 4 | 5;
   connection?: ApiConnection;
   revision?: number;
   planRevision?: number;

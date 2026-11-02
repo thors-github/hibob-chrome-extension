@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_SESSION_RULES, SessionClient, SessionClientError, type ApiEndpointRule, type ApiHttpRequest, type SessionRequest } from '../src/hibob/session-client';
 
 const ORIGIN = 'https://app.hibob.com';
@@ -35,11 +35,12 @@ function browserFixture() {
   return { browser, pages, create, get, remove, executeScript, createWindow, getWindow, setWire: (handler: typeof wireHandler) => { wireHandler = handler; }, onWindowGet: (callback: () => void) => { onWindowGet = callback; }, closeWindow: () => { windowClosed = true; } };
 }
 const healthyFetch = () => vi.fn(async (url: string | URL | Request) => response(String(url).endsWith('/api/user') ? user : String(url).endsWith('/api/company') ? company : { accepted: true })) as unknown as ReturnType<typeof vi.fn> & typeof fetch;
-function clientFixture(options: { allowBackgroundTab?: boolean; fetch?: typeof fetch; requestTimeoutMs?: number; maxResponseBytes?: number } = {}) {
+function clientFixture(options: { allowBackgroundTab?: boolean; fetch?: typeof fetch; requestTimeoutMs?: number; maxResponseBytes?: number; minRequestIntervalMs?: number } = {}) {
   const browser = browserFixture(); const fetcher = options.fetch ?? healthyFetch();
-  const client = new SessionClient({ rules, probe, chrome: browser.browser, fetch: fetcher, pollMs: 1, timeoutMs: 50, ...options });
+  const client = new SessionClient({ rules, probe, chrome: browser.browser, fetch: fetcher, pollMs: 1, timeoutMs: 50, minRequestIntervalMs: 0, ...options });
   return { ...browser, client, fetcher };
 }
+afterEach(() => { vi.useRealTimers(); });
 
 describe('session transport boundaries', () => {
   it('uses browser-managed credentials and fixed headers without any credential or storage access', async () => {
@@ -272,5 +273,143 @@ describe('login and cancellation', () => {
     fetcher.mockClear(); fetcher.mockImplementation(() => { entered(); return new Promise<Response>(() => {}); });
     const result = f.client.request({ method: 'POST', path: '/api/fixture/entries', body: {} }); await started;
     f.client.cancel(); await expect(result).rejects.toMatchObject({ code: 'CANCELLED', uncertain: true }); expect(fetcher).toHaveBeenCalledTimes(1); await f.client.closeOperation();
+  });
+});
+
+describe('request pacing and server cooldown', () => {
+  const start = Date.parse('2026-11-02T19:24:53Z');
+  const clock = () => { vi.useFakeTimers(); vi.setSystemTime(start); };
+
+  it('paces all setup probes, concurrent reads/writes and reopened operations by default', async () => {
+    clock();
+    const dispatches: { at: number; method: string }[] = [];
+    const fetcher = healthyFetch();
+    const ordinary = fetcher.getMockImplementation()! as typeof fetch;
+    fetcher.mockImplementation(async (url, init) => { dispatches.push({ at: Date.now() - start, method: init?.method ?? 'GET' }); return ordinary(url, init); });
+    const f = clientFixture({ fetch: fetcher, minRequestIntervalMs: undefined });
+    const opening = f.client.openOperation();
+    await vi.advanceTimersByTimeAsync(0); expect(dispatches).toEqual([{ at: 0, method: 'GET' }]);
+    await vi.advanceTimersByTimeAsync(999); expect(dispatches).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1); await opening;
+    const read = f.client.request({ method: 'GET', path: '/api/user' });
+    const write = f.client.request({ method: 'POST', path: '/api/fixture/entries', body: {} });
+    await vi.advanceTimersByTimeAsync(999); expect(dispatches).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(1001); await Promise.all([read, write]);
+    await f.client.closeOperation();
+    const reopening = f.client.openOperation();
+    await vi.advanceTimersByTimeAsync(2000); await reopening; await f.client.closeOperation();
+    expect(dispatches).toEqual([
+      { at: 0, method: 'GET' }, { at: 1000, method: 'GET' },
+      { at: 2000, method: 'GET' }, { at: 3000, method: 'POST' },
+      { at: 4000, method: 'GET' }, { at: 5000, method: 'GET' },
+    ]);
+  });
+
+  it('cancels spacing before dispatch without making a mutation uncertain or dispatching later', async () => {
+    clock(); const f = clientFixture({ minRequestIntervalMs: 1000 });
+    const opening = f.client.openOperation(); await vi.advanceTimersByTimeAsync(1000); await opening;
+    vi.mocked(f.fetcher).mockClear();
+    const cancellation = new AbortController();
+    const pending = f.client.request({ method: 'POST', path: '/api/fixture/entries', body: {} }, cancellation.signal);
+    const rejected = expect(pending).rejects.toMatchObject({ code: 'CANCELLED', uncertain: false });
+    await vi.advanceTimersByTimeAsync(500); cancellation.abort(); await rejected;
+    await vi.advanceTimersByTimeAsync(5000); expect(f.fetcher).not.toHaveBeenCalled();
+    await f.client.closeOperation();
+  });
+
+  it('does not let a cancelled queued request release an earlier in-flight request', async () => {
+    const fetcher = healthyFetch(); const f = clientFixture({ fetch: fetcher }); await f.client.openOperation();
+    let release!: (response: Response) => void;
+    fetcher.mockClear(); fetcher.mockImplementationOnce(() => new Promise<Response>(resolve => { release = resolve; }));
+    const reading = f.client.request({ method: 'GET', path: '/api/user' });
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    const cancellation = new AbortController();
+    const queued = f.client.request({ method: 'POST', path: '/api/fixture/entries', body: {} }, cancellation.signal);
+    cancellation.abort(); await expect(queued).rejects.toMatchObject({ code: 'CANCELLED', uncertain: false });
+    const later = f.client.request({ method: 'GET', path: '/api/company' });
+    await Promise.resolve(); expect(fetcher).toHaveBeenCalledTimes(1);
+    release(response(user)); await Promise.all([reading, later]);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+    await f.client.closeOperation();
+  });
+
+  it('paces same-origin probes and writes after the single permitted direct transport fallback', async () => {
+    clock(); const dispatches: number[] = [];
+    const fetcher = vi.fn(async () => { dispatches.push(Date.now() - start); throw new TypeError('Failed to fetch'); }) as unknown as typeof fetch;
+    const f = clientFixture({ fetch: fetcher, allowBackgroundTab: true, minRequestIntervalMs: 1000 });
+    const ordinary = f.executeScript.getMockImplementation()!;
+    f.executeScript.mockImplementation(async options => {
+      if (options.func.name === 'performWireRequest') dispatches.push(Date.now() - start);
+      return ordinary(options);
+    });
+    const opening = f.client.openOperation(); await vi.advanceTimersByTimeAsync(2000); await opening;
+    const writing = f.client.request({ method: 'POST', path: '/api/fixture/entries', body: {} });
+    await vi.advanceTimersByTimeAsync(999); expect(dispatches).toEqual([0, 1000, 2000]);
+    await vi.advanceTimersByTimeAsync(1); await writing;
+    expect(dispatches).toEqual([0, 1000, 2000, 3000]); await f.client.closeOperation();
+  });
+
+  it.each([
+    ['300', 300_000], ['Mon, 02 Nov 2026 19:29:53 GMT', 300_000],
+    ['0', 1000], ['Mon, 02 Nov 2026 19:24:52 GMT', 1000],
+    ['9999999999999999999999999999999999999999', 86_400_000],
+    ['-3', 300_000], ['token=private-secret', 300_000], ['', 300_000],
+  ])('sanitizes Retry-After %s into a bounded duration without exposing the header/body', async (header, expected) => {
+    clock(); const fetcher = healthyFetch(); const f = clientFixture({ fetch: fetcher, allowBackgroundTab: true }); await f.client.openOperation();
+    fetcher.mockClear(); fetcher.mockImplementation(async () => response({ secret: 'private-body' }, 429, header ? { 'retry-after': header } : {}));
+    const error = await f.client.request({ method: 'GET', path: '/api/user' }).catch(error => error) as SessionClientError;
+    expect(error).toMatchObject({ code: 'RATE_LIMITED', status: 429, uncertain: false, retryAfterMs: expected });
+    expect(error.message).not.toContain('private'); expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(f.create).not.toHaveBeenCalled(); expect(f.createWindow).not.toHaveBeenCalled(); await f.client.closeOperation();
+  });
+
+  it('blocks reopening, reconnecting and queued mutations throughout the cooldown without retry or fallback', async () => {
+    clock(); const fetcher = healthyFetch(); const f = clientFixture({ fetch: fetcher, allowBackgroundTab: true }); await f.client.openOperation();
+    fetcher.mockClear(); fetcher.mockImplementationOnce(async () => response({}, 429, { 'retry-after': '300' }));
+    const limited = f.client.request({ method: 'GET', path: '/api/user' });
+    const waitingWrite = f.client.request({ method: 'POST', path: '/api/fixture/entries', body: {} });
+    await expect(limited).rejects.toMatchObject({ code: 'RATE_LIMITED', retryAfterMs: 300_000 });
+    await expect(waitingWrite).rejects.toMatchObject({ code: 'RATE_LIMITED', uncertain: false });
+    await f.client.closeOperation();
+    await expect(f.client.openOperation()).rejects.toMatchObject({ code: 'RATE_LIMITED', retryAfterMs: 300_000 });
+    await expect(f.client.connect()).rejects.toMatchObject({ code: 'RATE_LIMITED', retryAfterMs: 300_000 });
+    await f.client.disconnect();
+    await vi.advanceTimersByTimeAsync(299_999);
+    await expect(f.client.openOperation()).rejects.toMatchObject({ code: 'RATE_LIMITED', retryAfterMs: 1 });
+    expect(fetcher).toHaveBeenCalledTimes(1); expect(f.create).not.toHaveBeenCalled(); expect(f.createWindow).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1); expect(fetcher).toHaveBeenCalledTimes(1);
+    await expect(f.client.openOperation()).resolves.toMatchObject({ mode: 'direct' });
+    expect(fetcher).toHaveBeenCalledTimes(3); await f.client.closeOperation();
+  });
+
+  it('does not fall back or prompt login after a rate-limited setup probe', async () => {
+    const fetcher = vi.fn(async () => response({}, 429, { 'retry-after': '300' })) as unknown as typeof fetch;
+    const f = clientFixture({ fetch: fetcher, allowBackgroundTab: true });
+    await expect(f.client.connect()).rejects.toMatchObject({ code: 'RATE_LIMITED', uncertain: false, retryAfterMs: 300_000 });
+    expect(fetcher).toHaveBeenCalledTimes(1); expect(f.create).not.toHaveBeenCalled(); expect(f.createWindow).not.toHaveBeenCalled();
+  });
+
+  it('marks an already-dispatched rate-limited mutation uncertain and never replays it', async () => {
+    const fetcher = healthyFetch(); const f = clientFixture({ fetch: fetcher }); await f.client.openOperation();
+    fetcher.mockClear(); fetcher.mockImplementation(async () => response({}, 429, { 'retry-after': '300' }));
+    await expect(f.client.request({ method: 'POST', path: '/api/fixture/entries', body: {} })).rejects.toMatchObject({ code: 'RATE_LIMITED', uncertain: true, status: 429, retryAfterMs: 300_000 });
+    await expect(f.client.request({ method: 'POST', path: '/api/fixture/entries', body: {} })).rejects.toMatchObject({ code: 'RATE_LIMITED', uncertain: false });
+    expect(fetcher).toHaveBeenCalledTimes(1); await f.client.closeOperation();
+  });
+
+  it('propagates same-origin 429 errors and preserves the cooldown when that operation closes', async () => {
+    const direct = vi.fn(async () => { throw new TypeError('Failed to fetch'); }) as unknown as typeof fetch;
+    const f = clientFixture({ fetch: direct, allowBackgroundTab: true }); await f.client.openOperation();
+    const ordinary = f.executeScript.getMockImplementation()!;
+    f.executeScript.mockImplementation(async options => options.func.name === 'performWireRequest'
+      ? [{ frameId: 0, documentId: f.pages.get(options.target.tabId)!.documentId, result: { ok: false, code: 'RATE_LIMITED', status: 429, retryAfterMs: 300_000, dispatched: true, value: undefined } }]
+      : ordinary(options));
+    const before = f.executeScript.mock.calls.filter(([options]) => options.func.name === 'performWireRequest').length;
+    await expect(f.client.request({ method: 'POST', path: '/api/fixture/entries', body: {} })).rejects.toMatchObject({ code: 'RATE_LIMITED', uncertain: true, retryAfterMs: 300_000 });
+    expect(f.executeScript.mock.calls.filter(([options]) => options.func.name === 'performWireRequest')).toHaveLength(before + 1);
+    await f.client.closeOperation(); const directCount = vi.mocked(direct).mock.calls.length;
+    await expect(f.client.openOperation()).rejects.toMatchObject({ code: 'RATE_LIMITED', uncertain: false });
+    expect(direct).toHaveBeenCalledTimes(directCount); expect(f.create).toHaveBeenCalledTimes(1); expect(f.createWindow).not.toHaveBeenCalled();
   });
 });

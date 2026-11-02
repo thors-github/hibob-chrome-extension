@@ -16,6 +16,11 @@ const segments = (): ApiEntry[] => [
   { id: 'entry-break', entryType: 'break', start: '12:00', end: '12:30', duration: 1800 },
   { id: 'entry-two', entryType: 'work', start: '2026-11-03T12:30:00', end: '2026-11-03T16:30:00.000', duration: 14400 },
 ];
+const nativeReadback = (): ApiEntry[] => [
+  { id: 501, entryType: 'work', start: '2026-11-03T08:00', end: '2026-11-03T12:00', duration: 14400 },
+  { id: 502, entryType: 'break', start: '2026-11-03T12:00', end: '2026-11-03T12:30', duration: 1800 },
+  { id: 503, entryType: 'work', start: '2026-11-03T12:30', end: '2026-11-03T16:30', duration: 14400 },
+].map(entry => ({ ...entry, employeeId: self.id, source: 'employeeManuallyEdit', reportingMethod: 'startEnd', isManuallyEdited: true, projectTracking: null, comment: '', reason: null }));
 const day = (raw: unknown, alternatePolicy: unknown = policy, alternatePeriod = period) => parseReport('2026-11', raw, alternatePeriod, alternatePolicy).find(day => day.snapshot.date === '2026-11-03')!;
 
 describe('authenticated own identity and periods', () => {
@@ -38,6 +43,45 @@ describe('authenticated own identity and periods', () => {
 });
 
 describe('complete, strict attendance reports', () => {
+  it('accepts the observed manual readback provenance only with independently verified entry ownership', () => {
+    const entries = nativeReadback();
+    const parsed = parseReport('2026-11', withEntries(entries), period, policy, self.id)[2];
+    expect(parsed.snapshot.editable).toBe(true); expect(parsed.snapshot.unsupportedReason).toBeUndefined();
+    expect(parsed.snapshot.reportedMinutes).toBe(480);
+    expect(parsed.snapshot.entries).toEqual([{ type: 'work', start: '08:00', end: '12:00' }, { type: 'break', start: '12:00', end: '12:30' }, { type: 'work', start: '12:30', end: '16:30' }]);
+    expect(parsed.snapshot.entries.every(entry => !entry.metadata)).toBe(true);
+    expect(parsed.entries).toEqual(entries);
+    expect(parsed.snapshot.fingerprint).toContain(self.id); expect(parsed.snapshot.fingerprint).toContain('employeeManuallyEdit');
+    const withoutMarkers = nativeReadback(); withoutMarkers.forEach(entry => { delete entry.employeeId; delete entry.source; });
+    const old = parseReport('2026-11', withEntries(withoutMarkers), period, policy)[2];
+    expect(old.snapshot.entries).toEqual(parsed.snapshot.entries);
+    expect(old.snapshot.fingerprint).not.toBe(parsed.snapshot.fingerprint);
+  });
+  it.each([undefined, '', 'other-authenticated-employee'])('rejects employee ownership when expected identity is missing or different: %s', expected => {
+    expect(() => parseReport('2026-11', withEntries(nativeReadback()), period, policy, expected)).toThrow('Konto');
+  });
+  it.each(['another-employee', null, '', 123, false, { id: self.id }])('rejects a present entry employeeId that is not exactly self: %j', employeeId => {
+    const entries = nativeReadback(); entries[0].employeeId = employeeId;
+    expect(() => parseReport('2026-11', withEntries(entries), period, policy, self.id)).toThrow('Konto');
+  });
+  it.each(['otherSource', 'EmployeeManuallyEdit', 'employeeManuallyEdit ', null, '', 0, false, [], { type: 'employeeManuallyEdit' }])('does not treat an unknown provenance value as harmless metadata: %j', source => {
+    const entries = nativeReadback(); entries[0].source = source;
+    const parsed = parseReport('2026-11', withEntries(entries), period, policy, self.id)[2];
+    expect(parsed.snapshot.editable).toBe(false); expect(parsed.snapshot.unsupportedReason).toBeTruthy();
+    expect(parsed.snapshot.entries[0].metadata).toContain('source'); expect(parsed.entries[0].source).toEqual(source);
+  });
+  it.each([{ isManuallyEdited: false }, { isManuallyEdited: undefined }, { isManuallyEdited: null }, { isManuallyEdited: 'true' }, { reportingMethod: undefined }, { reportingMethod: null }, { reportingMethod: '' }, { reportingMethod: 'duration' }])('rejects manual provenance inconsistent with its observed edit/reporting markers: %j', change => {
+    const entries = nativeReadback(); Object.assign(entries[0], change);
+    const parsed = parseReport('2026-11', withEntries(entries), period, policy, self.id)[2];
+    expect(parsed.snapshot.editable).toBe(false); expect(parsed.snapshot.unsupportedReason).toBeTruthy();
+    expect(parsed.snapshot.entries[0].metadata).toContain('source');
+  });
+  it('keeps rejecting additional server data even with the known ownership and provenance fields', () => {
+    const entries = nativeReadback(); entries[0].unknownServerData = { value: 'synthetic' };
+    const parsed = parseReport('2026-11', withEntries(entries), period, policy, self.id)[2];
+    expect(parsed.snapshot.editable).toBe(false); expect(parsed.snapshot.entries[0].metadata).toEqual(['unknownServerData']);
+    expect(parsed.entries).toEqual(entries);
+  });
   it('reads every date, skips explicit summaries and retains raw DTOs without random row IDs', () => {
     const raw = report(); const summary = { isSummary: true, dateKey: null }; (raw.employees as unknown[]).push(summary);
     const parsed = parseReport('2026-11', raw, period, policy);

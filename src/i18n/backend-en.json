@@ -243,5 +243,14 @@
   "HiBob hat eine nicht unterstützte API-Antwort zurückgegeben.": "HiBob returned an unsupported API response.",
   "Die HiBob-API-Antwort ist zu groß.": "The HiBob API response is too large.",
   "Die temporäre HiBob-Seite wurde geändert. Bitte erneut verbinden.": "The temporary HiBob page changed. Please connect again.",
-  "Dieser HiBob-API-Aufruf ist nicht freigegeben.": "This HiBob API request is not allowed."
+  "Dieser HiBob-API-Aufruf ist nicht freigegeben.": "This HiBob API request is not allowed.",
+  "Monatszustand vor der Fortsetzung prüfen …": "Checking the month before continuing …",
+  "Die Kontrollpunkte gehören nicht zu den freigegebenen Buchungstagen.": "The checkpoints do not belong to the approved booking days.",
+  "Der Monatsstand hat sich seit dem Kontrollpunkt geändert. Bitte erneut einlesen und prüfen.": "The monthly data changed since the checkpoint. Please read the month again and review it.",
+  "{date}: Die bereits verifizierte Buchung hat sich geändert. Der Lauf bleibt gestoppt.": "{date}: The previously verified booking changed. The run remains stopped.",
+  "{date}: Ein verbleibender Buchungstag hat sich geändert. Bitte erneut einlesen und prüfen.": "{date}: A remaining booking day changed. Please read the month again and review it.",
+  "Bitte das eigene HiBob-Konto für diesen Kontrollpunkt erneut bestätigen.": "Please confirm your own HiBob account again for this checkpoint.",
+  "Ein HiBob-Eintrag gehört nicht eindeutig zum angemeldeten Konto.": "A HiBob entry cannot be unambiguously assigned to the signed-in account.",
+  "{date}: Eine beibehaltene Buchung hat sich geändert. Bitte erneut einlesen und prüfen.": "{date}: A retained booking changed. Please read the month again and review it.",
+  "HiBob begrenzt API-Anfragen. Bitte mindestens {seconds} Sekunden warten, dann den Monat erneut einlesen. Unbestätigte Buchungen nicht wiederholen.": "HiBob is limiting API requests. Wait at least {seconds} seconds, then read the month again. Do not repeat unverified bookings."
 }

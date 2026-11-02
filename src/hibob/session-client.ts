@@ -4,16 +4,17 @@ export interface ApiHttpRequest { method: ApiHttpMethod; path: string; body?: un
 export interface ApiEndpointRule { method: ApiHttpMethod; path: string | RegExp; mutation: boolean }
 export interface SessionConnection { mode: 'direct' | 'tab'; id: string }
 export type SessionRequest = <T = unknown>(request: ApiHttpRequest, signal?: AbortSignal) => Promise<T>;
-export type SessionErrorCode = 'AUTH_REQUIRED' | 'FORBIDDEN' | 'HTTP_ERROR' | 'NETWORK_UNAVAILABLE' | 'TIMEOUT' | 'CANCELLED' | 'INVALID_RESPONSE' | 'RESPONSE_TOO_LARGE' | 'DOCUMENT_CHANGED' | 'REQUEST_DENIED' | 'BUSY' | 'NO_OPERATION';
+export type SessionErrorCode = 'AUTH_REQUIRED' | 'FORBIDDEN' | 'RATE_LIMITED' | 'HTTP_ERROR' | 'NETWORK_UNAVAILABLE' | 'TIMEOUT' | 'CANCELLED' | 'INVALID_RESPONSE' | 'RESPONSE_TOO_LARGE' | 'DOCUMENT_CHANGED' | 'REQUEST_DENIED' | 'BUSY' | 'NO_OPERATION';
 const messages: Record<SessionErrorCode, string> = {
   AUTH_REQUIRED: 'Sign in to HiBob to continue.', FORBIDDEN: 'HiBob rejected access. Check your permissions.',
+  RATE_LIMITED: 'HiBob temporarily limited API requests. Wait before reading the month again; do not repeat an unverified booking.',
   HTTP_ERROR: 'HiBob rejected the API request.', NETWORK_UNAVAILABLE: 'The HiBob session transport is unavailable.',
   TIMEOUT: 'The HiBob request timed out.', CANCELLED: 'The operation was cancelled.', INVALID_RESPONSE: 'HiBob returned an unsupported response.',
   RESPONSE_TOO_LARGE: 'The HiBob response exceeded the allowed size.', DOCUMENT_CHANGED: 'The temporary HiBob page changed. Read the month again.',
   REQUEST_DENIED: 'The requested HiBob endpoint is not allowed.', BUSY: 'A HiBob operation is already running.', NO_OPERATION: 'Open a HiBob operation before sending a request.',
 };
 export class SessionClientError extends Error {
-  constructor(public readonly code: SessionErrorCode, public readonly uncertain = false, public readonly status?: number) { super(messages[code]); this.name = 'SessionClientError'; }
+  constructor(public readonly code: SessionErrorCode, public readonly uncertain = false, public readonly status?: number, public readonly retryAfterMs?: number) { super(messages[code]); this.name = 'SessionClientError'; }
 }
 export const DEFAULT_SESSION_RULES: readonly ApiEndpointRule[] = [
   { method: 'GET', path: '/api/user', mutation: false }, { method: 'GET', path: '/api/company', mutation: false },
@@ -28,12 +29,14 @@ export interface SessionClientOptions {
   pollMs?: number;
   requestTimeoutMs?: number;
   maxResponseBytes?: number;
+  /** Minimum spacing between all API dispatches, including setup probes. */
+  minRequestIntervalMs?: number;
 }
 interface SerializedRule { method: ApiHttpMethod; source: string; flags: string; mutation: boolean }
 interface OwnedTab { id: number; url: string; documentId: string }
 interface Operation { connection: SessionConnection; controller: AbortController; tab?: OwnedTab; closing: boolean; pending: Set<Promise<unknown>>; detachSignal: () => void }
 interface WireInput { request: ApiHttpRequest; rules: SerializedRule[]; maxBytes: number; timeoutMs: number; expectedUrl?: string }
-type WireResult = { ok: true; value: unknown; dispatched: true } | { ok: false; code: SessionErrorCode; status?: number; dispatched: boolean };
+type WireResult = { ok: true; value: unknown; dispatched: true } | { ok: false; code: SessionErrorCode; status?: number; retryAfterMs?: number; dispatched: boolean };
 const ORIGIN = 'https://app.hibob.com';
 const HOME = `${ORIGIN}/home`;
 const LOGIN = `${ORIGIN}/login`;
@@ -74,6 +77,19 @@ async function performWireRequest(input: WireInput, fetcher: typeof fetch = fetc
     if (response.redirected || (response.url && response.url !== url.href)) return { ok: false, code: 'INVALID_RESPONSE', dispatched };
     if (response.status === 401 || response.status === 419) return { ok: false, code: 'AUTH_REQUIRED', status: response.status, dispatched };
     if (response.status === 403) return { ok: false, code: 'FORBIDDEN', status: response.status, dispatched };
+    if (response.status === 429) {
+      // This function is serialized into the tab: keep parsing self-contained,
+      // return only a bounded duration, never the raw header or response body.
+      const value = response.headers.get('retry-after')?.trim() ?? '';
+      let duration = 300_000;
+      if (value.length <= 128 && /^\d+$/.test(value)) duration = Number(value) * 1000;
+      else if (value.length <= 128 && /^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/.test(value)) {
+        const date = Date.parse(value);
+        if (Number.isFinite(date)) duration = date - Date.now();
+      }
+      const retryAfterMs = Math.max(1000, Math.min(86_400_000, Number.isNaN(duration) ? 300_000 : duration));
+      return { ok: false, code: 'RATE_LIMITED', status: 429, retryAfterMs, dispatched };
+    }
     if (!response.ok) return { ok: false, code: 'HTTP_ERROR', status: response.status, dispatched };
     const contentType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase() ?? '';
     if (contentType === 'text/html') return { ok: false, code: 'AUTH_REQUIRED', dispatched };
@@ -117,6 +133,9 @@ export class SessionClient {
   private connection?: SessionConnection;
   private operation?: Operation;
   private opening?: AbortController;
+  private requestQueue: Promise<void> = Promise.resolve();
+  private lastDispatchAt = -Infinity;
+  private cooldownUntil = 0;
   constructor(private readonly options: SessionClientOptions) {
     this.browser = options.chrome ?? chrome;
     this.fetcher = options.fetch ?? fetch;
@@ -126,6 +145,40 @@ export class SessionClient {
     });
   }
   private check(signal?: AbortSignal) { if (signal?.aborted) throw new SessionClientError('CANCELLED'); }
+  private checkCooldown(): void {
+    const remaining = Math.ceil(this.cooldownUntil - Date.now());
+    if (remaining > 0) throw new SessionClientError('RATE_LIMITED', false, 429, remaining);
+  }
+  private async abortable<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T> {
+    this.check(signal);
+    let abort!: () => void;
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(new SessionClientError('CANCELLED'));
+      signal?.addEventListener('abort', abort, { once: true });
+    });
+    try { return await Promise.race([pending, cancelled]); }
+    finally { signal?.removeEventListener('abort', abort); }
+  }
+  private async beforeDispatch(signal?: AbortSignal): Promise<void> {
+    this.check(signal); this.checkCooldown();
+    const configured = this.options.minRequestIntervalMs ?? 1000;
+    const interval = Number.isFinite(configured) && configured >= 0 ? Math.min(configured, 60_000) : 1000;
+    const delay = Math.min(interval, Math.max(0, this.lastDispatchAt + interval - Date.now()));
+    if (delay > 0) {
+      let timer!: ReturnType<typeof setTimeout>;
+      try { await this.abortable(new Promise<void>(resolve => { timer = setTimeout(resolve, delay); }), signal); }
+      finally { clearTimeout(timer); }
+    }
+    this.check(signal); this.checkCooldown();
+    this.lastDispatchAt = Date.now();
+  }
+  private rememberRateLimit(wire: WireResult): void {
+    if (!wire.ok && wire.code === 'RATE_LIMITED') {
+      const duration = Number.isFinite(wire.retryAfterMs) ? wire.retryAfterMs! : 300_000;
+      wire.retryAfterMs = Math.max(1000, Math.min(86_400_000, duration));
+      this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + wire.retryAfterMs);
+    }
+  }
   private link(signal: AbortSignal | undefined, controller: AbortController): () => void {
     const cancel = () => controller.abort();
     signal?.addEventListener('abort', cancel, { once: true });
@@ -191,6 +244,19 @@ export class SessionClient {
     return matching[0];
   }
   private async send<T>(request: ApiHttpRequest, signal?: AbortSignal, tab?: OwnedTab): Promise<T> {
+    this.rule(request); this.check(signal); this.checkCooldown();
+    let stable: ApiHttpRequest;
+    try { stable = JSON.parse(JSON.stringify(request)) as ApiHttpRequest; } catch { throw new SessionClientError('REQUEST_DENIED'); }
+    // Keep the queue across operation reopen. A cancelled queued request releases
+    // its own slot without allowing later requests to overtake an in-flight one.
+    const previous = this.requestQueue;
+    let release!: () => void;
+    const finished = new Promise<void>(resolve => { release = resolve; });
+    this.requestQueue = previous.then(() => finished);
+    try { await this.abortable(previous, signal); return await this.sendNow<T>(stable, signal, tab); }
+    finally { release(); }
+  }
+  private async sendNow<T>(request: ApiHttpRequest, signal?: AbortSignal, tab?: OwnedTab): Promise<T> {
     const rule = this.rule(request);
     this.check(signal);
     // Clone before dispatch so caller mutation cannot alter an approved request.
@@ -202,20 +268,21 @@ export class SessionClient {
       let wire: WireResult;
       if (tab) {
         await this.owned(tab);
-        this.check(signal);
+        await this.beforeDispatch(signal);
         dispatched = true;
         const results = await this.browser.scripting.executeScript({ target: { tabId: tab.id, documentIds: [tab.documentId] }, world: 'MAIN', func: performWireRequest, args: [input] });
         const frame = results.find(item => item.frameId === 0);
         if (!frame || frame.documentId !== tab.documentId || !frame.result) throw new SessionClientError('DOCUMENT_CHANGED', rule.mutation);
         wire = frame.result;
+        this.rememberRateLimit(wire);
         await this.owned(tab);
-      } else { dispatched = true; wire = await performWireRequest(input, this.fetcher, signal); }
+      } else { await this.beforeDispatch(signal); dispatched = true; wire = await performWireRequest(input, this.fetcher, signal); this.rememberRateLimit(wire); }
       if (!tab) dispatched = wire.dispatched;
       if (signal?.aborted) throw new SessionClientError('CANCELLED', rule.mutation && dispatched);
-      if (!wire.ok) throw new SessionClientError(wire.code, rule.mutation && wire.dispatched, wire.status);
+      if (!wire.ok) throw new SessionClientError(wire.code, rule.mutation && wire.dispatched, wire.status, wire.retryAfterMs);
       return wire.value as T;
     } catch (error) {
-      if (error instanceof SessionClientError) throw new SessionClientError(error.code, error.uncertain || (rule.mutation && dispatched), error.status);
+      if (error instanceof SessionClientError) throw new SessionClientError(error.code, error.uncertain || (rule.mutation && dispatched), error.status, error.retryAfterMs);
       throw new SessionClientError('NETWORK_UNAVAILABLE', rule.mutation && dispatched);
     }
   }

@@ -22,7 +22,7 @@ function fixtureState() {
       return { week, dates: included.map(day => day.date), targetMinutes: minutes, plannedMinutes: minutes, errors: [] };
     }),
   };
-  const state: SessionState = { schemaVersion: 4, revision: 1, planRevision: 7, connection: { status: 'connected', generation: 'local-session', employeeId: 'local-employee', companyId: 'local-company', employeeLabel: 'Local Employee', companyLabel: 'Local Company', transport: 'direct', capabilities: { read: true, write: true, overwrite: true } }, snapshot, plan,
+  const state: SessionState = { schemaVersion: 5, revision: 1, planRevision: 7, connection: { status: 'connected', generation: 'local-session', employeeId: 'local-employee', companyId: 'local-company', employeeLabel: 'Local Employee', companyLabel: 'Local Company', transport: 'direct', capabilities: { read: true, write: true, overwrite: true } }, snapshot, plan,
     run: { planId: 'earlier-plan', status: 'complete', startedAt: 'earlier', updatedAt: 'earlier', results: [{ date: '2026-10-30', status: 'verified', message: 'Earlier verified result' }] },
   };
   return { settings, state };
@@ -77,12 +77,14 @@ test('read-only API capabilities permit preflight but never enable saving', asyn
   await expect(page.locator('#api-capability-notice')).toBeVisible();
   await expect(page.locator('#apply')).toBeEnabled();
   await page.locator('#apply').click();
+    if (!(await page.locator('#additional-checks').evaluate(element => (element as HTMLDetailsElement).open))) await page.locator('#additional-checks > summary').click();
   await expect(page.locator('#apply-details')).toContainText('Local Employee · Local Company');
   await page.locator('#account-confirmation').check();
   await expect(page.locator('#confirm-apply')).toBeDisabled();
   await expect(page.locator('#check-draft')).toBeEnabled();
   await page.locator('#confirm-apply').dispatchEvent('click');
-  await page.locator('#check-draft').click();
+  if (!(await page.locator('#additional-checks').evaluate(element => (element as HTMLDetailsElement).open))) await page.locator('#additional-checks > summary').click();
+    await page.locator('#check-draft').click();
   await expect(page.locator('#draft-check-result')).toBeVisible();
   const result = await page.evaluate(() => (window as unknown as { __draftFixture: Fixture }).__draftFixture);
   expect(result.commands.filter(command => command.type === 'PANEL_PREFLIGHT')).toHaveLength(1);
@@ -100,6 +102,7 @@ for (const language of ['de-DE', 'en-GB']) {
     await page.goto('/sidepanel.html');
     await expect(page.locator('#apply')).toBeEnabled();
     await page.locator('#apply').click();
+    if (!(await page.locator('#additional-checks').evaluate(element => (element as HTMLDetailsElement).open))) await page.locator('#additional-checks > summary').click();
     const consent = page.locator('#account-confirmation');
     const date = page.locator('#draft-check-date');
     await expect(date).toHaveValue('2026-11-03');
@@ -118,11 +121,13 @@ for (const language of ['de-DE', 'en-GB']) {
     expect(await page.evaluate(() => (window as unknown as { __draftFixture: Fixture }).__draftFixture.commands.some(command => command.type === 'PANEL_PREFLIGHT'))).toBe(false);
     await expect(page.locator('#apply')).toBeEnabled();
     await page.locator('#apply').click();
+    if (!(await page.locator('#additional-checks').evaluate(element => (element as HTMLDetailsElement).open))) await page.locator('#additional-checks > summary').click();
     await expect(consent).not.toBeChecked();
     await expect(date).toHaveValue('2026-11-03');
     await date.selectOption('2026-11-04');
     await consent.check();
     if (language.startsWith('en')) await expect(page.locator('#check-draft')).toHaveText('Check plan — no saving');
+    if (!(await page.locator('#additional-checks').evaluate(element => (element as HTMLDetailsElement).open))) await page.locator('#additional-checks > summary').click();
     await page.locator('#check-draft').click();
     await expect(page.locator('#draft-check-result')).toBeVisible();
     await expect(page.locator('#draft-check-result-title')).toContainText(language.startsWith('en') ? /not saved/i : /nicht gespeichert/);
@@ -148,8 +153,10 @@ test('read-only preflight cancellation uses the active job and leaves history in
   await page.goto('/sidepanel.html');
   await expect(page.locator('#apply')).toBeEnabled();
   await page.locator('#apply').click();
+    if (!(await page.locator('#additional-checks').evaluate(element => (element as HTMLDetailsElement).open))) await page.locator('#additional-checks > summary').click();
   await page.locator('#account-confirmation').check();
-  await page.locator('#check-draft').click();
+  if (!(await page.locator('#additional-checks').evaluate(element => (element as HTMLDetailsElement).open))) await page.locator('#additional-checks > summary').click();
+    await page.locator('#check-draft').click();
   await expect(page.locator('#cancel-run')).toBeVisible();
   await expect(page.locator('#scan')).toBeDisabled();
   await page.locator('#cancel-run').click();
