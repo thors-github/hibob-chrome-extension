@@ -5,8 +5,8 @@ This guide describes the one-time external setup and the release automation ship
 ## Current status
 
 - The public source repository is `thors-github/hibob-chrome-extension`.
-- The current source is **1.2.1-beta.1**, an evaluation build with explicit manual account confirmation bound to each plan and browser context. This does not claim automatic employee-ID verification. `docs/release-readiness.json` blocks a stable 1.2.1 release and every Store submission while live saving remains unverified.
-- The first push to `main` may create the explicitly configured **v1.2.1-beta.1** prerelease after tests pass. This bootstrap is prerelease-only, targets that exact tested commit, and does nothing if the tag already exists. Future normal releases use version tags on commits contained in `main`.
+- The current source is **1.2.2-beta.1**, an evaluation build with explicit manual account confirmation bound to each plan and browser context. This does not claim automatic employee-ID verification. `docs/release-readiness.json` blocks a stable 1.2.2 release and every Store submission while live saving remains unverified.
+- The first push to `main` may create the explicitly configured **v1.2.2-beta.1** prerelease after tests pass. This bootstrap is prerelease-only, targets that exact tested commit, and does nothing if the tag already exists. Future normal releases use version tags on commits contained in `main`.
 - **No Chrome Web Store developer account or published listing exists yet.** Store submission is disabled. The installation site's Store button remains disabled.
 - **GitHub Pages has not yet been enabled.** The Pages workflow builds an artifact and reports the one-time administrator step instead of claiming a live website or failing a known-unconfigured deployment.
 
@@ -31,7 +31,7 @@ For the exact numeric manifest version, update `docs/release-readiness.json` wit
 - an empty `blockers` array;
 - non-empty `validationEvidence` pointing to reviewable acceptance evidence without personal HiBob data.
 
-A stable tag must equal `v` plus `manifest.version`. A prerelease tag must also match `manifest.version_name`, for example `v1.2.1-beta.1`. The current stable gate remains false. Changing a flag is not a substitute for validation.
+A stable tag must equal `v` plus `manifest.version`. A prerelease tag must also match `manifest.version_name`, for example `v1.2.2-beta.1`. The current stable gate remains false. Changing a flag is not a substitute for validation.
 
 ## 3. Create the real unlisted Store item
 

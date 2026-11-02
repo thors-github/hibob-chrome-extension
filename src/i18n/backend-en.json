@@ -148,5 +148,14 @@
   "Der Browser kann die sichtbaren HiBob-Kontomerkmale nicht sicher vergleichen. Bitte Chrome aktualisieren.": "The browser cannot reliably compare the visible HiBob account markers. Update Chrome.",
   "Die sichtbaren HiBob-Kontomerkmale haben sich während der Prüfung geändert. Bitte erneut einlesen.": "The visible HiBob account markers changed during the check. Read the month again.",
   "Die Buchungsfreigabe gehört nicht zur aktuellen Vorschau oder Browserseite. Bitte erneut prüfen.": "The booking authorization does not belong to the current preview or browser document. Review it again.",
-  "Bitte das eigene HiBob-Konto für diese Vorschau ausdrücklich bestätigen.": "Explicitly confirm your own HiBob account for this preview."
+  "Bitte das eigene HiBob-Konto für diese Vorschau ausdrücklich bestätigen.": "Explicitly confirm your own HiBob account for this preview.",
+  "HiBob-Tagesentwurf {date} ({type}): {reason}. Es wurde nicht gespeichert.": "HiBob day draft {date} ({type}): {reason}. Nothing was saved.",
+  "Vorhandene Einträge wurden unerwartet verändert": "Existing entries changed unexpectedly",
+  "Der neue Eintrag ist nicht eindeutig zuordenbar": "The new entry cannot be uniquely matched",
+  "HiBob hat einen anderen Eintragstyp hinzugefügt": "HiBob added a different entry type",
+  "HiBob hat keine einzelne zusätzliche Eintragszeile bereitgestellt": "HiBob did not provide exactly one additional entry row",
+  "Die Eintragsfelder sind nicht vollständig lesbar": "The entry fields cannot be fully read",
+  "Der neue Eintrag enthält nicht unterstützte Zusatzdaten": "The new entry contains unsupported additional data",
+  "Der Tagesentwurf stimmt nicht mehr mit dem geprüften Bearbeitungsstand überein": "The day draft no longer matches the last checked editing state",
+  "Arbeit": "Work"
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.2-beta.1
+
+- Fix false failures when HiBob recreates its work and break cards while adding an entry. Match the entry contents instead of relying on the same HTML elements remaining present.
+- Require exactly one newly added card and preserve the contents of all existing cards. Missing, duplicate or otherwise ambiguous changes stop before Save.
+- Find current cards and time controls again after input, change and blur events, including when HiBob reorders cards. Keep completed work periods distinct so the second work period cannot replace the first.
+- Reuse the initial empty work draft. Preserve per-plan account confirmation, context checks, final draft validation, Save checks and persisted readback.
+- Keep existing permissions, settings transfer, update controls and distribution automation. Live saving and future-day acceptance remain unverified; stable publication and Store submission remain blocked.
+
 ## 1.2.1-beta.1
 
 - Connect a production reader for visible HiBob account context and replace the permanently blocked identity path with explicit manual account confirmation for each reviewed plan.
