@@ -5,8 +5,8 @@ This guide describes the one-time external setup and the release automation ship
 ## Current status
 
 - The public source repository is `thors-github/hibob-chrome-extension`.
-- The current source is **1.2.3-beta.1**, an evaluation build with explicit manual account confirmation bound to each plan and browser context. This does not claim automatic employee-ID verification. `docs/release-readiness.json` blocks a stable 1.2.3 release and every Store submission while live saving remains unverified.
-- The first push to `main` may create the explicitly configured **v1.2.3-beta.1** prerelease after tests pass. This bootstrap is prerelease-only, targets that exact tested commit, and does nothing if the tag already exists. Future normal releases use version tags on commits contained in `main`.
+- The current source is **1.3.0-beta.1**, an API evaluation build. Review is bound to the authenticated employee/company and connection generation, with explicit account confirmation for each plan. The installed candidate passed native existing-session connection through direct API requests, complete month read, preview and consent-gated read-only preflight. Interactive SSO and the temporary-tab fallback were not exercised natively. `docs/release-readiness.json` blocks a stable 1.3.0 release and every Store submission while live API saving remains unverified.
+- The first push to `main` may create the explicitly configured **v1.3.0-beta.1** prerelease after tests pass. This bootstrap is prerelease-only, targets that exact tested commit, and does nothing if the tag already exists. Future normal releases use version tags on commits contained in `main`.
 - **No Chrome Web Store developer account or published listing exists yet.** Store submission is disabled. The installation site's Store button remains disabled.
 - **GitHub Pages has not yet been enabled.** The Pages workflow builds an artifact and reports the one-time administrator step instead of claiming a live website or failing a known-unconfigured deployment.
 
@@ -23,7 +23,15 @@ The workflow first sends an authenticated, read-only `GET /repos/thors-github/hi
 
 ## 2. Finish native validation before a stable release
 
-Validate the chosen manual account-confirmation mode, document and visible-marker binding, context changes, readback and interruption behavior. Record the manual assurance limitation accurately; do not relabel image resources as verified employee IDs or change release flags merely to make publication succeed.
+Validate the exact API build, including normal HiBob/SSO login, consistent own-employee/company identity, session generation, account changes, expired sessions, readback and interruption behaviour. Test direct background requests with no open HiBob tab, plus the extension-owned temporary-tab fallback. The fallback must use API requests only, never the old form writer.
+
+The installed **1.3.0-beta.1** candidate passed native read-only acceptance using its actual API adapter: existing-session connection through direct requests, a complete month scan, preview with a retained manual exclusion and **Check plan — no saving**. Fresh account consent was required, and the successful result discarded the scan and approval. No attendance writes, Save or Submit actions were executed. Interactive SSO and the temporary-tab fallback remain outside this native acceptance.
+
+Preflight is not an unsaved server draft or proof of write acceptance. Do not create then delete real entries as a test. The ID-preserving full-day replacement contract is checked by source analysis and local server fixtures; live overwriting remains unverified, and replacements that would delete existing segments are blocked. Live API saving and future-entry acceptance require their own deliberately scoped acceptance before a stable release.
+
+Review the new exact `https://app.hibob.com/*` host permission and matching `connect-src` policy in the Store disclosures. Chrome manages session cookies; the extension must not collect passwords, use the cookies API, persist authentication cookies/tokens or broaden access to arbitrary hosts. A login popup uses normal HiBob and organisation SSO pages. Update screenshots and privacy descriptions to show the account connection rather than the former tab/image-marker workflow.
+
+Adapter protocol 5 and session format 4 discard older previews/approval while preserving preferences and booking history. Reconnect and perform a fresh scan after updating. Native evidence and personal account values must remain outside the public repository. Changing release flags is not a substitute for validation.
 
 For the exact numeric manifest version, update `docs/release-readiness.json` with:
 
@@ -31,7 +39,7 @@ For the exact numeric manifest version, update `docs/release-readiness.json` wit
 - an empty `blockers` array;
 - non-empty `validationEvidence` pointing to reviewable acceptance evidence without personal HiBob data.
 
-A stable tag must equal `v` plus `manifest.version`. A prerelease tag must also match `manifest.version_name`, for example `v1.2.3-beta.1`. The current stable gate remains false. Changing a flag is not a substitute for validation.
+A stable tag must equal `v` plus `manifest.version`. A prerelease tag must also match `manifest.version_name`, for example `v1.3.0-beta.1`. The current stable gate remains false. Changing a flag is not a substitute for validation.
 
 ## 3. Create the real unlisted Store item
 
@@ -112,7 +120,7 @@ The workflow serialises all releases. **It must be the exclusive Store package p
 
 ## Failure and recovery
 
-- **Native validation incomplete:** stable release resolution fails before publishing; use the matching prerelease for evaluation and document exactly which live flows have been tested. Store authentication is never attempted for a prerelease.
+- **Native validation incomplete:** stable release resolution fails before publishing. The current candidate passed native existing-session/direct connection, full-month read and read-only preflight acceptance for its evaluation prerelease. Interactive SSO, the temporary-tab fallback, live API saving and future-entry acceptance still need their own native evidence. A successful preflight is not a successful save. Store authentication is never attempted for a prerelease.
 - **Bootstrap tag already exists:** a new `main` push skips bootstrap publication. If the first publishing job failed with a draft, rerun that failed job from the original workflow run while its artifact is retained; do not recreate or move the tag.
 - **Tests or checksums fail:** no GitHub release or Store submission is attempted. Repair the source and create a new reviewed version/tag where appropriate.
 - **Asset upload fails:** the GitHub release remains a draft. A rerun accepts matching assets and uploads only missing ones. It stops on a different digest rather than overwriting it.
@@ -125,6 +133,8 @@ The workflow serialises all releases. **It must be the exclusive Store package p
 ## Acceptance checks
 
 - A clean tagged checkout produces the tested ZIP, English installation guide, metadata and matching SHA-256 checksums.
+- Record which flows the exact installed API candidate passes without real attendance changes. For **1.3.0-beta.1**, existing-session/direct connection, full-month read, preview, fresh account consent and read-only preflight passed. Interactive SSO and the temporary-tab fallback were not exercised natively; account/session-change and interruption checks also require their own evidence before stable release.
+- Permission/privacy disclosures match the exact HiBob host scope; no authentication cookies, tokens or private native evidence are included in the ZIP or repository.
 - The current stable tag is blocked while the current prerelease is permitted; its Store job is skipped.
 - No published Store configuration leaves the installation control disabled. A verified published URL enables the real Store link without changing source code.
 - A missing Pages configuration produces setup guidance and an artifact; a configured Actions site deploys; authentication errors are not hidden as a setup state.

@@ -107,7 +107,7 @@ export class HiBobDomAdapter {
     this.assertPage();
     const value = await this.contextReader?.();
     const candidate = value && { ...value, documentId: this.documentId };
-    if (isReviewableContext(candidate)) {
+    if (isReviewableContext(candidate) && candidate.mode !== 'api-session') {
       if (candidate.mode === 'stable-identity') return { mode: candidate.mode, documentId: this.documentId, employeeKey: candidate.employeeKey, tenantKey: candidate.tenantKey };
       return { mode: candidate.mode, documentId: this.documentId, pageUrl: candidate.pageUrl, markerFingerprint: candidate.markerFingerprint };
     }

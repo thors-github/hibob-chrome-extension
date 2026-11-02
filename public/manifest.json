@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "__MSG_appName__",
-  "version": "1.2.3",
-  "version_name": "1.2.3-beta.1",
+  "version": "1.3.0",
+  "version_name": "1.3.0-beta.1",
   "description": "__MSG_appDescription__",
   "default_locale": "en",
   "minimum_chrome_version": "116",
@@ -35,6 +35,9 @@
     "default_path": "sidepanel.html"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'none'"
-  }
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src https://app.hibob.com"
+  },
+  "host_permissions": [
+    "https://app.hibob.com/*"
+  ]
 }

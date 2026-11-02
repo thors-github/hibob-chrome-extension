@@ -43,6 +43,8 @@ small { font-size: 12px; }
 .connection.connected .connection-dot { background: #358c67; }
 .connection.selected .connection-dot { background: #a77d1a; }
 .connection p:first-child { font-weight: 600; }
+.connection-actions { display: flex; gap: 8px; margin: -10px 0 20px; }
+.connection-actions .button { min-width: 0; white-space: normal; }
 .muted, .hint { color: var(--muted); }
 .hint { font-size: 12px; line-height: 1.45; }
 .demo-banner { background: #eaf2fb; border: 1px solid #c5dbf2; border-radius: 8px; padding: 11px 12px; margin: 0 0 16px; color: #24496a; font-size: 12px; }

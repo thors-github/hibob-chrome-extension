@@ -10,9 +10,10 @@ export function contextFingerprint(context: AttendanceContext | undefined): stri
   return canonicalJson(context ?? null)!;
 }
 
-export function isReviewableContext(value: unknown): value is AttendanceContext & { mode: 'stable-identity' | 'user-confirmed-ui' } {
+export function isReviewableContext(value: unknown): value is AttendanceContext & { mode: 'api-session' | 'stable-identity' | 'user-confirmed-ui' } {
   if (!value || typeof value !== 'object') return false;
   const context = value as Record<string, unknown>;
+  if (context.mode === 'api-session') return nonempty(context.connectionId) && nonempty(context.employeeKey) && nonempty(context.tenantKey);
   if (!nonempty(context.documentId)) return false;
   if (context.mode === 'stable-identity') return nonempty(context.employeeKey) && nonempty(context.tenantKey);
   return context.mode === 'user-confirmed-ui' && context.pageUrl === OWN_ATTENDANCE_URL && nonempty(context.markerFingerprint);
@@ -25,7 +26,7 @@ export function assertApplyAuthorization(context: AttendanceContext | undefined,
     throw new Error(t('Die Buchungsfreigabe gehört nicht zur aktuellen Vorschau oder Browserseite. Bitte erneut prüfen.'));
   }
   const confirmation = authorization.confirmation;
-  if (context.mode === 'user-confirmed-ui' || confirmation !== undefined) {
+  if (context.mode === 'api-session' || context.mode === 'user-confirmed-ui' || confirmation !== undefined) {
     if (!confirmation || confirmation.confirmed !== true || confirmation.planId !== authorization.planId || confirmation.planRevision !== authorization.planRevision || confirmation.contextFingerprint !== authorization.contextFingerprint) {
       throw new Error(t('Bitte das eigene HiBob-Konto für diese Vorschau ausdrücklich bestätigen.'));
     }

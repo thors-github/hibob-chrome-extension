@@ -1,298 +1,169 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildMonthPlan, defaultSettings, getMonthDates } from '../src/domain/index';
-import type { AdapterCommand, DraftCheckResult, MonthSnapshot, SessionState } from '../src/shared/types';
+import type { AccountConfirmation, AdapterProgress, ApiConnection, ApplyAuthorization, AttendanceContext, BookingPlan, DayPlan, DaySnapshot, MonthSnapshot, PreflightResult, SessionState } from '../src/shared/types';
 import { contextFingerprint } from '../src/shared/context';
 
-afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); });
+const connection = (write = true): ApiConnection => ({ status: 'connected', generation: 'session-fixture', employeeId: 'employee-fixture', companyId: 'company-fixture', employeeLabel: 'Local fixture', companyLabel: 'Local company', transport: 'direct', capabilities: { read: true, write, overwrite: write } });
+const snapshot = (): MonthSnapshot => ({ month: '2026-11', employeeLabel: 'Local fixture', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02T10:00:00Z', context: { mode: 'api-session', connectionId: 'session-fixture', employeeKey: 'employee-fixture', tenantKey: 'company-fixture' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) });
+type Reply = { ok: boolean; state?: SessionState; error?: string; preflight?: PreflightResult };
+const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
 
-it.each(['success', 'missing-result', 'legacy-protocol', 'cancel-before-dispatch'] as const)('routes a draft check exclusively through protocol4 CHECK_DAY_DRAFT: %s', async scenario => {
-  type Reply = { ok: boolean; state?: SessionState; error?: string; draftCheck?: DraftCheckResult };
+afterEach(() => { vi.unstubAllGlobals(); vi.resetModules(); vi.doUnmock('../src/hibob/api-adapter'); });
+
+async function fixture(options: { initial?: SessionState; failLoads?: number; beforeSave?: (state: SessionState) => Promise<void> } = {}) {
   let receiver!: (message: unknown, sender: object, respond: (response: Reply) => void) => unknown;
-  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Draft fixture', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02T10:00:00Z', context: { mode: 'user-confirmed-ui', documentId: 'draft-doc', pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: 'self-page' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
-  const settings = { ...defaultSettings('2026-11'), excludedDates: getMonthDates('2026-11').filter(date => date !== '2026-11-03') };
-  const plan = buildMonthPlan(settings, snapshot, {}, 1);
-  const history = { planId: 'previous-failed-run', status: 'failed' as const, startedAt: '2026-11-02', updatedAt: '2026-11-02', results: [{ date: '2026-11-03', status: 'failed' as const, message: 'No real booking saved' }] };
-  let stored: SessionState = { schemaVersion: 3, revision: 5, planRevision: 1, editLease: { planRevision: 1, changeId: 'draft-review' }, tabId: 9, snapshot, plan, run: history, update: { installedVersion: '1.2.3' } };
-  const publications: SessionState[] = []; const sent: AdapterCommand[] = [];
-  let entered!: () => void; let release!: () => void;
-  const held = new Promise<void>(resolve => { entered = resolve; });
+  let clicked!: (tab: { windowId: number; id?: number; url?: string }) => void;
+  let stored = options.initial && structuredClone(options.initial);
+  const publications: SessionState[] = [];
+  const api = {
+    connect: vi.fn(async (): Promise<ApiConnection> => connection()), disconnect: vi.fn(async () => {}),
+    scanMonth: vi.fn(async (_connection: ApiConnection, _month: string, _progress?: (value: AdapterProgress) => void, _signal?: AbortSignal): Promise<MonthSnapshot> => snapshot()),
+    applyDay: vi.fn(async (_connection: ApiConnection, day: DayPlan, _context?: AttendanceContext, _authorization?: ApplyAuthorization, _progress?: (value: AdapterProgress) => void, _signal?: AbortSignal): Promise<DaySnapshot> => ({ date: day.date, entries: day.proposed, reportedMinutes: day.netMinutes, editable: true, fingerprint: 'saved-fixture' })),
+    preflightDay: vi.fn(async (_connection: ApiConnection, day: DayPlan, _context?: AttendanceContext, _authorization?: ApplyAuthorization, _progress?: (value: AdapterProgress) => void, _signal?: AbortSignal): Promise<PreflightResult> => ({ date: day.date, checked: true, saved: false, serverValidated: false, netMinutes: day.netMinutes! })),
+    cancel: vi.fn(), assertIdle: vi.fn(async () => {}), recover: vi.fn(async (_connection: ApiConnection, _jobId: string) => {}),
+  };
+  vi.doMock('../src/hibob/api-adapter', () => ({ HiBobApiAdapter: class { connect = api.connect; disconnect = api.disconnect; scanMonth = api.scanMonth; applyDay = api.applyDay; preflightDay = api.preflightDay; cancel = api.cancel; assertIdle = api.assertIdle; recover = api.recover; } }));
+  let failures = options.failLoads ?? 0;
+  const get = vi.fn(async () => { if (failures-- > 0) throw new Error('Fixture session storage unavailable'); return { sessionState: stored }; });
+  const set = vi.fn(async ({ sessionState }: { sessionState: SessionState }) => { await options.beforeSave?.(sessionState); stored = structuredClone(sessionState); publications.push(stored); });
+  const open = vi.fn(async () => {}), reload = vi.fn(), sendMessage = vi.fn(), executeScript = vi.fn();
   vi.stubGlobal('chrome', {
-    storage: { session: { get: async () => ({ sessionState: stored }), set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); publications.push(stored); } } },
-    sidePanel: { open: async () => {} }, action: { onClicked: { addListener: () => {} } },
-    runtime: { id: 'test', getManifest: () => ({ version: '1.2.3' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
-    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: AdapterCommand) => {
-      sent.push(structuredClone(message));
-      if (message.type === 'PING') {
-        if (scenario === 'cancel-before-dispatch') { entered(); await new Promise<void>(resolve => { release = resolve; }); }
-        return { ok: true, protocolVersion: scenario === 'legacy-protocol' ? 3 : 4, extensionVersion: '1.2.3' };
-      }
-      if (message.type === 'CHECK_DAY_DRAFT') return scenario === 'missing-result' ? { ok: true } : { ok: true, draftCheck: { date: message.day.date, entries: message.day.proposed, netMinutes: message.day.netMinutes, saved: false, unchanged: true } };
-      if (message.type === 'CANCEL') return { ok: true };
-      throw new Error('Unexpected Save or scan route');
-    } }, scripting: { executeScript: vi.fn() },
-  });
-  await import('../src/background');
-  const rpc = (message: object) => new Promise<Reply>(resolve => receiver(message, { id: 'test', url: 'chrome-extension://test/sidepanel.html' }, resolve));
-  await rpc({ type: 'PANEL_GET_STATE' });
-  const command = { type: 'PANEL_CHECK_DRAFT', plan, expectedPlanRevision: 1, date: '2026-11-03' };
-  expect((await rpc(command)).ok).toBe(false); expect(sent).toEqual([]);
-  const confirmation = { planId: plan.id, planRevision: 1, contextFingerprint: contextFingerprint(plan.snapshot.context), confirmed: true };
-  const checking = rpc({ ...command, confirmation });
-  if (scenario === 'cancel-before-dispatch') { await held; await rpc({ type: 'PANEL_CANCEL', jobId: stored.job!.id }); release(); }
-  const response = await checking;
-  expect(response.ok).toBe(scenario === 'success');
-  expect(sent.filter(message => message.type === 'APPLY_DAY')).toEqual([]);
-  const checks = sent.filter(message => message.type === 'CHECK_DAY_DRAFT');
-  expect(checks).toHaveLength(scenario === 'legacy-protocol' || scenario === 'cancel-before-dispatch' ? 0 : 1);
-  if (scenario === 'success') {
-    expect(response.draftCheck).toMatchObject({ date: '2026-11-03', netMinutes: 480, saved: false, unchanged: true });
-    expect(checks[0]).toMatchObject({ authorization: { planId: plan.id, planRevision: 1, contextFingerprint: confirmation.contextFingerprint, confirmation } });
-  } else expect(response.draftCheck).toBeUndefined();
-  expect(response.state?.run).toEqual(history); expect(response.state?.snapshot).toBeUndefined(); expect(response.state?.plan?.canReview).toBe(false);
-  for (const state of publications) { expect(state.run).toEqual(history); expect((state as SessionState & { draftCheck?: unknown }).draftCheck).toBeUndefined(); }
-});
-
-it('unbinds and discards the preview when opened outside HiBob without scanning automatically', async () => {
-  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Test', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02', context: { documentId: 'doc-review', employeeKey: 'employee-review', tenantKey: 'tenant-review', mode: 'stable-identity' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
-  let stored: SessionState = { tabId: 9, snapshot, plan: buildMonthPlan(defaultSettings('2026-11'), snapshot, {}, 1) };
-  let clicked!: (tab: { id?: number; windowId: number; url?: string }) => void;
-  const sendMessage = vi.fn();
-  const executeScript = vi.fn();
-  vi.stubGlobal('chrome', {
-    storage: { session: { get: async () => ({ sessionState: stored }), set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); } } },
-    sidePanel: { open: async () => {} },
-    action: { onClicked: { addListener: (listener: typeof clicked) => { clicked = listener; } } },
-    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: () => {} } },
+    storage: { session: { get, set } }, sidePanel: { open }, action: { onClicked: { addListener: (listener: typeof clicked) => { clicked = listener; } } },
+    runtime: { id: 'test', getManifest: () => ({ version: '1.2.3' }), reload, onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
     tabs: { sendMessage }, scripting: { executeScript },
   });
   await import('../src/background');
-  clicked({ id: 12, windowId: 1, url: 'https://example.org/' });
-  await vi.waitFor(() => expect(stored.tabId).toBeUndefined());
-  expect(stored.snapshot).toBeUndefined();
-  expect(stored.plan).toBeUndefined();
-  expect(stored.error).toContain('HiBob öffnen');
-  clicked({ id: 13, windowId: 1, url: 'https://app.hibob.com/attendance/my-attendance' });
-  await vi.waitFor(() => expect(stored.tabId).toBe(13));
-  expect(stored.snapshot).toBeUndefined();
-  expect(stored.error).toBeUndefined();
-  clicked({ id: 14, windowId: 1, url: 'https://app.hibob.com/home' });
-  await vi.waitFor(() => expect(stored.tabId).toBe(14));
-  clicked({ windowId: 1 });
-  await vi.waitFor(() => expect(stored.tabId).toBeUndefined());
-  expect(sendMessage).not.toHaveBeenCalled();
-  expect(executeScript).not.toHaveBeenCalled();
-});
+  const rpc = (message: object, sender: object = { id: 'test', url: 'chrome-extension://test/sidepanel.html' }) => new Promise<Reply>(resolve => receiver(message, sender, resolve));
+  const connect = () => rpc({ type: 'PANEL_CONNECT' });
+  async function review() {
+    const scan = await rpc({ type: 'PANEL_SCAN', month: '2026-11' }); expect(scan.ok).toBe(true);
+    const settings = { ...defaultSettings('2026-11'), excludedDates: getMonthDates('2026-11').filter(date => date !== '2026-11-03') };
+    const candidate = buildMonthPlan(settings, scan.state!.snapshot!, {}, 1);
+    const invalidation = await rpc({ type: 'PANEL_INVALIDATE_PLAN', expectedPlanRevision: scan.state!.planRevision, changeId: 'review-fixture' });
+    const result = await rpc({ type: 'PANEL_SAVE_PLAN', plan: candidate, lease: invalidation.state!.editLease });
+    expect(result.ok).toBe(true);
+    const plan = result.state!.plan!, revision = result.state!.planRevision!;
+    const confirmation: AccountConfirmation = { planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context), confirmed: true };
+    return { plan, revision, confirmation };
+  }
+  return { api, rpc, receiver, clicked, stored: () => stored, publications, connect, review, get, set, open, reload, sendMessage, executeScript };
+}
 
-it('cancels a pending transport preparation before APPLY_DAY is dispatched', async () => {
-  let stored: SessionState = {};
-  let receiver!: (message: unknown, sender: object, respond: (response: { ok: boolean; state?: SessionState; error?: string }) => void) => unknown;
-  let clicked!: (tab: { id: number; windowId: number; url: string }) => void;
-  let holdPing = false;
-  let entered!: () => void;
-  let release!: () => void;
-  const pingEntered = new Promise<void>(resolve => { entered = resolve; });
-  const writes: unknown[] = [];
-  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Test', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02', context: { documentId: 'doc-review', employeeKey: 'employee-review', tenantKey: 'tenant-review', mode: 'stable-identity' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
-  vi.stubGlobal('chrome', {
-    storage: { session: { get: async () => ({ sessionState: stored }), set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); } } },
-    sidePanel: { open: async () => {} },
-    action: { onClicked: { addListener: (listener: typeof clicked) => { clicked = listener; } } },
-    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
-    tabs: {
-      get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }),
-      sendMessage: async (_tabId: number, message: { type: string }) => {
-        if (message.type === 'PING' && holdPing) { entered(); await new Promise<void>(resolve => { release = resolve; }); }
-        if (message.type === 'SCAN_MONTH') return { ok: true, snapshot };
-        if (message.type === 'APPLY_DAY') writes.push(message);
-        return { ok: true, protocolVersion: 4, extensionVersion: '1.2.0' };
-      },
-    },
-    scripting: { executeScript: async () => {} },
+describe('direct API background transport', () => {
+  it('opens from any website without implicit sign-in, scans, content injection or account reset', async () => {
+    const app = await fixture();
+    app.clicked({ id: 22, windowId: 1, url: 'https://example.org' });
+    await app.rpc({ type: 'PANEL_GET_STATE' });
+    expect(app.api.connect).not.toHaveBeenCalled(); expect(app.api.scanMonth).not.toHaveBeenCalled();
+    await app.connect(); const review = await app.review(); const before = structuredClone(app.stored());
+    app.clicked({ id: 23, windowId: 2, url: 'https://another.example' });
+    const state = (await app.rpc({ type: 'PANEL_GET_STATE' })).state;
+    expect(state).toEqual(before); expect(state?.plan?.id).toBe(review.plan.id); expect(state?.tabId).toBeUndefined();
+    expect(app.open).toHaveBeenLastCalledWith({ windowId: 2 });
+    expect(app.sendMessage).not.toHaveBeenCalled(); expect(app.executeScript).not.toHaveBeenCalled();
   });
-  await import('../src/background');
-  clicked({ id: 9, windowId: 1, url: 'https://app.hibob.com/attendance/my-attendance' });
-  await vi.waitFor(() => expect(stored.tabId).toBe(9));
-  const rpc = (message: object, sender: object = { id: 'test', url: 'chrome-extension://test/sidepanel.html' }) => new Promise<{ ok: boolean; state?: SessionState; error?: string }>(resolve => { receiver(message, sender, resolve); });
-  expect((await rpc({ type: 'PANEL_GET_STATE' }, { id: 'test', tab: { id: 9 }, url: 'https://app.hibob.com/attendance/my-attendance' })).ok).toBe(false);
-  expect((await rpc({ type: 'PANEL_SCAN', month: '2026-11' })).ok).toBe(true);
-  const preview = buildMonthPlan(defaultSettings('2026-11'), snapshot, {}, 2);
-  const invalidated = await rpc({ type: 'PANEL_INVALIDATE_PLAN', expectedPlanRevision: stored.planRevision, changeId: 'review-edit' });
-  const saved = await rpc({ type: 'PANEL_SAVE_PLAN', plan: preview, lease: invalidated.state!.editLease });
-  expect(saved.ok).toBe(true);
-  holdPing = true;
-  const applying = rpc({ type: 'PANEL_APPLY', plan: saved.state!.plan, expectedPlanRevision: saved.state!.planRevision });
-  await pingEntered;
-  expect((await rpc({ type: 'PANEL_CANCEL', jobId: stored.job!.id })).ok).toBe(true);
-  release();
-  await applying;
-  expect(writes).toEqual([]);
-  expect(stored.run?.status).toBe('stopped');
-});
 
-it('retries a failed session read and shares each initialization attempt across concurrent requests', async () => {
-  let receiver!: (message: unknown, sender: object, respond: (response: { ok: boolean; state?: SessionState; error?: string }) => void) => unknown;
-  let clicked!: (tab: { id: number; windowId: number; url: string }) => void;
-  let rejectInitial!: (error: Error) => void;
-  let reads = 0;
-  const firstRead = new Promise<never>((_resolve, reject) => { rejectInitial = reject; });
-  let stored: SessionState = {};
-  vi.stubGlobal('chrome', {
-    storage: { session: { get: async () => { reads++; return reads === 1 ? firstRead : { sessionState: stored }; }, set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); } } },
-    sidePanel: { open: async () => {} }, action: { onClicked: { addListener: (listener: typeof clicked) => { clicked = listener; } } },
-    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
-    tabs: { sendMessage: vi.fn() }, scripting: { executeScript: vi.fn() },
+  it.each(['success', 'missing-result', 'server-validated', 'error'] as const)('uses only the read-only API preflight route: %s', async scenario => {
+    const history = { planId: 'past', status: 'failed' as const, startedAt: 'x', updatedAt: 'x', results: [{ date: '2026-10-30', status: 'failed' as const, message: 'Past result' }] };
+    const app = await fixture({ initial: { schemaVersion: 4, run: history } });
+    await app.connect(); const { plan, revision, confirmation } = await app.review();
+    if (scenario === 'missing-result') app.api.preflightDay.mockResolvedValueOnce(undefined as unknown as PreflightResult);
+    if (scenario === 'server-validated') app.api.preflightDay.mockResolvedValueOnce({ date: '2026-11-03', checked: true, saved: false, serverValidated: true, netMinutes: 480 } as unknown as PreflightResult);
+    if (scenario === 'error') app.api.preflightDay.mockRejectedValueOnce(new Error('Local preflight failure'));
+    const command = { type: 'PANEL_PREFLIGHT', plan, expectedPlanRevision: revision, date: '2026-11-03' };
+    expect((await app.rpc(command)).ok).toBe(false); expect(app.api.preflightDay).not.toHaveBeenCalled();
+    const result = await app.rpc({ ...command, confirmation });
+    expect(result.ok).toBe(scenario === 'success');
+    expect(app.api.preflightDay).toHaveBeenCalledOnce(); expect(app.api.applyDay).not.toHaveBeenCalled();
+    if (scenario === 'success') expect(result.preflight).toEqual({ date: '2026-11-03', checked: true, saved: false, serverValidated: false, netMinutes: 480 });
+    else expect(result.preflight).toBeUndefined();
+    expect(result.state?.run).toEqual(history); expect(result.state?.snapshot).toBeUndefined(); expect(result.state?.plan?.canReview).toBe(false);
+    expect(app.publications.some(state => 'preflight' in state)).toBe(false);
   });
-  await import('../src/background');
-  const rpc = () => new Promise<{ ok: boolean; state?: SessionState; error?: string }>(resolve => receiver({ type: 'PANEL_GET_STATE' }, { id: 'test', url: 'chrome-extension://test/sidepanel.html' }, resolve));
-  const first = rpc(); const concurrent = rpc();
-  rejectInitial(new Error('temporary read failure'));
-  expect((await first).ok).toBe(false); expect((await concurrent).ok).toBe(false);
-  expect(reads).toBe(1);
-  expect((await rpc()).ok).toBe(true);
-  expect(reads).toBe(2);
-  clicked({ id: 9, windowId: 1, url: 'https://app.hibob.com/attendance/my-attendance' });
-  await vi.waitFor(() => expect(stored.tabId).toBe(9));
-  expect(reads).toBe(2);
-});
 
-it.each([undefined, 2, 3])('requires protocol 4 before dispatching a scan (received %s)', async protocolVersion => {
-  let receiver!: (message: unknown, sender: object, respond: (response: { ok: boolean; state?: SessionState; error?: string }) => void) => unknown;
-  const sent: string[] = [];
-  const executeScript = vi.fn();
-  vi.stubGlobal('chrome', {
-    storage: { session: { get: async () => ({ sessionState: { tabId: 9 } }), set: async () => {} } },
-    sidePanel: { open: async () => {} }, action: { onClicked: { addListener: () => {} } },
-    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
-    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string }) => { sent.push(message.type); return { ok: true, protocolVersion, extensionVersion: '1.2.0' }; } },
-    scripting: { executeScript },
+  it('correlates cancellation with the active job and aborts without invoking a write', async () => {
+    const app = await fixture(); await app.connect(); const { plan, revision, confirmation } = await app.review();
+    const entered = deferred(); let signal!: AbortSignal;
+    app.api.preflightDay.mockImplementationOnce(async (_connection, _day, _context, _authorization, _progress, currentSignal) => {
+      signal = currentSignal!; entered.resolve();
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('Preflight aborted')), { once: true }));
+    });
+    const running = app.rpc({ type: 'PANEL_PREFLIGHT', plan, expectedPlanRevision: revision, date: '2026-11-03', confirmation });
+    await entered.promise;
+    expect((await app.rpc({ type: 'PANEL_CANCEL', jobId: 'stale-job' })).ok).toBe(false); expect(signal.aborted).toBe(false);
+    const job = app.stored()!.job!; expect(job.connectionId).toBe(connection().generation); expect(job.tabId).toBeUndefined();
+    await app.rpc({ type: 'PANEL_CANCEL', jobId: job.id });
+    expect(signal.aborted).toBe(true); expect(app.api.cancel).toHaveBeenCalledOnce();
+    expect((await running).ok).toBe(false); expect(app.api.applyDay).not.toHaveBeenCalled();
   });
-  await import('../src/background');
-  const response = await new Promise<{ ok: boolean; error?: string }>(resolve => receiver({ type: 'PANEL_SCAN', month: '2026-11' }, { id: 'test', url: 'chrome-extension://test/sidepanel.html' }, resolve));
-  expect(response.ok).toBe(false);
-  expect(response.error).toContain('ältere');
-  expect(sent).toEqual(['PING']);
-  expect(executeScript).not.toHaveBeenCalled();
-});
 
-it('cancels only the persisted interrupted job and waits for idle before starting a new scan', async () => {
-  let receiver!: (message: unknown, sender: object, respond: (response: { ok: boolean; state?: SessionState; error?: string }) => void) => unknown;
-  const sent: { type: string; jobId?: string }[] = [];
-  let active: { id: string; kind: string } | undefined = { id: 'interrupted-scan', kind: 'scan' };
-  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Test', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02', days: [] };
-  vi.stubGlobal('chrome', {
-    storage: { session: { get: async () => ({ sessionState: { schemaVersion: 3, revision: 3, planRevision: 2, tabId: 9, job: { id: 'interrupted-scan', kind: 'scan', status: 'running', tabId: 9, month: '2026-11', startedAt: 'x', updatedAt: 'x' } } }), set: async () => {} } },
-    sidePanel: { open: async () => {} }, action: { onClicked: { addListener: () => {} } },
-    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
-    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string; jobId?: string }) => {
-      sent.push(message);
-      if (message.type === 'PING') return { ok: true, protocolVersion: 4, extensionVersion: '1.2.0', activeJob: active };
-      if (message.type === 'CANCEL') { active = undefined; return { ok: true }; }
-      return { ok: true, snapshot };
-    } }, scripting: { executeScript: vi.fn() },
+  it('does not dispatch a write cancelled while its durable journal is pending', async () => {
+    const entered = deferred(), release = deferred(); let hold = false;
+    const app = await fixture({ beforeSave: async state => { if (hold && state.run?.results.some(item => item.status === 'running')) { entered.resolve(); await release.promise; } } });
+    await app.connect(); const { plan, revision, confirmation } = await app.review(); hold = true;
+    const running = app.rpc({ type: 'PANEL_APPLY', plan, expectedPlanRevision: revision, confirmation });
+    await entered.promise; await app.rpc({ type: 'PANEL_CANCEL', jobId: app.stored()!.job!.id }); release.resolve();
+    const result = await running; expect(result.state?.run?.status).toBe('stopped'); expect(app.api.applyDay).not.toHaveBeenCalled();
   });
-  await import('../src/background');
-  const response = await new Promise<{ ok: boolean; state?: SessionState }>(resolve => receiver({ type: 'PANEL_SCAN', month: '2026-11' }, { id: 'test', url: 'chrome-extension://test/sidepanel.html' }, resolve));
-  expect(response.ok).toBe(true);
-  expect(sent.filter(message => message.type === 'CANCEL')).toEqual([{ type: 'CANCEL', jobId: 'interrupted-scan' }]);
-  const scanned = sent.find(message => message.type === 'SCAN_MONTH')!;
-  expect(scanned.jobId).toBeTruthy(); expect(scanned.jobId).not.toBe('interrupted-scan');
-});
 
-it('returns a newer blocked state and visible error when canonical plan persistence rejects', async () => {
-  let receiver!: (message: unknown, sender: object, respond: (response: { ok: boolean; state?: SessionState; error?: string }) => void) => unknown;
-  let stored: SessionState = { tabId: 9 };
-  let rejectedRevision = -1;
-  let rejectPlan = true;
-  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Review fixture', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02T10:00:00Z', context: { documentId: 'doc', employeeKey: 'employee', tenantKey: 'tenant', mode: 'stable-identity' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
-  vi.stubGlobal('chrome', {
-    storage: { session: { get: async () => ({ sessionState: stored }), set: async ({ sessionState }: { sessionState: SessionState }) => {
-      if (rejectPlan && sessionState.plan?.canReview) { rejectPlan = false; rejectedRevision = sessionState.revision!; throw new Error('plan journal unavailable'); }
-      stored = structuredClone(sessionState);
-    } } },
-    sidePanel: { open: async () => {} }, action: { onClicked: { addListener: () => {} } },
-    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
-    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string }) => message.type === 'PING' ? { ok: true, protocolVersion: 4, extensionVersion: '1.2.0' } : { ok: true, snapshot } },
-    scripting: { executeScript: vi.fn() },
+  it('shares a fresh initialization attempt after a storage read failure', async () => {
+    const app = await fixture({ failLoads: 1 });
+    await vi.waitFor(() => expect(app.get).toHaveBeenCalledOnce());
+    const responses = await Promise.all([app.rpc({ type: 'PANEL_GET_STATE' }), app.rpc({ type: 'PANEL_GET_STATE' })]);
+    expect(responses.every(result => result.ok)).toBe(true); expect(app.get).toHaveBeenCalledTimes(2);
   });
-  await import('../src/background');
-  const rpc = (message: object) => new Promise<{ ok: boolean; state?: SessionState; error?: string }>(resolve => receiver(message, { id: 'test', url: 'chrome-extension://test/sidepanel.html' }, resolve));
-  expect((await rpc({ type: 'PANEL_SCAN', month: '2026-11' })).ok).toBe(true);
-  const invalid = await rpc({ type: 'PANEL_INVALIDATE_PLAN', expectedPlanRevision: stored.planRevision, changeId: 'save-with-error' });
-  const plan = buildMonthPlan(defaultSettings('2026-11'), stored.snapshot!, {}, 123);
-  const rejected = await rpc({ type: 'PANEL_SAVE_PLAN', plan, lease: invalid.state!.editLease });
-  expect(rejected.ok).toBe(false);
-  expect(rejected.error).toContain('plan journal unavailable');
-  expect(rejected.state?.error).toContain('plan journal unavailable');
-  expect(rejected.state?.revision).toBeGreaterThan(rejectedRevision);
-  expect(rejected.state?.plan?.canReview).toBe(false);
-});
 
-it('reopens the same bound tab during a held scan without an error or a second scan', async () => {
-  let receiver!: (message: unknown, sender: object, respond: (response: { ok: boolean; state?: SessionState; error?: string }) => void) => unknown;
-  let clicked!: (tab: { id: number; windowId: number; url: string }) => void;
-  let stored: SessionState = { tabId: 9 };
-  let entered!: () => void; let release!: () => void;
-  const enteredScan = new Promise<void>(resolve => { entered = resolve; });
-  const heldScan = new Promise<void>(resolve => { release = resolve; });
-  let scanCalls = 0;
-  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Review fixture', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02T10:00:00Z', days: [] };
-  vi.stubGlobal('chrome', {
-    storage: { session: { get: async () => ({ sessionState: stored }), set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); } } },
-    sidePanel: { open: vi.fn(async () => {}) }, action: { onClicked: { addListener: (listener: typeof clicked) => { clicked = listener; } } },
-    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
-    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string }) => {
-      if (message.type === 'PING') return { ok: true, protocolVersion: 4, extensionVersion: '1.2.0' };
-      scanCalls++; entered(); await heldScan; return { ok: true, snapshot };
-    } }, scripting: { executeScript: vi.fn() },
+  it('recovers interrupted state through a fresh read without replaying the write', async () => {
+    const initial: SessionState = { schemaVersion: 4, connection: connection(), job: { id: 'old-job', connectionId: connection().generation, kind: 'apply', status: 'running', month: '2026-11', startedAt: 'x', updatedAt: 'x' }, run: { planId: 'old', status: 'running', results: [{ date: '2026-11-03', status: 'running', message: 'Interrupted' }], startedAt: 'x', updatedAt: 'x' } };
+    const app = await fixture({ initial });
+    const restored = await app.rpc({ type: 'PANEL_GET_STATE' });
+    expect(restored.state?.run?.results[0].status).toBe('uncertain'); expect(restored.state?.job?.status).toBe('interrupted');
+    expect(app.api.applyDay).not.toHaveBeenCalled();
+    expect((await app.rpc({ type: 'PANEL_SCAN', month: '2026-11' })).ok).toBe(true);
+    expect(app.api.recover).toHaveBeenCalledWith(connection(), 'old-job'); expect(app.api.scanMonth).toHaveBeenCalledOnce(); expect(app.api.applyDay).not.toHaveBeenCalled();
   });
-  await import('../src/background');
-  const rpc = (message: object) => new Promise<{ ok: boolean; state?: SessionState; error?: string }>(resolve => receiver(message, { id: 'test', url: 'chrome-extension://test/sidepanel.html' }, resolve));
-  const scanning = rpc({ type: 'PANEL_SCAN', month: '2026-11' });
-  await enteredScan;
-  const jobId = stored.job!.id;
-  receiver({ type: 'ADAPTER_PROGRESS', progress: { jobId, phase: 'scan', completed: 2, total: 30, message: 'Reading' } }, { id: 'test', tab: { id: 9 } }, () => {});
-  await vi.waitFor(() => expect(stored.progress?.completed).toBe(2));
-  clicked({ id: 9, windowId: 1, url: 'https://app.hibob.com/attendance/my-attendance' });
-  // Flush both action and state RPC continuations before inspecting the controller.
-  const reopened = await rpc({ type: 'PANEL_GET_STATE' });
-  expect(reopened.state?.error).toBeUndefined();
-  expect(reopened.state?.job).toMatchObject({ id: jobId, kind: 'scan', status: 'running' });
-  expect(reopened.state?.progress?.completed).toBe(2);
-  expect(scanCalls).toBe(1);
-  release();
-  expect((await scanning).ok).toBe(true);
-  expect((await rpc({ type: 'PANEL_GET_STATE' })).state?.error).toBeUndefined();
-  expect(scanCalls).toBe(1);
-});
 
-it('requires per-plan manual consent and carries canonical authorization through protocol 4', async () => {
-  let receiver!: (message: unknown, sender: object, respond: (response: { ok: boolean; state?: SessionState; error?: string }) => void) => unknown;
-  let stored: SessionState = { tabId: 9 };
-  const writes: { type: string; jobId?: string; authorization?: unknown }[] = [];
-  const snapshot: MonthSnapshot = { month: '2026-11', employeeLabel: 'Review fixture', periodLabel: 'November', source: 'hibob', scannedAt: '2026-11-02T10:00:00Z', context: { mode: 'user-confirmed-ui', documentId: 'manual-doc', pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: 'self-page' }, days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: date })) };
-  vi.stubGlobal('chrome', {
-    storage: { session: { get: async () => ({ sessionState: stored }), set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); } } },
-    sidePanel: { open: async () => {} }, action: { onClicked: { addListener: () => {} } },
-    runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), onUpdateAvailable: { addListener: () => {} }, getURL: (path: string) => `chrome-extension://test/${path}`, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
-    tabs: { get: async () => ({ url: 'https://app.hibob.com/attendance/my-attendance', status: 'complete' }), sendMessage: async (_id: number, message: { type: string; day?: { date: string; proposed: unknown[] }; jobId?: string; authorization?: unknown }) => {
-      if (message.type === 'PING') return { ok: true, protocolVersion: 4, extensionVersion: '1.2.0' };
-      if (message.type === 'SCAN_MONTH') return { ok: true, snapshot };
-      writes.push(structuredClone(message)); return { ok: true, day: { date: message.day!.date, entries: message.day!.proposed, editable: true, fingerprint: 'saved' } };
-    } }, scripting: { executeScript: vi.fn() },
+  it('returns a newer blocked state if canonical plan persistence fails', async () => {
+    let rejectPlan = false;
+    const app = await fixture({ beforeSave: async state => { if (rejectPlan && state.plan) throw new Error('Local plan storage failed'); } });
+    await app.connect(); const scan = await app.rpc({ type: 'PANEL_SCAN', month: '2026-11' });
+    const plan = buildMonthPlan(defaultSettings('2026-11'), scan.state!.snapshot!, {}, 1);
+    const invalid = await app.rpc({ type: 'PANEL_INVALIDATE_PLAN', expectedPlanRevision: scan.state!.planRevision, changeId: 'failed-plan' });
+    rejectPlan = true;
+    const response = await app.rpc({ type: 'PANEL_SAVE_PLAN', plan, lease: invalid.state!.editLease });
+    expect(response.ok).toBe(false); expect(response.error).toContain('storage'); expect(response.state?.plan?.canReview).toBe(false);
+    expect(app.api.applyDay).not.toHaveBeenCalled();
   });
-  await import('../src/background');
-  const rpc = (message: object) => new Promise<{ ok: boolean; state?: SessionState; error?: string }>(resolve => receiver(message, { id: 'test', url: 'chrome-extension://test/sidepanel.html' }, resolve));
-  await rpc({ type: 'PANEL_SCAN', month: '2026-11' });
-  const invalid = await rpc({ type: 'PANEL_INVALIDATE_PLAN', expectedPlanRevision: stored.planRevision, changeId: 'manual-review' });
-  const settings = { ...defaultSettings('2026-11'), excludedDates: getMonthDates('2026-11').filter(date => date !== '2026-11-02') };
-  const saved = await rpc({ type: 'PANEL_SAVE_PLAN', plan: buildMonthPlan(settings, stored.snapshot!, {}, 1), lease: invalid.state!.editLease });
-  const plan = structuredClone(saved.state!.plan!);
-  const revision = saved.state!.planRevision!;
-  const missing = await rpc({ type: 'PANEL_APPLY', plan, expectedPlanRevision: revision });
-  expect(missing.ok).toBe(false); expect(missing.error).toContain('ausdrücklich'); expect(writes).toHaveLength(0);
-  const confirmation = { planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context), confirmed: true };
-  expect((await rpc({ type: 'PANEL_APPLY', plan, expectedPlanRevision: revision, confirmation })).ok).toBe(true);
-  expect(writes).toHaveLength(1);
-  expect(writes[0].authorization).toEqual({ planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context), confirmation });
-  expect((stored as SessionState & { confirmation?: unknown }).confirmation).toBeUndefined();
+
+  it('requires canonical manual consent and passes the approved API account context to the writer', async () => {
+    const app = await fixture(); await app.connect(); const { plan, revision, confirmation } = await app.review();
+    const command = { type: 'PANEL_APPLY', plan, expectedPlanRevision: revision };
+    expect((await app.rpc(command)).ok).toBe(false); expect(app.api.applyDay).not.toHaveBeenCalled();
+    const result = await app.rpc({ ...command, confirmation });
+    expect(result.ok).toBe(true); expect(result.state?.run?.status).toBe('complete'); expect(app.api.applyDay).toHaveBeenCalledOnce();
+    expect(app.api.applyDay.mock.calls[0].slice(0, 4)).toEqual([connection(), plan.days.find(day => day.action === 'create'), plan.snapshot.context, { planId: plan.id, planRevision: revision, contextFingerprint: confirmation.contextFingerprint, confirmation }]);
+    expect(app.sendMessage).not.toHaveBeenCalled(); expect(app.executeScript).not.toHaveBeenCalled();
+  });
+
+  it('stops after an uncertain HTTP write and never retries or falls back to the DOM', async () => {
+    const app = await fixture(); await app.connect(); const { plan, revision, confirmation } = await app.review();
+    app.api.applyDay.mockRejectedValueOnce(Object.assign(new Error('Response lost after request'), { uncertain: true }));
+    const result = await app.rpc({ type: 'PANEL_APPLY', plan, expectedPlanRevision: revision, confirmation });
+    expect(result.state?.run?.results.find(item => item.date === '2026-11-03')?.status).toBe('uncertain'); expect(app.api.applyDay).toHaveBeenCalledOnce();
+    expect((await app.rpc({ type: 'PANEL_APPLY', plan, expectedPlanRevision: revision, confirmation })).ok).toBe(false); expect(app.api.applyDay).toHaveBeenCalledOnce();
+    expect(app.sendMessage).not.toHaveBeenCalled(); expect(app.executeScript).not.toHaveBeenCalled();
+  });
+
+  it('rejects web pages, content scripts, foreign extensions and similar-looking panel paths', async () => {
+    const app = await fixture();
+    for (const sender of [
+      { id: 'test', url: 'https://app.hibob.com/attendance/my-attendance' },
+      { id: 'test', url: 'chrome-extension://test/sidepanel.html', tab: { id: 1 } },
+      { id: 'other', url: 'chrome-extension://test/sidepanel.html' },
+      { id: 'test', url: 'chrome-extension://test/sidepanel.html.evil' },
+      { id: 'test', url: 'chrome-extension://evil/sidepanel.html' },
+    ]) expect((await app.rpc({ type: 'PANEL_CONNECT' }, sender)).ok).toBe(false);
+    expect(app.api.connect).not.toHaveBeenCalled();
+    expect(app.receiver({ type: 'ADAPTER_PROGRESS', progress: { phase: 'apply', completed: 1, total: 1 } }, { id: 'test', tab: { id: 1 } }, () => {})).toBeUndefined();
+  });
 });

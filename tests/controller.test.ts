@@ -1,14 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import { BookingController, type ControllerBridge } from '../src/controller';
 import { buildMonthPlan, defaultSettings, getMonthDates } from '../src/domain/index';
-import type { BookingPlan, DayPlan, DaySnapshot, DraftCheckResult, MonthSnapshot, SessionState } from '../src/shared/types';
+import type { ApiConnection, BookingPlan, DayPlan, DaySnapshot, PreflightResult, MonthSnapshot, SessionState } from '../src/shared/types';
 import { isHiBobAttendance, isHiBobOrigin } from '../src/shared/validation';
 import { contextFingerprint } from '../src/shared/context';
 import type { AccountConfirmation } from '../src/shared/types';
 
-function snapshot(): MonthSnapshot {
+const connection = (generation = 'connection-42'): ApiConnection => ({ status: 'connected', generation, employeeId: 'employee-review', companyId: 'tenant-review', employeeLabel: 'Testperson', companyLabel: 'Fixture company', transport: 'direct', capabilities: { read: true, write: true, overwrite: true } });
+const consentFor = (plan: BookingPlan, revision: number): AccountConfirmation => ({ planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context), confirmed: true });
+function snapshot(current = connection()): MonthSnapshot {
   return {
-    month: '2026-11', employeeLabel: 'Testperson', periodLabel: '01/11/2026–30/11/2026', scannedAt: '2026-11-02T10:00:00Z', source: 'hibob', context: { documentId: 'doc-review', employeeKey: 'employee-review', tenantKey: 'tenant-review', mode: 'stable-identity' },
+    month: '2026-11', employeeLabel: 'Testperson', periodLabel: '01/11/2026–30/11/2026', scannedAt: '2026-11-02T10:00:00Z', source: 'hibob', context: { mode: 'api-session', connectionId: current.generation, employeeKey: current.employeeId!, tenantKey: current.companyId! },
     days: getMonthDates('2026-11').map(date => ({ date, entries: [], editable: true, reportedMinutes: 0, fingerprint: `empty-${date}` })),
   };
 }
@@ -18,14 +20,15 @@ async function setup(initial?: SessionState) {
   const bridge: ControllerBridge = {
     load: async () => stored,
     save: vi.fn(async state => { stored = structuredClone(state); }),
-    scan: vi.fn(async () => snapshot()),
-    applyDay: vi.fn(async (_tabId: number, day: DayPlan) => ({ date: day.date, editable: true, entries: day.proposed, fingerprint: 'saved' })),
-    checkDayDraft: vi.fn(async (_tabId: number, day: DayPlan) => ({ date: day.date, entries: day.proposed, netMinutes: day.netMinutes!, saved: false as const, unchanged: true as const })),
+    scan: vi.fn(async current => snapshot(current)),
+    connect: vi.fn(async () => connection()), disconnect: vi.fn(async () => {}),
+    applyDay: vi.fn(async (_connection: ApiConnection, day: DayPlan) => ({ date: day.date, editable: true, entries: day.proposed, fingerprint: 'saved' })),
+    preflightDay: vi.fn(async (_connection: ApiConnection, day: DayPlan) => ({ date: day.date, checked: true as const, saved: false as const, serverValidated: false as const, netMinutes: day.netMinutes! })),
     cancel: vi.fn(async () => {}),
   };
   const controller = new BookingController(bridge);
   await controller.init();
-  if (!initial) { await controller.bindTab(42); await controller.scan('2026-11'); }
+  if (!initial) { await controller.bindConnection(connection()); await controller.scan('2026-11'); }
   return { controller, bridge, stored: () => stored };
 }
 
@@ -34,7 +37,7 @@ async function review(controller: BookingController, input: BookingPlan) {
   return controller.savePlan(input, state.editLease!);
 }
 
-function applyReviewed(controller: BookingController, input: BookingPlan) { return controller.apply(input, controller.state.planRevision!); }
+function applyReviewed(controller: BookingController, input: BookingPlan) { return controller.apply(input, controller.state.planRevision!, consentFor(input, controller.state.planRevision!)); }
 
 function planFor(controller: BookingController): BookingPlan {
   return buildMonthPlan(defaultSettings('2026-11'), controller.state.snapshot!, {}, 1234);
@@ -49,108 +52,96 @@ function chromeStored<T>(input: T): T {
   return reorder(value) as T;
 }
 
-describe('single-day draft checks without booking', () => {
-  async function reviewedDraft(manual = false) {
+describe('single-day API preflight without booking', () => {
+  async function reviewedPreflight() {
     const app = await setup();
-    if (manual) app.controller.state.snapshot!.context = { mode: 'user-confirmed-ui', documentId: 'draft-document', pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: 'draft-markers' };
     app.controller.state.run = { planId: 'previous-real-run', status: 'failed', startedAt: '2026-11-02', updatedAt: '2026-11-02', results: [{ date: '2026-11-02', status: 'failed', message: 'Original booking failed before Save' }] };
     await review(app.controller, planFor(app.controller));
     const plan = structuredClone(app.controller.state.plan!);
     const revision = app.controller.state.planRevision!;
     const day = plan.days.find(item => item.action === 'create')!;
     const history = structuredClone(app.controller.state.run);
-    const confirmation: AccountConfirmation = { planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context), confirmed: true };
+    const confirmation = consentFor(plan, revision);
     vi.mocked(app.bridge.save).mockClear();
     return { ...app, plan, revision, day, history, confirmation };
   }
 
-  it('returns transient exact-plan evidence, preserves real history and always requires a fresh scan', async () => {
-    const app = await reviewedDraft(true);
-    vi.mocked(app.bridge.checkDayDraft).mockImplementationOnce(async (_tabId, day) => ({ date: day.date, entries: [...day.proposed].reverse(), netMinutes: day.netMinutes!, saved: false, unchanged: true }));
-    const response = await app.controller.checkDraft(app.plan, app.revision, app.day.date, app.confirmation);
-    expect(response.draftCheck).toMatchObject({ date: app.day.date, netMinutes: 480, saved: false, unchanged: true });
-    expect(app.bridge.checkDayDraft).toHaveBeenCalledWith(42, app.day, app.plan.snapshot.context, expect.any(String), { planId: app.plan.id, planRevision: app.revision, contextFingerprint: app.confirmation.contextFingerprint, confirmation: app.confirmation });
+  it('returns only read-only preflight evidence, preserves history and requires a fresh scan', async () => {
+    const app = await reviewedPreflight();
+    const response = await app.controller.preflight(app.plan, app.revision, app.day.date, app.confirmation);
+    expect(response.preflight).toEqual({ date: app.day.date, checked: true, saved: false, serverValidated: false, netMinutes: 480 });
+    expect(app.bridge.preflightDay).toHaveBeenCalledWith(connection(), app.day, app.plan.snapshot.context, expect.any(String), { planId: app.plan.id, planRevision: app.revision, contextFingerprint: app.confirmation.contextFingerprint, confirmation: app.confirmation });
     expect(app.bridge.applyDay).not.toHaveBeenCalled();
     expect(response.state.run).toEqual(app.history);
     expect(response.state.snapshot).toBeUndefined(); expect(response.state.plan?.canReview).toBe(false);
     expect(response.state.planRevision).toBeGreaterThan(app.revision);
     for (const [state] of vi.mocked(app.bridge.save).mock.calls) {
       expect(state.run).toEqual(app.history);
-      expect((state as SessionState & { draftCheck?: unknown }).draftCheck).toBeUndefined();
+      expect((state as SessionState & { preflight?: unknown }).preflight).toBeUndefined();
     }
-    await expect(app.controller.checkDraft(app.plan, app.revision, app.day.date, app.confirmation)).rejects.toThrow('Vorschau');
+    await expect(app.controller.preflight(app.plan, app.revision, app.day.date, app.confirmation)).rejects.toThrow('Vorschau');
   });
 
-  it('rejects missing/stale consent, stale plans and unselected dates before creating a job', async () => {
-    const app = await reviewedDraft(true);
-    await expect(app.controller.checkDraft(app.plan, app.revision, app.day.date)).rejects.toThrow('ausdrücklich');
-    await expect(app.controller.checkDraft(app.plan, app.revision, app.day.date, { ...app.confirmation, planRevision: app.revision - 1 })).rejects.toThrow('ausdrücklich');
-    await expect(app.controller.checkDraft(app.plan, app.revision - 1, app.day.date, app.confirmation)).rejects.toThrow('Vorschau');
-    const forged = structuredClone(app.plan); forged.days[1].proposed = [];
-    await expect(app.controller.checkDraft(forged, app.revision, app.day.date, app.confirmation)).rejects.toThrow('Vorschau');
-    for (const date of ['2026-12-03', '2026-11-01', 'not-a-date']) await expect(app.controller.checkDraft(app.plan, app.revision, date, app.confirmation)).rejects.toThrow('nicht zum Schreiben');
-    expect(app.bridge.checkDayDraft).not.toHaveBeenCalled(); expect(app.bridge.applyDay).not.toHaveBeenCalled();
-    expect(app.controller.state.job).toBeUndefined(); expect(app.controller.state.snapshot).toBeDefined();
+  it('requires fresh consent and approved included dates before creating a job', async () => {
+    const app = await reviewedPreflight();
+    await expect(app.controller.preflight(app.plan, app.revision, app.day.date)).rejects.toThrow('bestätigen');
+    await expect(app.controller.preflight(app.plan, app.revision, app.day.date, { ...app.confirmation, planRevision: app.revision - 1 })).rejects.toThrow('bestätigen');
+    await expect(app.controller.preflight(app.plan, app.revision - 1, app.day.date, app.confirmation)).rejects.toThrow('Vorschau');
+    for (const date of ['2026-12-03', '2026-11-01', 'not-a-date']) await expect(app.controller.preflight(app.plan, app.revision, date, app.confirmation)).rejects.toThrow('nicht zum Schreiben');
+    expect(app.bridge.preflightDay).not.toHaveBeenCalled(); expect(app.bridge.applyDay).not.toHaveBeenCalled();
+    expect(app.controller.state.job).toBeUndefined();
   });
 
-  it.each(['date', 'entries', 'netMinutes', 'saved', 'unchanged', 'missing'] as const)('rejects invalid %s evidence and keeps prior booking history', async field => {
-    const app = await reviewedDraft();
-    const result: DraftCheckResult = { date: app.day.date, entries: app.day.proposed, netMinutes: app.day.netMinutes!, saved: false, unchanged: true };
-    const wrong = field === 'date' ? { ...result, date: '2026-12-03' } : field === 'entries' ? { ...result, entries: [] } : field === 'netMinutes' ? { ...result, netMinutes: 481 } : field === 'saved' ? { ...result, saved: true } : field === 'unchanged' ? { ...result, unchanged: false } : undefined;
-    vi.mocked(app.bridge.checkDayDraft).mockResolvedValueOnce(wrong as DraftCheckResult);
-    await expect(app.controller.checkDraft(app.plan, app.revision, app.day.date)).rejects.toThrow('eindeutige Bestätigung');
+  it.each(['date', 'netMinutes', 'saved', 'checked', 'serverValidated', 'missing'] as const)('rejects invalid %s evidence without writes', async field => {
+    const app = await reviewedPreflight();
+    const result: PreflightResult = { date: app.day.date, checked: true, saved: false, serverValidated: false, netMinutes: app.day.netMinutes! };
+    const wrong = field === 'missing' ? undefined : { ...result, [field]: field === 'date' ? '2026-12-03' : field === 'netMinutes' ? 481 : field === 'saved' || field === 'serverValidated' ? true : false };
+    vi.mocked(app.bridge.preflightDay).mockResolvedValueOnce(wrong as PreflightResult);
+    await expect(app.controller.preflight(app.plan, app.revision, app.day.date, app.confirmation)).rejects.toThrow('Vorprüfung');
     expect(app.controller.state.run).toEqual(app.history); expect(app.controller.state.snapshot).toBeUndefined();
-    expect(app.controller.state.plan?.canReview).toBe(false); expect(app.bridge.applyDay).not.toHaveBeenCalled();
+    expect(app.bridge.applyDay).not.toHaveBeenCalled();
   });
 
-  it('holds the shared job/update lock and honours cancellation until cleanup completes', async () => {
-    const app = await reviewedDraft();
-    let entered!: () => void; let release!: (result: DraftCheckResult) => void;
+  it('holds the exclusive lock and cancels using the connection generation', async () => {
+    const app = await reviewedPreflight();
+    let entered!: () => void; let release!: (result: PreflightResult) => void;
     const held = new Promise<void>(resolve => { entered = resolve; });
-    vi.mocked(app.bridge.checkDayDraft).mockImplementationOnce(async () => { entered(); return new Promise(resolve => { release = resolve; }); });
-    const checking = app.controller.checkDraft(app.plan, app.revision, app.day.date);
+    vi.mocked(app.bridge.preflightDay).mockImplementationOnce(async () => { entered(); return new Promise(resolve => { release = resolve; }); });
+    const checking = app.controller.preflight(app.plan, app.revision, app.day.date, app.confirmation);
     await held;
     const job = structuredClone(app.controller.state.job!);
-    expect(job.kind).toBe('apply'); expect(app.controller.state.progress).toMatchObject({ date: app.day.date, total: 1 });
+    expect(job.connectionId).toBe(connection().generation); expect(job.tabId).toBeUndefined();
     await expect(app.controller.activateUpdate()).rejects.toThrow('laufenden Vorgangs');
-    await expect(app.controller.apply(app.plan, app.revision)).rejects.toThrow('läuft bereits');
+    await expect(app.controller.connect()).rejects.toThrow('läuft bereits');
+    await expect(app.controller.disconnect()).rejects.toThrow('läuft bereits');
     await expect(app.controller.scan('2026-11')).rejects.toThrow('läuft bereits');
     await expect(app.controller.cancel('stale-job')).rejects.toThrow('geändert');
     await app.controller.cancel(job.id);
-    expect(app.bridge.cancel).toHaveBeenCalledWith(42, job.id);
-    expect(app.controller.state.job?.status).toBe('cancelling');
-    release({ date: app.day.date, entries: app.day.proposed, netMinutes: 480, saved: false, unchanged: true });
+    expect(app.bridge.cancel).toHaveBeenCalledWith(connection(), job.id);
+    release({ date: app.day.date, checked: true, saved: false, serverValidated: false, netMinutes: 480 });
     await expect(checking).rejects.toThrow('abgebrochen');
     expect(app.controller.state.run).toEqual(app.history); expect(app.controller.state.job).toBeUndefined();
     expect(app.bridge.applyDay).not.toHaveBeenCalled();
   });
 
-  it.each(['initial', 'final'] as const)('fails closed on %s journal errors without modifying real history', async phase => {
-    const app = await reviewedDraft();
-    if (phase === 'initial') vi.mocked(app.bridge.save).mockRejectedValueOnce(new Error('CHECK_INITIAL_STORAGE'));
-    else {
-      const save = app.bridge.save;
-      app.bridge.save = vi.fn(async state => { if (!state.job && !state.snapshot) throw new Error('CHECK_FINAL_STORAGE'); await save(state); });
-    }
-    await expect(app.controller.checkDraft(app.plan, app.revision, app.day.date)).rejects.toThrow(phase === 'initial' ? 'CHECK_INITIAL_STORAGE' : 'CHECK_FINAL_STORAGE');
-    expect(app.bridge.checkDayDraft).toHaveBeenCalledTimes(phase === 'initial' ? 0 : 1);
-    expect(app.bridge.applyDay).not.toHaveBeenCalled(); expect(app.controller.state.run).toEqual(app.history);
-    expect(app.controller.state.snapshot).toBeUndefined(); expect(app.controller.state.plan?.canReview).toBe(false);
+  it('allows preflight on a read-only connection while preventing booking', async () => {
+    const app = await setup();
+    await app.controller.bindConnection({ ...connection(), capabilities: { read: true, write: false, overwrite: false } });
+    await app.controller.scan('2026-11'); await review(app.controller, planFor(app.controller));
+    const plan = app.controller.state.plan!; const rev = app.controller.state.planRevision!; const approval = consentFor(plan, rev);
+    await expect(app.controller.apply(plan, rev, approval)).rejects.toThrow('Vorprüfung');
+    expect(app.controller.state.plan?.canReview).toBe(true);
+    await expect(app.controller.preflight(plan, rev, '2026-11-02', approval)).resolves.toHaveProperty('preflight.checked', true);
+    expect(app.bridge.applyDay).not.toHaveBeenCalled();
   });
 
-  it('recovers an interrupted draft job without relabelling real history or restoring draft evidence', async () => {
-    const app = await reviewedDraft();
-    const inherited = structuredClone(app.controller.state) as SessionState & { draftCheck?: DraftCheckResult };
-    inherited.job = { id: 'interrupted-draft', kind: 'apply', status: 'running', tabId: 42, month: app.plan.settings.month, startedAt: '2026-11-02', updatedAt: '2026-11-02' };
-    inherited.progress = { jobId: inherited.job.id, phase: 'apply', completed: 0, total: 1, message: 'Checking draft' };
-    inherited.draftCheck = { date: app.day.date, entries: app.day.proposed, netMinutes: 480, saved: false, unchanged: true };
-    const recovered = await setup(inherited);
-    expect(recovered.controller.state.job).toMatchObject({ id: 'interrupted-draft', status: 'interrupted' });
-    expect(recovered.controller.state.run).toEqual(app.history);
-    expect(recovered.controller.state.snapshot).toBeUndefined(); expect(recovered.controller.state.plan?.canReview).toBe(false);
-    expect((recovered.stored() as typeof inherited).draftCheck).toBeUndefined();
-    await expect(recovered.controller.checkDraft(app.plan, app.revision, app.day.date)).rejects.toThrow('Vorschau');
-    expect(recovered.bridge.checkDayDraft).not.toHaveBeenCalled(); expect(recovered.bridge.applyDay).not.toHaveBeenCalled();
+  it.each(['initial', 'final'] as const)('fails closed on %s storage failure without altering history', async phase => {
+    const app = await reviewedPreflight();
+    if (phase === 'initial') vi.mocked(app.bridge.save).mockRejectedValueOnce(new Error('CHECK_INITIAL_STORAGE'));
+    else { const save = app.bridge.save; app.bridge.save = vi.fn(async state => { if (!state.job && !state.snapshot) throw new Error('CHECK_FINAL_STORAGE'); await save(state); }); }
+    await expect(app.controller.preflight(app.plan, app.revision, app.day.date, app.confirmation)).rejects.toThrow(phase === 'initial' ? 'CHECK_INITIAL_STORAGE' : 'CHECK_FINAL_STORAGE');
+    expect(app.bridge.preflightDay).toHaveBeenCalledTimes(phase === 'initial' ? 0 : 1);
+    expect(app.bridge.applyDay).not.toHaveBeenCalled(); expect(app.controller.state.run).toEqual(app.history);
   });
 });
 
@@ -190,20 +181,20 @@ describe('write queue and recovery', () => {
     const { controller, bridge, stored } = await setup();
     await review(controller, planFor(controller));
     const original = structuredClone(controller.state.plan!);
-    await controller.bindTab(undefined, 'Bitte HiBob öffnen.');
-    expect(stored()).toMatchObject({ error: 'Bitte HiBob öffnen.', schemaVersion: 3 });
+    await controller.bindConnection(undefined, 'Bitte HiBob öffnen.');
+    expect(stored()).toMatchObject({ error: 'Bitte HiBob öffnen.', schemaVersion: 4 });
     expect(stored()?.tabId).toBeUndefined();
-    await expect(controller.scan('2026-11')).rejects.toThrow('Extension-Symbol');
+    await expect(controller.scan('2026-11')).rejects.toThrow('anmelden');
     await expect(applyReviewed(controller, original)).rejects.toThrow('Vorschau');
     expect(bridge.applyDay).not.toHaveBeenCalled();
-    await controller.bindTab(99);
-    expect(controller.state).toMatchObject({ tabId: 99, error: undefined, schemaVersion: 3 });
+    await controller.bindConnection(connection('connection-99'));
+    expect(controller.state).toMatchObject({ connection: connection('connection-99'), error: undefined, schemaVersion: 4 });
     await controller.scan('2026-11');
     await review(controller, planFor(controller));
-    await controller.bindTab(100);
+    await controller.bindConnection(connection('connection-100'));
     expect(controller.state.snapshot).toBeUndefined();
     expect(controller.state.plan).toBeUndefined();
-    expect(controller.state.tabId).toBe(100);
+    expect(controller.state.connection?.generation).toBe('connection-100');
   });
 
   it('recomputes proposals from the stored scan rather than trusting UI segments', async () => {
@@ -254,7 +245,7 @@ describe('write queue and recovery', () => {
     const running = applyReviewed(controller, plan);
     await entered;
     await expect(applyReviewed(controller, plan)).rejects.toThrow('bereits');
-    await expect(controller.bindTab(99)).rejects.toThrow('bereits');
+    await expect(controller.bindConnection(connection('connection-99'))).rejects.toThrow('bereits');
     await controller.cancel();
     const first = plan.days.find(d => d.action === 'create')!;
     resolveFirst({ date: first.date, entries: first.proposed, editable: true, fingerprint: 'saved' });
@@ -268,7 +259,7 @@ describe('write queue and recovery', () => {
     const { controller } = await setup();
     const plan = planFor(controller);
     const { controller: restored, stored } = await setup({
-      tabId: 42, snapshot: snapshot(), plan,
+      connection: connection(), snapshot: snapshot(), plan,
       run: { planId: plan.id, status: 'running', startedAt: 'x', updatedAt: 'x', results: [{ date: '2026-11-02', status: 'running', message: 'saving' }] },
     });
     expect(restored.state.run?.status).toBe('stopped');
@@ -381,7 +372,7 @@ describe('canonical edit leases, journaling, and job recovery', () => {
     await controller.savePlan(input, invalid.editLease!);
     expect(controller.state.plan?.seed).toBe(input.seed);
     expect(controller.state.plan?.canReview).toBe(true);
-    await controller.apply(controller.state.plan!, invalid.planRevision!);
+    await controller.apply(controller.state.plan!, invalid.planRevision!, consentFor(controller.state.plan!, invalid.planRevision!));
     expect(bridge.applyDay).toHaveBeenCalledTimes(21);
   });
 
@@ -415,15 +406,15 @@ describe('canonical edit leases, journaling, and job recovery', () => {
   });
 
   it('migrates a legacy interrupted scan to explicit recovery and checks adapter idleness before a new scan', async () => {
-    const { controller, bridge } = await setup({ tabId: 42, progress: { phase: 'scan', completed: 12, total: 30, message: 'Reading' } });
+    const { controller, bridge } = await setup({ schemaVersion: 4, connection: connection(), progress: { phase: 'scan', completed: 12, total: 30, message: 'Reading' } });
     const oldJob = controller.state.job!;
     expect(oldJob.status).toBe('interrupted');
     expect(controller.state.progress).toBeUndefined();
     bridge.recover = vi.fn(async () => {});
     await controller.scan('2026-11');
-    expect(bridge.recover).toHaveBeenCalledWith(42, oldJob.id);
+    expect(bridge.recover).toHaveBeenCalledWith(connection(), oldJob.id);
     expect(controller.state.job).toBeUndefined();
-    expect(controller.state.schemaVersion).toBe(3);
+    expect(controller.state.schemaVersion).toBe(4);
   });
 
   it('persists an active scan, rejects stale progress and cancellation, and ignores progress after completion', async () => {
@@ -434,9 +425,9 @@ describe('canonical edit leases, journaling, and job recovery', () => {
     const running = controller.scan('2026-11'); await scanning;
     const job = controller.state.job!;
     expect(stored()?.job).toMatchObject({ id: job.id, kind: 'scan', status: 'running' });
-    await expect(controller.bindTab(42)).resolves.toBeUndefined();
-    await expect(controller.bindTab(99)).rejects.toThrow('bereits');
-    await expect(controller.bindTab(undefined)).rejects.toThrow('bereits');
+    await expect(controller.bindConnection(connection())).resolves.toBeUndefined();
+    await expect(controller.bindConnection(connection('connection-99'))).rejects.toThrow('bereits');
+    await expect(controller.bindConnection(undefined)).rejects.toThrow('bereits');
     expect(controller.state.job?.id).toBe(job.id);
     await controller.reportProgress({ jobId: 'old-job', phase: 'scan', completed: 12, total: 30, message: 'stale' });
     expect(controller.state.progress?.completed).toBe(0);
@@ -452,18 +443,18 @@ describe('canonical edit leases, journaling, and job recovery', () => {
   it('keeps publication revisions increasing across binding resets and rejects malformed stored jobs', async () => {
     const { controller } = await setup();
     const prior = controller.state.revision!;
-    await controller.bindTab(undefined);
+    await controller.bindConnection(undefined);
     expect(controller.state.revision).toBeGreaterThan(prior);
-    await controller.bindTab(99);
+    await controller.bindConnection(connection('connection-99'));
     expect(controller.state.revision).toBeGreaterThan(prior + 1);
-    await expect(setup({ schemaVersion: 3, job: { id: 'bad', kind: 'other' } as never })).rejects.toThrow('ungültig');
+    await expect(setup({ schemaVersion: 4, job: { id: 'bad', kind: 'other' } as never })).rejects.toThrow('ungültig');
     await expect(setup({ run: { status: 'unknown', results: [] } as never })).rejects.toThrow('ungültig');
   });
 });
 
 describe('recovery publication and cold canonical state', () => {
   it('publishes a running scan while recovering an old adapter and allows cancellation before scanning', async () => {
-    const { controller, bridge, stored } = await setup({ tabId: 42, progress: { phase: 'scan', completed: 12, total: 30, message: 'old' } });
+    const { controller, bridge, stored } = await setup({ schemaVersion: 4, connection: connection(), progress: { phase: 'scan', completed: 12, total: 30, message: 'old' } });
     const oldJobId = controller.state.job!.id;
     let entered!: () => void; let release!: () => void;
     const recovering = new Promise<void>(resolve => { entered = resolve; });
@@ -489,7 +480,7 @@ describe('recovery publication and cold canonical state', () => {
     expect(restored.controller.state.plan?.id).toBe(varied.id);
     expect(restored.controller.state.plan?.seed).toBe(varied.seed);
     expect(restored.controller.state.plan?.days.map(day => day.proposed)).toEqual(varied.days.map(day => day.proposed));
-    await restored.controller.apply(restored.controller.state.plan!, durable.planRevision!);
+    await restored.controller.apply(restored.controller.state.plan!, durable.planRevision!, consentFor(restored.controller.state.plan!, durable.planRevision!));
     expect(restored.bridge.applyDay).toHaveBeenCalledTimes(21);
     const corrupted = structuredClone(durable);
     corrupted.plan!.days.find(day => day.action === 'create')!.proposed[0].start = '00:00';
@@ -500,13 +491,9 @@ describe('recovery publication and cold canonical state', () => {
   });
 });
 
-describe('per-plan manual account confirmation and schema 3', () => {
+describe('per-plan API account confirmation and schema 4', () => {
   async function manualPlan() {
     const fixture = await setup();
-    fixture.controller.state.snapshot!.context = {
-      mode: 'user-confirmed-ui', documentId: 'manual-document',
-      pageUrl: 'https://app.hibob.com/attendance/my-attendance', markerFingerprint: 'self-page-marker',
-    };
     await review(fixture.controller, planFor(fixture.controller));
     return fixture;
   }
@@ -515,7 +502,7 @@ describe('per-plan manual account confirmation and schema 3', () => {
     contextFingerprint: contextFingerprint(controller.state.snapshot!.context), confirmed: true,
   });
 
-  it('blocks a UI-context run without consent and passes only canonical ephemeral authorization after consent', async () => {
+  it('blocks an API-context run without consent and passes only canonical ephemeral authorization after consent', async () => {
     const { controller, bridge } = await manualPlan();
     const plan = structuredClone(controller.state.plan!);
     const revision = controller.state.planRevision!;
@@ -553,16 +540,16 @@ describe('per-plan manual account confirmation and schema 3', () => {
     expect(bridge.applyDay).toHaveBeenCalledTimes(21);
   });
 
-  it('keeps stable-identity runs independent of manual consent while still passing canonical authorization', async () => {
+  it('rejects legacy UI identity for a new API run even with matching consent', async () => {
     const { controller, bridge } = await setup();
+    controller.state.snapshot!.context = { mode: 'stable-identity', documentId: 'old-document', employeeKey: 'employee-review', tenantKey: 'tenant-review' };
     await review(controller, planFor(controller));
-    const plan = structuredClone(controller.state.plan!);
-    const revision = controller.state.planRevision!;
-    await controller.apply(plan, revision);
-    expect(vi.mocked(bridge.applyDay).mock.calls[0][4]).toEqual({ planId: plan.id, planRevision: revision, contextFingerprint: contextFingerprint(plan.snapshot.context) });
+    const plan = controller.state.plan!, revision = controller.state.planRevision!;
+    await expect(controller.apply(plan, revision, consentFor(plan, revision))).rejects.toThrow('Sitzung');
+    expect(bridge.applyDay).not.toHaveBeenCalled();
   });
 
-  it('never restores reusable consent even when unknown consent fields are injected into a schema-3 session', async () => {
+  it('never restores reusable consent even when unknown consent fields are injected into a schema-4 session', async () => {
     const { controller } = await manualPlan();
     const inherited = structuredClone(controller.state) as SessionState & { confirmation?: unknown; authorization?: unknown };
     inherited.confirmation = consent(controller);
@@ -586,7 +573,7 @@ describe('per-plan manual account confirmation and schema 3', () => {
     legacy.confirmation = { planId: legacy.plan!.id, confirmed: true };
     legacy.run = { planId: legacy.plan!.id, status: 'complete', startedAt: '2026-11-02T10:00:00Z', updatedAt: '2026-11-02T10:01:00Z', results: [{ date: '2026-11-02', status: 'verified', message: 'Historical verified day' }] };
     const restored = await setup(legacy);
-    expect(restored.controller.state.schemaVersion).toBe(3);
+    expect(restored.controller.state.schemaVersion).toBe(4);
     expect(restored.controller.state.snapshot).toBeUndefined(); expect(restored.controller.state.plan).toBeUndefined(); expect(restored.controller.state.editLease).toBeUndefined();
     expect(restored.controller.state.run).toEqual(legacy.run);
     expect(restored.controller.state.update).toEqual(legacy.update);
@@ -594,5 +581,147 @@ describe('per-plan manual account confirmation and schema 3', () => {
     expect(restored.controller.state.planRevision).toBeGreaterThan(legacy.planRevision!);
     expect((restored.controller.state as typeof legacy).confirmation).toBeUndefined();
     expect(restored.bridge.applyDay).not.toHaveBeenCalled();
+  });
+});
+
+describe('tabless API connection lifecycle and capabilities', () => {
+  it('connects and disconnects without a tab, preserving history while revoking previews', async () => {
+    const app = await setup();
+    await review(app.controller, planFor(app.controller));
+    const history = { planId: 'old', status: 'complete' as const, startedAt: 'x', updatedAt: 'x', results: [{ date: '2026-10-30', status: 'verified' as const, message: 'Historical verified result' }] };
+    app.controller.state.run = history;
+    const revision = app.controller.state.planRevision!;
+    const connected = await app.controller.connect();
+    expect(app.bridge.connect).toHaveBeenCalledOnce();
+    expect(connected).toMatchObject({ schemaVersion: 4, connection: connection(), run: history });
+    expect(connected.tabId).toBeUndefined(); expect(connected.snapshot).toBeUndefined(); expect(connected.plan).toBeUndefined();
+    expect(connected.planRevision).toBeGreaterThan(revision);
+    await app.controller.scan('2026-11');
+    expect(app.controller.state.run).toEqual(history);
+    const disconnected = await app.controller.disconnect();
+    expect(app.bridge.disconnect).toHaveBeenCalledOnce();
+    expect(disconnected.connection?.status).toBe('disconnected');
+    expect(disconnected.run).toEqual(history); expect(disconnected.snapshot).toBeUndefined();
+    await expect(app.controller.scan('2026-11')).rejects.toThrow('anmelden');
+  });
+
+  it('does not persist extra connection fields or reuse a connection after sign-in failure', async () => {
+    const app = await setup();
+    const raw = { ...connection(), token: 'LOCAL_ONLY_SYNTHETIC_SECRET', cookies: ['synthetic-cookie'] };
+    vi.mocked(app.bridge.connect!).mockResolvedValueOnce(raw);
+    await app.controller.connect();
+    expect(app.stored()?.connection).not.toHaveProperty('token');
+    expect(app.stored()?.connection).not.toHaveProperty('cookies');
+    vi.mocked(app.bridge.connect!).mockRejectedValueOnce(new Error('Local sign-in cancelled'));
+    await expect(app.controller.connect()).rejects.toThrow('cancelled');
+    expect(app.controller.state.connection).toBeUndefined();
+    await expect(app.controller.scan('2026-11')).rejects.toThrow('anmelden');
+  });
+
+  it('invalidates a plan when session generation, account, capabilities or status changes', async () => {
+    for (const changed of [
+      { ...connection(), generation: 'another-session' },
+      { ...connection(), companyId: 'another-company' },
+      { ...connection(), employeeId: 'another-employee' },
+      { ...connection(), capabilities: { read: true, write: false, overwrite: false } },
+      { status: 'expired' as const, generation: 'expired-session' },
+    ]) {
+      const app = await setup(); await review(app.controller, planFor(app.controller));
+      const plan = app.controller.state.plan!, revision = app.controller.state.planRevision!;
+      await app.controller.bindConnection(changed);
+      expect(app.controller.state.snapshot).toBeUndefined(); expect(app.controller.state.plan).toBeUndefined();
+      await expect(app.controller.apply(plan, revision, consentFor(plan, revision))).rejects.toThrow('Vorschau');
+      expect(app.bridge.applyDay).not.toHaveBeenCalled();
+    }
+  });
+
+  it('rejects a snapshot from another account or generation before exposing it', async () => {
+    for (const context of [
+      { mode: 'api-session' as const, connectionId: 'other-session', employeeKey: 'employee-review', tenantKey: 'tenant-review' },
+      { mode: 'api-session' as const, connectionId: 'connection-42', employeeKey: 'other-employee', tenantKey: 'tenant-review' },
+      { mode: 'api-session' as const, connectionId: 'connection-42', employeeKey: 'employee-review', tenantKey: 'other-company' },
+    ]) {
+      const app = await setup(); vi.mocked(app.bridge.scan).mockResolvedValueOnce({ ...snapshot(), context });
+      await expect(app.controller.scan('2026-11')).rejects.toThrow('Sitzung');
+      expect(app.controller.state.snapshot).toBeUndefined(); expect(app.bridge.applyDay).not.toHaveBeenCalled();
+    }
+  });
+
+  it('blocks unsupported overwrites before creating a run or mutating attendance', async () => {
+    const app = await setup();
+    await app.controller.bindConnection({ ...connection(), capabilities: { read: true, write: true, overwrite: false } });
+    await app.controller.scan('2026-11');
+    app.controller.state.snapshot!.days[1].entries = [{ type: 'work', start: '07:00', end: '15:00' }];
+    app.controller.state.snapshot!.days[1].reportedMinutes = 480;
+    const plan = buildMonthPlan(defaultSettings('2026-11'), app.controller.state.snapshot!, { '2026-11-02': 'overwrite' }, 1);
+    await review(app.controller, plan);
+    const revision = app.controller.state.planRevision!;
+    await expect(app.controller.apply(app.controller.state.plan!, revision, consentFor(app.controller.state.plan!, revision))).rejects.toThrow('Überschreiben');
+    expect(app.controller.state.job).toBeUndefined(); expect(app.controller.state.run).toBeUndefined(); expect(app.bridge.applyDay).not.toHaveBeenCalled();
+  });
+
+  it('migrates old schema3 snapshots without restoring tab approval or changing historical results', async () => {
+    const app = await setup(); await review(app.controller, planFor(app.controller));
+    const legacy = structuredClone(app.controller.state); legacy.schemaVersion = 3; legacy.tabId = 42;
+    legacy.run = { planId: 'past', status: 'complete', results: [{ date: '2026-10-30', status: 'verified', message: 'Previously verified' }], startedAt: 'x', updatedAt: 'x' };
+    const restored = await setup(legacy);
+    expect(restored.controller.state.schemaVersion).toBe(4);
+    expect(restored.controller.state.connection).toBeUndefined(); expect(restored.controller.state.tabId).toBeUndefined();
+    expect(restored.controller.state.snapshot).toBeUndefined(); expect(restored.controller.state.plan).toBeUndefined();
+    expect(restored.controller.state.run).toEqual(legacy.run);
+    expect(restored.bridge.applyDay).not.toHaveBeenCalled();
+  });
+});
+
+describe('explicit API connection failure markers', () => {
+  const expired = () => Object.assign(new Error('Fixture authentication changed'), { connectionStatus: 'expired' as const });
+  const history = () => ({ planId: 'past', status: 'complete' as const, results: [{ date: '2026-10-30', status: 'verified' as const, message: 'Historical verification' }], startedAt: 'x', updatedAt: 'x' });
+
+  it.each(['expired', 'unsupported'] as const)('revokes a %s scan connection and preserves historical results', async status => {
+    const app = await setup(); app.controller.state.run = history();
+    const previous = structuredClone(app.controller.state.connection!);
+    vi.mocked(app.bridge.scan).mockRejectedValueOnce(Object.assign(new Error('Fixture connection problem'), { connectionStatus: status }));
+    await expect(app.controller.scan('2026-11')).rejects.toThrow('connection problem');
+    expect(app.controller.state.connection).toMatchObject({ status, capabilities: { read: false, write: false, overwrite: false } });
+    expect(app.controller.state.connection?.generation).not.toBe(previous.generation);
+    expect(app.controller.state.connection?.reason).not.toContain('Fixture');
+    expect(app.controller.state.run).toEqual(history()); expect(app.controller.state.snapshot).toBeUndefined();
+    expect(app.stored()?.connection?.status).toBe(status);
+    const reads = vi.mocked(app.bridge.scan).mock.calls.length;
+    await expect(app.controller.scan('2026-11')).rejects.toThrow('anmelden'); expect(app.bridge.scan).toHaveBeenCalledTimes(reads);
+    expect(app.bridge.applyDay).not.toHaveBeenCalled();
+  });
+
+  it('revokes a preflight connection without altering booking history or permitting a write', async () => {
+    const app = await setup(); app.controller.state.run = history(); await review(app.controller, planFor(app.controller));
+    const plan = app.controller.state.plan!, revision = app.controller.state.planRevision!, confirmation = consentFor(plan, revision);
+    vi.mocked(app.bridge.preflightDay).mockRejectedValueOnce(expired());
+    await expect(app.controller.preflight(plan, revision, '2026-11-03', confirmation)).rejects.toThrow('authentication changed');
+    expect(app.controller.state.connection?.status).toBe('expired'); expect(app.controller.state.run).toEqual(history());
+    expect(app.controller.state.snapshot).toBeUndefined(); expect(app.controller.state.plan?.canReview).toBe(false);
+    await expect(app.controller.apply(plan, revision, confirmation)).rejects.toThrow('Vorschau'); expect(app.bridge.applyDay).not.toHaveBeenCalled();
+  });
+
+  it('keeps already verified days when an API write reports session expiry', async () => {
+    const app = await setup(); await review(app.controller, planFor(app.controller));
+    const plan = app.controller.state.plan!, revision = app.controller.state.planRevision!, confirmation = consentFor(plan, revision);
+    vi.mocked(app.bridge.applyDay).mockImplementationOnce(async (_connection, day) => ({ date: day.date, entries: day.proposed, reportedMinutes: day.netMinutes, editable: true, fingerprint: 'verified-first' }));
+    vi.mocked(app.bridge.applyDay).mockRejectedValueOnce(Object.assign(expired(), { uncertain: true }));
+    await app.controller.apply(plan, revision, confirmation);
+    expect(app.bridge.applyDay).toHaveBeenCalledTimes(2);
+    expect(app.controller.state.connection?.status).toBe('expired');
+    expect(app.controller.state.run?.results.filter(result => result.status === 'verified')).toHaveLength(1);
+    expect(app.controller.state.run?.results.filter(result => result.status === 'uncertain')).toHaveLength(1);
+    expect(app.stored()?.run).toEqual(app.controller.state.run);
+    await expect(app.controller.apply(plan, revision, confirmation)).rejects.toThrow('Vorschau'); expect(app.bridge.applyDay).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not infer expiry from localized strings, generic codes or unknown marker values', async () => {
+    for (const error of [new Error('Sign in to HiBob. AUTH_REQUIRED expired'), Object.assign(new Error('Fixture rejection'), { code: 'AUTH_REQUIRED' }), Object.assign(new Error('Fixture rejection'), { connectionStatus: 'connected' })]) {
+      const app = await setup(); const original = structuredClone(app.controller.state.connection);
+      vi.mocked(app.bridge.scan).mockRejectedValueOnce(error);
+      await expect(app.controller.scan('2026-11')).rejects.toThrow();
+      expect(app.controller.state.connection).toEqual(original); expect(app.controller.state.snapshot).toBeUndefined();
+    }
   });
 });
