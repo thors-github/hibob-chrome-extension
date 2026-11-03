@@ -41,6 +41,7 @@ Use **Node 22.12+**:
 
 ```sh
 npm ci
+npx playwright install chromium
 npm run check
 npm run build
 ```
