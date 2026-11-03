@@ -1,9 +1,10 @@
 import { chromium, expect, test } from '@playwright/test';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 test('the packaged API-first MV3 extension starts with narrow permissions and a schema6 connection', async () => {
+  const expectedManifest = JSON.parse(await readFile(resolve('public/manifest.json'), 'utf8')) as { version: string; version_name?: string };
   const profile = await mkdtemp(join(tmpdir(), 'hibob-extension-test-'));
   const extension = resolve('dist');
   expect(await readdir(extension)).not.toContain('content.js');
@@ -34,8 +35,8 @@ test('the packaged API-first MV3 extension starts with narrow permissions and a 
     const manifest = await worker.evaluate(() => chrome.runtime.getManifest());
     expect(manifest.name).toBe(nativeName);
     expect(manifest.icons?.['128']).toBe('icons/icon-128.png');
-    expect(manifest.version).toBe('1.5.0');
-    expect(manifest.version_name).toBe('1.5.0-beta.1');
+    expect(manifest.version).toBe(expectedManifest.version);
+    expect(manifest.version_name).toBe(expectedManifest.version_name);
     expect(manifest.permissions).toEqual(['sidePanel', 'storage', 'activeTab', 'scripting']);
     expect(manifest.host_permissions).toEqual(['https://app.hibob.com/*']);
     expect(manifest.optional_host_permissions).toBeUndefined();
@@ -73,8 +74,7 @@ test('the packaged API-first MV3 extension starts with narrow permissions and a 
         snapshot: { month: currentMonth, employeeLabel: 'Local API fixture', periodLabel: currentMonth, scannedAt: '2026-11-02T09:00:00Z', source: 'hibob', context: { mode: 'api-session', connectionId: 'isolated-fixture-session', employeeKey: 'fixture-employee', tenantKey: 'fixture-company' }, days: [] },
       } });
     }, month);
-    await expect(page.locator('#connection-title')).toHaveText(labels.read);
-    await expect(page.locator('#connection-detail')).toContainText('Local API fixture');
+    await expect(page.locator('#connection-title')).toHaveText('Local API fixture · Local company');
     await expect(page.locator('#scan')).toBeDisabled();
     await expect(page.locator('#apply')).toBeDisabled();
     await page.locator('#retry-connection').click();

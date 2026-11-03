@@ -1,4 +1,5 @@
 import './styles.css';
+import { renderMonthCalendar } from './calendar';
 import { buildMonthPlan, defaultSettings, formatMinutes, GERMAN_STATES, netMinutes } from '../domain/index';
 import type { AccountConfirmation, AttendanceEntry, BookingPlan, ConflictChoices, DayPlan, ExecutionProfile, PreflightResult, MonthSnapshot, PlanEditLease, RunOptions, SessionState, Settings } from '../shared/types';
 import { sameJsonValue } from '../shared/json';
@@ -52,6 +53,12 @@ let statePollTimer: ReturnType<typeof setTimeout> | undefined;
 let statePollInFlight = false;
 let statePollError = '';
 let panelClosed = false;
+type PanelView = 'month' | 'settings' | 'tools' | 'day' | 'run-details';
+let panelView: PanelView = 'month';
+let toolPage: 'booking' | 'transfer' | 'connection' = 'booking';
+let selectedDate = '';
+let calendarFocusDate = '';
+let reviewChecksOpen = false;
 
 interface Draft {
   version: number;
@@ -71,76 +78,72 @@ const app = document.querySelector<HTMLDivElement>('#app')!;
 app.innerHTML = `
   <div class="shell">
     <header class="app-header">
-      <div class="app-mark" aria-hidden="true"><img src="/icons/app-icon.svg" alt="" width="40" height="40" /></div>
-      <div><h1>${t("Monatsbuchung")}</h1><p>${t("Deine Anwesenheit in HiBob")}</p></div>
-      <button id="settings-toggle" class="icon-button" type="button" aria-label="${t('Zeiten und Feiertage anpassen')}" aria-controls="settings-options" aria-expanded="false"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m9.5 3-.7 2.2-2 .9-2.1-.5-2.1 3.7 1.5 1.7v2l-1.5 1.7 2.1 3.7 2.2-.5 2 .9.6 2.2h4.3l.7-2.2 1.9-.9 2.2.5 2.1-3.7-1.5-1.7v-2l1.5-1.7-2.1-3.7-2.2.5-1.9-.9-.7-2.2z"/><circle cx="11.7" cy="12" r="3.2"/></svg></button>
+      <button id="view-back" class="icon-button" type="button" aria-label="${t('Zurück')}" hidden><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m14 6-6 6 6 6M8 12h13"/></svg></button>
+      <div class="app-mark" aria-hidden="true"><img src="/icons/app-icon.svg" alt="" width="30" height="30" /></div>
+      <h1 id="view-title">${t('Monatsbuchung')}</h1>
+      <button id="settings-toggle" class="icon-button settings-button" type="button" aria-controls="settings-view" aria-label="${t('Einstellungen')}"><svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m9.5 3-.7 2.2-2 .9-2.1-.5-2.1 3.7 1.5 1.7v2l-1.5 1.7 2.1 3.7 2.2-.5 2 .9.6 2.2h4.3l.7-2.2 1.9-.9 2.2.5 2.1-3.7-1.5-1.7v-2l1.5-1.7-2.1-3.7-2.2.5-1.9-.9-.7-2.2z"/><circle cx="11.7" cy="12" r="3.2"/></svg><span>${t('Einstellungen')}</span></button>
     </header>
     <div id="update-notice" class="notice" role="status" hidden></div>
-    <div id="demo-banner" class="demo-banner" hidden><strong>${t("Lokaler Testmodus")}</strong>${t("Diese Vorschau verwendet Beispieldaten. Es werden keine Daten an HiBob gesendet.")}</div>
-    <div id="connection" class="connection"><span class="connection-dot" aria-hidden="true"></span><div><p id="connection-title">${t("Mit HiBob verbinden")}</p><p id="connection-detail" class="muted">${t("Melde dich über HiBob an, um deine Anwesenheiten einzulesen.")}</p></div></div>
-    <div class="connection-actions"><button id="connect" class="button primary wide">${t("Mit HiBob anmelden")}</button><button id="disconnect" class="button subtle" hidden>${t("Verbindung trennen")}</button></div>
-    <div id="api-capability-notice" class="notice" role="status" hidden></div>
-    <div id="account-context-notice" class="notice" role="status" hidden>${t('Prüfe vor dem Speichern das angezeigte HiBob-Konto und die Firma. Die Zuordnung bestätigst du für diesen Plan im nächsten Schritt.')}</div>
+    <div id="demo-banner" class="demo-banner" hidden>${t('Testmodus · keine echten Buchungen')}</div>
+    <div id="operation-controls" hidden><button id="return-to-run" class="text-button" type="button">${t('Zur Buchung')}</button><button id="cancel-run" class="button danger" hidden>${t('Restliche Tage stoppen')}</button></div>
     <div id="main-error" class="notice error" role="alert" hidden></div>
     <button id="retry-plan" class="button wide" hidden>${t('Vorschau erneut prüfen')}</button>
     <button id="retry-connection" class="button wide" hidden>${t('Verbindung erneut prüfen')}</button>
-    <section aria-labelledby="settings-title">
-      <h2 id="settings-title" class="visually-hidden">${t("Zeiten festlegen")}</h2>
-      <form id="settings-form">
-        <fieldset id="settings-fieldset">
-          <div class="field month-field"><label for="month">${t("Monat")}</label><input id="month" name="month" type="month" required /></div>
-          <button id="schedule-summary" class="schedule-summary" type="button" aria-controls="settings-options" aria-expanded="false"><strong id="schedule-hours"></strong><span id="schedule-details"></span><span class="summary-edit">${t('Anpassen')}</span></button>
-          <div id="settings-options" hidden>
-          <div class="section-title"><h2>${t('Zeiten und Feiertage')}</h2><small>${t("Montag bis Freitag")}</small></div>
+    <main id="month-view">
+      <div id="connection" class="connection"><span class="connection-dot" aria-hidden="true"></span><div><p id="connection-title">${t('Mit HiBob verbinden')}</p><p id="connection-detail" class="muted"></p></div></div>
+      <div id="api-capability-notice" class="notice" role="status" hidden></div>
+      <div id="account-context-notice" hidden></div>
+      <div class="field month-field"><label for="month" class="visually-hidden">${t('Monat')}</label><input id="month" name="month" type="month" required /></div>
+      <div id="schedule-summary" class="schedule-summary"><strong id="schedule-hours"></strong><span id="schedule-details"></span></div>
+      <section class="preview" aria-label="${t('Monatsvorschau')}">
+        <h2 id="preview-title" class="visually-hidden">${t('Monatsvorschau')}</h2><p id="preview-subtitle" class="visually-hidden"></p>
+        <p id="preview-empty" class="hint">${t('Vorschau erstellen, dann die Buchungen bestätigen.')}</p>
+        <div id="preview-summary" class="preview-summary" hidden></div>
+        <div id="plan-errors" class="notice error" role="alert" hidden></div>
+        <div id="calendar"></div><div id="calendar-legend" class="calendar-legend"></div>
+      </section>
+      <section id="scan-progress" class="notice" role="status" hidden></section>
+      <section id="draft-check-result" class="notice draft-check-result" role="status" aria-labelledby="draft-check-result-title" hidden><h2 id="draft-check-result-title">${t('Plan geprüft – nicht gespeichert')}</h2><dl id="draft-check-details" class="confirm-details"></dl><p class="hint">${t('Zum Fortfahren den Monat erneut einlesen.')}</p></section>
+      <section id="paused-card" class="notice paused-card" hidden aria-labelledby="paused-title"><h2 id="paused-title">${t('Für Kontrolle pausiert')}</h2><p id="paused-description"></p><button id="continue-run" class="button primary wide">${t('Restliche Tage fortsetzen')}</button></section>
+      <section id="run-panel" class="run-panel" aria-labelledby="run-title" hidden><h2 id="run-title" class="visually-hidden">${t('Buchungsverlauf')}</h2><div id="run-status" class="run-summary" aria-live="polite"></div><p id="run-timing" class="hint" hidden></p><div id="run-uncertain" class="notice error" role="alert" hidden></div><p id="run-impact" class="hint" hidden></p><button id="run-details" class="text-button" type="button">${t('Ergebnisse ansehen')}</button></section>
+      <footer id="booking-footer" class="footer month-actions"><div class="footer-buttons">
+        <button id="connect" class="button primary wide">${t('Mit HiBob anmelden')}</button>
+        <button id="scan" class="button primary wide" disabled>${t('Vorschau erstellen')}</button>
+        <button id="build-preview" class="button primary wide" hidden>${t('Vorschau erstellen')}</button>
+        <button id="conflicts" class="button primary wide" hidden></button>
+        <button id="apply" class="button primary wide" disabled hidden>${t('Jetzt buchen')}</button>
+      </div><p id="footer-hint" class="hint">${t('Es wird erst nach deiner Bestätigung gespeichert.')}</p></footer>
+      <button id="refresh-month" class="text-button refresh-month" type="button" hidden>${t('Monat neu einlesen')}</button>
+    </main>
+    <section id="settings-view" class="view-body" hidden>
+      <form id="settings-form"><fieldset id="settings-fieldset">
+        <div id="settings-options">
           <div class="fields">
-            <div class="field state-field"><label for="state">${t("Bundesland")}</label><select id="state" name="state" required></select></div>
-            <div class="field"><label for="start">${t("Arbeitsbeginn")}</label><input id="start" name="start" type="time" required /></div>
-            <div class="field"><label for="end">${t("Arbeitsende")}</label><input id="end" name="end" type="time" required /></div>
+            <div class="field"><label for="start">${t('Arbeitsbeginn')}</label><input id="start" name="start" type="time" required /></div>
+            <div class="field"><label for="end">${t('Arbeitsende')}</label><input id="end" name="end" type="time" required /></div>
           </div>
-          <div class="toggle-row"><label for="useBreak"><input id="useBreak" name="useBreak" type="checkbox" />${t("Pause berücksichtigen")}</label><small>${t("unbezahlt")}</small></div>
-          <div id="break-fields" class="fields subfields">
-            <div class="field"><label for="breakStart">${t("Pause von")}</label><input id="breakStart" name="breakStart" type="time" /></div>
-            <div class="field"><label for="breakEnd">${t("Pause bis")}</label><input id="breakEnd" name="breakEnd" type="time" /></div>
-          </div>
-          <div class="variation-box">
-            <div class="toggle-row"><label for="variable"><input id="variable" name="variable" type="checkbox" />${t("Variable Zeiten")}</label></div>
-            <p id="variation-summary" class="hint" style="margin-top:6px">${t("Jeden Tag die angegebenen Uhrzeiten verwenden.")}</p>
-            <div id="variation-controls" class="range-field" hidden>
-              <div class="range-label"><label for="variationMinutes">${t("Spielraum für Beginn und Ende")}</label><output id="variation-value" for="variationMinutes">${t('±{minutes} Min.', { minutes: 5 })}</output></div>
-              <input id="variationMinutes" name="variationMinutes" type="range" min="0" max="30" step="1" />
-              <p class="hint">${t("Die Pause bleibt fest. Fünf Arbeitstage ergeben genau 40 Netto-Stunden; Teilwochen werden anteilig berechnet.")}</p>
-            </div>
-          </div>
-          <div id="local-holidays" class="local-holidays" hidden>
-            <p class="hint">${t("Für diesen Arbeitsort gelten teilweise örtliche Feiertage. Bitte die zutreffenden Angaben wählen.")}</p>
-            <div id="augsburg-field" class="field" hidden><label for="augsburg">${t("Arbeitsort in der Stadt Augsburg?")}</label><select id="augsburg"><option value="">${t("Bitte auswählen")}</option><option value="yes">${t("Ja")}</option><option value="no">${t("Nein")}</option></select></div>
-            <div id="assumption-field" class="field" hidden><label for="assumption">${t("Mariä Himmelfahrt am Arbeitsort Feiertag?")}</label><select id="assumption"><option value="">${t("Bitte auswählen")}</option><option value="yes">${t("Ja")}</option><option value="no">${t("Nein")}</option></select></div>
-            <div id="corpus-field" class="field" hidden><label for="corpusChristi">${t("Fronleichnam am Arbeitsort Feiertag?")}</label><select id="corpusChristi"><option value="">${t("Bitte auswählen")}</option><option value="yes">${t("Ja")}</option><option value="no">${t("Nein")}</option></select></div>
-          </div>
-          <details><summary>${t("Zusätzliche Tage ausschließen")}</summary><div class="field"><label for="excludedDates">${t("Datumsangaben")}</label><textarea id="excludedDates" rows="2" placeholder="2026-11-05&#10;2026-11-18"></textarea><p class="hint">${t("Ein Datum pro Zeile im Format JJJJ-MM-TT. Tage lassen sich auch direkt in der Vorschau abwählen.")}</p></div></details>
-          </div>
-        </fieldset>
-      </form>
-      <details id="more-options" class="more-options"><summary>${t('Weitere Optionen')}</summary><button id="refresh-month" class="button wide" hidden>${t('Monat erneut einlesen')}</button><button id="redistribute" class="button wide" hidden>${t("Alles neu verteilen")}</button><details class="settings-transfer"><summary>${t('Einstellungen übertragen')}</summary><p class="hint">${t('Übertrage deine Vorgaben zwischen Installationen. HiBob-Daten und Buchungsverläufe werden nicht exportiert.')}</p><div class="transfer-actions"><button id="export-settings" class="button">${t('Einstellungen exportieren')}</button><button id="import-settings" class="button">${t('Einstellungen importieren')}</button></div><input id="settings-file" type="file" accept="application/json,.json" hidden /><p id="transfer-status" class="hint" role="status" hidden></p></details><div class="version-bar"><span id="installed-version"></span><button id="activate-update" class="button subtle" hidden>${t('Jetzt aktualisieren')}</button></div><p id="connection-technical" class="hint"></p></details>
-      <div id="scan-toolbar" class="scan-toolbar"><button id="scan" class="button primary wide" disabled>${t("Monat einlesen")}</button></div>
+          <div class="toggle-row"><label for="useBreak"><input id="useBreak" name="useBreak" type="checkbox" />${t('Pause berücksichtigen')}</label><small>${t('unbezahlt')}</small></div>
+          <div id="break-fields" class="fields subfields"><div class="field"><label for="breakStart">${t('Pause von')}</label><input id="breakStart" name="breakStart" type="time" /></div><div class="field"><label for="breakEnd">${t('Pause bis')}</label><input id="breakEnd" name="breakEnd" type="time" /></div></div>
+          <div class="variation-box"><div class="toggle-row"><label for="variable"><input id="variable" name="variable" type="checkbox" />${t('Variable Zeiten')}</label></div><p id="variation-summary" class="hint"></p><div id="variation-controls" class="range-field" hidden><div class="range-label"><label for="variationMinutes">${t('Spielraum für Beginn und Ende')}</label><output id="variation-value" for="variationMinutes"></output></div><input id="variationMinutes" name="variationMinutes" type="range" min="0" max="30" step="1" /><p class="hint">${t('Die Pause bleibt fest. Fünf Arbeitstage ergeben genau 40 Netto-Stunden; Teilwochen werden anteilig berechnet.')}</p></div></div>
+          <div class="field state-field"><label for="state">${t('Bundesland')}</label><select id="state" name="state" required></select></div>
+          <div id="local-holidays" class="local-holidays" hidden><p class="hint">${t('Für diesen Arbeitsort gelten teilweise örtliche Feiertage. Bitte die zutreffenden Angaben wählen.')}</p><div id="augsburg-field" class="field" hidden><label for="augsburg">${t('Arbeitsort in der Stadt Augsburg?')}</label><select id="augsburg"><option value="">${t('Bitte auswählen')}</option><option value="yes">${t('Ja')}</option><option value="no">${t('Nein')}</option></select></div><div id="assumption-field" class="field" hidden><label for="assumption">${t('Mariä Himmelfahrt am Arbeitsort Feiertag?')}</label><select id="assumption"><option value="">${t('Bitte auswählen')}</option><option value="yes">${t('Ja')}</option><option value="no">${t('Nein')}</option></select></div><div id="corpus-field" class="field" hidden><label for="corpusChristi">${t('Fronleichnam am Arbeitsort Feiertag?')}</label><select id="corpusChristi"><option value="">${t('Bitte auswählen')}</option><option value="yes">${t('Ja')}</option><option value="no">${t('Nein')}</option></select></div></div>
+          <div class="field excluded-field"><label for="excludedDates">${t('Zusätzliche Tage ausschließen')}</label><textarea id="excludedDates" rows="2" placeholder="2026-11-05&#10;2026-11-18"></textarea><p class="hint">${t('Ein Datum pro Zeile im Format JJJJ-MM-TT. Tage lassen sich auch in den Tagesdetails abwählen.')}</p></div>
+        </div>
+      </fieldset></form>
+      <nav class="settings-links" aria-label="${t('Weitere Einstellungen')}"><button id="booking-options-link" type="button">${t('Buchung und Prüfungen')}<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button><button id="transfer-link" type="button">${t('Import und Export')}<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button><button id="connection-link" type="button">${t('Verbindung und Version')}<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></button></nav>
+      <button id="settings-back" class="button primary wide view-return" type="button">${t('Zur Monatsübersicht')}</button>
     </section>
-    <section id="scan-progress" class="notice" role="status" hidden></section>
-    <section id="draft-check-result" class="notice draft-check-result" role="status" aria-labelledby="draft-check-result-title" hidden><h2 id="draft-check-result-title">${t('Plan geprüft – nicht gespeichert')}</h2><dl id="draft-check-details" class="confirm-details"></dl><p class="hint">${t('Kontozuordnung und Tagesdaten wurden lesend geprüft. Die Speicherung wurde nicht getestet. Lies den Monat erneut ein, um weiterzuarbeiten.')}</p></section>
-    <section class="preview" aria-labelledby="preview-title">
-      <div class="section-title"><div><h2 id="preview-title">${t("Monatsvorschau")}</h2><p id="preview-subtitle" class="preview-subtitle">${t("Vor dem Buchen alle Änderungen prüfen.")}</p></div></div>
-      <div id="preview-empty" class="empty-preview"><strong>${t("Dein Monat auf einen Blick")}</strong><p>${t("Lies zuerst den Monat aus HiBob ein. Feiertage, Abwesenheiten und bestehende Einträge werden berücksichtigt.")}</p></div>
-      <button id="build-preview" class="button wide" hidden>${t('Vorschau erstellen')}</button>
-      <div id="preview-summary" class="preview-summary" hidden></div>
-      <button id="conflicts" class="button wide conflict-button" hidden></button>
-      <div id="plan-errors" class="notice error" role="alert" hidden></div>
-      <div id="weeks"></div>
+    <section id="tools-view" class="view-body" hidden>
+      <div id="booking-options"><div id="profile-field" class="field"><label for="execution-profile">${t('Buchungsmodus')}</label><select id="execution-profile"><option value="fast-serial">${t('Schnell – monatlich prüfen')}</option><option value="strict">${t('Streng – jeden Tag einzeln prüfen')}</option></select><p class="hint">${t('Im schnellen Modus werden nur nötige Änderungen nacheinander gespeichert. Für eine Prüfung nach jedem Tag den strengen Modus wählen.')}</p></div><button id="redistribute" class="button wide" hidden>${t('Alles neu verteilen')}</button><button id="tool-check-plan" class="button wide" disabled>${t('Plan prüfen – ohne Speichern')}</button><button id="edit-conflicts" class="button wide" hidden>${t('Entscheidungen zu vorhandenen Buchungen ändern')}</button><button id="view-history" class="button wide" hidden>${t('Buchungsverlauf ansehen')}</button></div>
+      <div id="transfer-options" hidden><p class="hint">${t('Übertrage deine Vorgaben zwischen Installationen. HiBob-Daten und Buchungsverläufe werden nicht exportiert.')}</p><div class="transfer-actions"><button id="export-settings" class="button">${t('Einstellungen exportieren')}</button><button id="import-settings" class="button">${t('Einstellungen importieren')}</button></div><input id="settings-file" type="file" accept="application/json,.json" hidden /><p id="transfer-status" class="hint" role="status" hidden></p><button id="export-plan" class="button wide" hidden>${t('Buchungsplan herunterladen')}</button><p id="export-plan-hint" class="hint" hidden>${t('Enthält private Anwesenheitsdaten. Nur lokal und vertraulich verwenden.')}</p><p id="export-plan-status" class="hint" role="status" hidden></p></div>
+      <div id="connection-options" hidden><div class="version-bar"><span id="installed-version"></span><button id="activate-update" class="button subtle" hidden>${t('Jetzt aktualisieren')}</button></div><p id="connection-technical" class="hint"></p><p id="connection-account" class="hint"></p><p id="connection-scan-detail" class="hint"></p><button id="disconnect" class="button wide" hidden>${t('Verbindung trennen')}</button></div>
+      <button id="tools-back" class="button wide view-return" type="button">${t('Zurück zu Einstellungen')}</button>
     </section>
-    <section id="paused-card" class="notice paused-card" hidden aria-labelledby="paused-title"><h2 id="paused-title">${t('Für Kontrolle pausiert')}</h2><p id="paused-description"></p><button id="continue-run" class="button primary wide">${t('Restliche Tage fortsetzen')}</button></section>
-    <section id="run-panel" class="run-panel" aria-labelledby="run-title" hidden><h2 id="run-title">${t("Buchungsverlauf")}</h2><div id="run-status" class="run-summary" aria-live="polite"></div><p id="run-timing" class="hint" hidden></p><div id="run-uncertain" class="notice error" role="alert" hidden></div><details id="run-history"><summary>${t('Einzelne Ergebnisse')}</summary><ul id="run-results" class="run-results"></ul></details></section>
-    <footer id="booking-footer" class="footer"><div class="footer-buttons"><button id="cancel-run" class="button danger" hidden>${t('Restliche Tage stoppen')}</button><button id="apply" class="button primary" disabled>${t("Jetzt buchen")}</button></div><p id="footer-hint" class="hint">${t("Es wird erst nach deiner Bestätigung gespeichert.")}</p></footer>
+    <section id="day-view" class="view-body" hidden><div id="day-navigation" class="day-navigation"><button id="previous-day" class="button" type="button" aria-label="${t('Vorheriger Tag')}"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m14 6-6 6 6 6M8 12h13"/></svg></button><h2 id="day-title"></h2><button id="next-day" class="button" type="button" aria-label="${t('Nächster Tag')}"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="m10 6 6 6-6 6M16 12H3"/></svg></button></div><div id="day-content"></div><div id="day-week"></div><button id="day-back" class="button wide view-return" type="button">${t('Zur Monatsübersicht')}</button></section>
+    <section id="run-details-view" class="view-body" hidden><ul id="run-results" class="run-results"></ul><button id="run-details-back" class="button wide view-return" type="button">${t('Zur Monatsübersicht')}</button></section>
   </div>
-  <dialog id="conflict-dialog" aria-labelledby="conflict-title"><div class="dialog-body"><h2 id="conflict-title">${t("Vorhandene Buchungen prüfen")}</h2><p class="hint">${t("Entscheide für jeden Tag. Beim Überschreiben werden die bisherigen Arbeits- und Pauseneinträge durch die Vorschau ersetzt.")}</p><div class="dialog-toolbar"><button id="overwrite-all" class="button">${t("Alle überschreiben")}</button><button id="skip-all" class="button">${t("Alle überspringen")}</button></div><div id="conflict-error" class="notice error" role="alert" style="margin-top:12px" hidden></div><div id="conflict-items"></div></div><div class="dialog-footer"><button id="close-conflicts" class="button">${t("Zurück")}</button><button id="save-conflicts" class="button primary">${t("Entscheidungen übernehmen")}</button></div></dialog>
-  <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t("Buchungen jetzt speichern?")}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><div id="account-confirmation-field" class="notice account-confirmation" hidden><label class="ack-label" for="account-confirmation"><input id="account-confirmation" type="checkbox" /><span id="account-confirmation-label"></span></label></div><details id="additional-checks" class="additional-checks"><summary>${t('Zusätzliche Prüfungen')}</summary><div id="checkpoint-field" class="checkpoint-field"><label class="ack-label" for="pause-verification"><input id="pause-verification" type="checkbox" /><span>${t('Für Kontrolle pausieren')}</span></label><p id="checkpoint-description" class="hint"></p></div><div id="preflight-controls" class="draft-check-controls field"><label for="draft-check-date">${t('Tag für Planprüfung')}</label><select id="draft-check-date" disabled></select><p class="hint">${t('Der ausgewählte Tag und die geplanten Daten werden ohne Änderungen geprüft. Das bestätigt keine serverseitige Speicherung. Danach den Monat erneut einlesen.')}</p><button id="check-draft" class="button wide" disabled>${t('Plan prüfen – ohne Speichern')}</button></div></details><p id="execution-disclosure" class="hint"></p><p id="execution-consent-reset" class="hint" role="status" hidden></p></div><div class="dialog-footer"><button id="close-apply" class="button">${t("Zurück")}</button><button id="confirm-apply" class="button primary" disabled>${t("Buchungen starten")}</button></div></dialog>
+  <dialog id="conflict-dialog" aria-labelledby="conflict-title"><div class="dialog-body"><h2 id="conflict-title">${t('Vorhandene Buchungen prüfen')}</h2><p class="hint">${t('Entscheide für jeden Tag. Beim Überschreiben werden die bisherigen Arbeits- und Pauseneinträge durch die Vorschau ersetzt.')}</p><div class="dialog-toolbar"><button id="overwrite-all" class="button">${t('Alle überschreiben')}</button><button id="skip-all" class="button">${t('Alle überspringen')}</button></div><div id="conflict-error" class="notice error" role="alert" hidden></div><div id="conflict-items"></div></div><div class="dialog-footer"><button id="close-conflicts" class="button">${t('Zurück')}</button><button id="save-conflicts" class="button primary">${t('Entscheidungen übernehmen')}</button></div></dialog>
+  <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t('Buchung bestätigen')}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><button id="review-days" class="text-button" type="button">${t('Tage ansehen')}</button><div id="account-confirmation-field" class="notice account-confirmation" hidden><label class="ack-label" for="account-confirmation"><input id="account-confirmation" type="checkbox" /><span id="account-confirmation-label"></span></label></div><button id="review-checks" class="text-button" type="button">${t('Zusätzliche Prüfungen')}</button><section id="additional-checks" class="additional-checks" hidden><div id="checkpoint-field" class="checkpoint-field"><label class="ack-label" for="pause-verification"><input id="pause-verification" type="checkbox" /><span>${t('Für Kontrolle pausieren')}</span></label><p id="checkpoint-description" class="hint"></p></div><div id="preflight-controls" class="draft-check-controls field"><label for="draft-check-date">${t('Tag für Planprüfung')}</label><select id="draft-check-date" disabled></select><p class="hint">${t('Der ausgewählte Tag und die geplanten Daten werden ohne Änderungen geprüft. Das bestätigt keine serverseitige Speicherung. Danach den Monat erneut einlesen.')}</p><button id="check-draft" class="button wide" disabled>${t('Plan prüfen – ohne Speichern')}</button></div></section><p id="execution-disclosure" class="hint"></p><p id="execution-consent-reset" class="hint" role="status" hidden></p></div><div class="dialog-footer"><button id="close-apply" class="button">${t('Zurück')}</button><button id="confirm-apply" class="button primary" disabled>${t('Buchungen starten')}</button></div></dialog>
   <dialog id="import-dialog" aria-labelledby="import-title"><div class="dialog-body"><h2 id="import-title">${t('Einstellungen importieren?')}</h2><p class="hint">${t('Diese Vorgaben ersetzen deine aktuellen Einstellungen. Der Import startet keine Buchungen; prüfe danach die Monatsvorschau.')}</p><dl id="import-details" class="confirm-details"></dl></div><div class="dialog-footer"><button id="cancel-import" class="button">${t('Abbrechen')}</button><button id="confirm-import" class="button primary">${t('Einstellungen übernehmen')}</button></div></dialog>
 `;
 
@@ -150,26 +153,37 @@ const select = (id: string) => $<HTMLSelectElement>(id);
 const conflictDialog = $<HTMLDialogElement>('conflict-dialog');
 const applyDialog = $<HTMLDialogElement>('apply-dialog');
 const importDialog = $<HTMLDialogElement>('import-dialog');
-$('more-options').append($('disconnect'));
-const profileField = node('div', undefined, 'field');
-const profileLabel = node('label', t('Buchungsmodus')); profileLabel.htmlFor = 'execution-profile';
-const profileSelect = node('select'); profileSelect.id = 'execution-profile';
-for (const [value, label] of [['fast-serial', t('Schnell – monatlich prüfen')], ['strict', t('Streng – jeden Tag einzeln prüfen')]]) {
-  const option = node('option', label); option.value = value; profileSelect.append(option);
-}
-profileField.append(profileLabel, profileSelect, node('p', t('Im schnellen Modus werden nur nötige Änderungen nacheinander gespeichert. Für eine Prüfung nach jedem Tag den strengen Modus wählen.'), 'hint'));
-$('more-options').querySelector('summary')!.after(profileField);
-const exportPlanButton = node('button', t('Buchungsplan herunterladen'), 'button wide');
-exportPlanButton.id = 'export-plan'; exportPlanButton.type = 'button'; exportPlanButton.hidden = true;
-const exportPlanHint = node('p', t('Enthält private Anwesenheitsdaten. Nur lokal und vertraulich verwenden.'), 'hint');
-exportPlanHint.id = 'export-plan-hint'; exportPlanHint.hidden = true;
-const exportPlanStatus = node('p', undefined, 'hint'); exportPlanStatus.id = 'export-plan-status'; exportPlanStatus.hidden = true; exportPlanStatus.setAttribute('role', 'status');
-$('more-options').append(exportPlanButton, exportPlanHint, exportPlanStatus);
-document.querySelector('.preview')!.before($('paused-card'));
+const exclusionField = document.querySelector<HTMLElement>('.excluded-field')!;
+$('booking-options').prepend(exclusionField);
+$('main-error').after($('run-uncertain'), $('run-impact'));
+$<HTMLTextAreaElement>('excludedDates').setAttribute('form', 'settings-form');
+function setSettingsOpen(open: boolean): void { navigate(open ? 'settings' : 'month'); }
 
-function setSettingsOpen(open: boolean): void {
-  $('settings-options').hidden = !open;
-  for (const id of ['settings-toggle', 'schedule-summary']) $(id).setAttribute('aria-expanded', String(open));
+function navigate(view: PanelView, focusId?: string): void {
+  if (applyDialog.open) closeConfirmation();
+  panelView = view;
+  renderState();
+  const scrolling = document.scrollingElement ?? document.documentElement; scrolling.scrollTop = 0; scrolling.scrollLeft = 0;
+  const target = focusId ?? (view === 'month' ? `calendar-${calendarFocusDate}` : view === 'settings' ? 'start' : view === 'day' ? 'day-title' : 'view-title');
+  const element = document.getElementById(target) ?? $('view-title');
+  if (!element.hasAttribute('tabindex') && !element.matches('button, input, select, textarea')) element.tabIndex = -1;
+  element.focus({ preventScroll: true });
+}
+
+function openTool(page: typeof toolPage): void { toolPage = page; navigate('tools'); }
+function openDay(date: string): void {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !date.startsWith(settings.month + '-')) return;
+  selectedDate = date; calendarFocusDate = date; navigate('day');
+}
+
+function renderViews(): void {
+  for (const view of ['month', 'settings', 'tools', 'day', 'run-details'] as const) $(`${view}-view`).hidden = panelView !== view;
+  const title = panelView === 'month' ? t('Monatsbuchung') : panelView === 'settings' ? t('Einstellungen') : panelView === 'day' ? t('Tagesdetails') : panelView === 'run-details' ? t('Buchungsverlauf') : toolPage === 'booking' ? t('Buchung und Prüfungen') : toolPage === 'transfer' ? t('Import und Export') : t('Verbindung und Version');
+  $('view-title').textContent = title;
+  $('view-back').hidden = panelView === 'month';
+  $('settings-toggle').hidden = panelView !== 'month';
+  for (const page of ['booking', 'transfer', 'connection'] as const) $(page === 'booking' ? 'booking-options' : `${page}-options`).hidden = toolPage !== page;
+  renderDayView();
 }
 
 function revealInvalidSettings(): boolean {
@@ -180,6 +194,7 @@ function revealInvalidSettings(): boolean {
     for (let parent = invalid.parentElement; parent; parent = parent.parentElement) if (parent instanceof HTMLDetailsElement) parent.open = true;
     invalid.focus();
   }
+  if (!input('month').checkValidity()) { navigate('month', 'month'); return input('month').reportValidity(); }
   return form.reportValidity();
 }
 
@@ -343,8 +358,9 @@ function executionScope(options: RunOptions, resume = false): string {
 function renderExecutionDisclosure(): void {
   const profile = confirmed?.options.executionProfile ?? executionProfile;
   if ($('apply-execution-mode')) $('apply-execution-mode').textContent = profile === 'strict' ? t('Streng – jeden Tag einzeln prüfen') : t('Schnell – monatlich prüfen');
+  if ($('apply-mode-term')) { $('apply-mode-term').hidden = profile !== 'strict'; $('apply-mode-description').hidden = profile !== 'strict'; }
   $('execution-disclosure').textContent = profile === 'fast-serial'
-    ? t('Der Monat wird vor und nach dem Lauf geprüft. Änderungen werden nacheinander gespeichert und erst nach dem Rücklesen als geprüft gezählt. Der Lauf ist keine gemeinsame Transaktion; bei einem Fehler können einzelne Tage bereits gespeichert sein.')
+    ? t('Der Monat wird vor und nach dem Speichern geprüft. Der Lauf ist keine gemeinsame Transaktion: Bei einem Fehler können einzelne Tage bereits gespeichert sein.')
     : t('Die Extension kontrolliert jeden gespeicherten Tag. Bei einer Abweichung stoppt der Lauf.');
 }
 
@@ -703,46 +719,51 @@ function renderState(): void {
   $('demo-banner').hidden = !isDemo;
   const bound = connected();
   const scanned = bound && state.snapshot?.month === settings.month;
-  $('connection').classList.toggle('connected', scanned);
-  $('connection').classList.toggle('selected', bound && !scanned);
-  $('account-context-notice').hidden = isDemo || !scanned || (state.snapshot?.context?.mode !== 'api-session' && state.snapshot?.context?.mode !== 'user-confirmed-ui');
+  $('connection').classList.toggle('connected', bound);
+  $('connection').classList.toggle('selected', !bound);
+  $('account-context-notice').hidden = true;
   $('connect').hidden = isDemo || bound;
   $('disconnect').hidden = isDemo || !bound;
-  document.querySelector<HTMLElement>('.connection-actions')!.hidden = isDemo || bound;
+  $('connection-account').textContent = accountLabel();
+  const scannedSnapshot = state.snapshot ?? plan?.snapshot;
+  if (scannedSnapshot?.month === settings.month) {
+    const time = new Intl.DateTimeFormat(locale(), { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Berlin' }).format(new Date(scannedSnapshot.scannedAt));
+    $('connection-scan-detail').textContent = t('Eingelesen: {time} Uhr · {period}', { time, period: scannedSnapshot.periodLabel });
+  } else $('connection-scan-detail').textContent = '';
   $<HTMLButtonElement>('connect').disabled = transferBlocked();
   $<HTMLButtonElement>('disconnect').disabled = transferBlocked();
   $('connect').textContent = connecting ? t('Verbindung wird hergestellt …') : t('Mit HiBob anmelden');
   $('api-capability-notice').hidden = isDemo || !bound || canWrite();
   $('api-capability-notice').textContent = state.connection?.reason || (state.connection?.capabilities?.write ? t('Das Überschreiben vorhandener Einträge ist für diese API-Verbindung nicht freigegeben.') : t('Lesende API-Verbindung. Vorschau und Planprüfung sind verfügbar; Speichern ist noch nicht freigegeben.'));
   $('connection-technical').textContent = state.connection?.transport === 'temporary-tab' ? t('API über temporären Hintergrund-Tab') : bound && !isDemo ? t('Direkte API-Verbindung') : '';
-  if (state.snapshot && scanned) {
-    $('connection-title').textContent = t('Monat eingelesen');
-    const time = new Intl.DateTimeFormat(locale(), { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Berlin' }).format(new Date(state.snapshot.scannedAt));
-    $('connection-detail').textContent = t('{employee} · Eingelesen: {time} Uhr · {period}', { employee: accountLabel() || state.snapshot.employeeLabel, time, period: state.snapshot.periodLabel });
-  } else if (isDemo) {
-    $('connection-title').textContent = t('Lokale Testoberfläche');
-    $('connection-detail').textContent = t('Alle Funktionen können ohne echte Buchungen geprüft werden.');
-  } else if (bound) {
-    $('connection-title').textContent = t('Mit HiBob verbunden');
-    $('connection-detail').textContent = accountLabel();
+  if (bound) {
+    $('connection-title').textContent = accountLabel();
+    $('connection-detail').textContent = isDemo ? t('Lokale Beispieldaten') : '';
+    $('connection-detail').hidden = !isDemo;
   } else {
     $('connection-title').textContent = connecting ? t('Verbindung wird hergestellt …') : state.connection?.status === 'expired' ? t('HiBob-Anmeldung abgelaufen') : state.connection?.status === 'unsupported' ? t('HiBob-Verbindung nicht verfügbar') : t('Mit HiBob verbinden');
     $('connection-detail').textContent = state.connection?.reason || t('Melde dich über HiBob an, um deine Anwesenheiten einzulesen.');
+    $('connection-detail').hidden = false;
   }
+
   const error = localError || state.error || statePollError || (state.job?.status === 'interrupted' ? t('Der letzte Vorgang wurde unterbrochen. Bitte den Monat erneut einlesen.') : '');
   $('main-error').hidden = !error;
   $('main-error').textContent = localizeText(error);
   $('retry-plan').hidden = !pendingDraft || rebuilding || locked;
   $('retry-connection').hidden = !hasExtension || (!initializationFailed && !connectionRetryAvailable) || initializing || locked;
   $<HTMLFieldSetElement>('settings-fieldset').disabled = locked || initializing || initializationFailed;
-  $<HTMLButtonElement>('settings-toggle').disabled = locked || initializing || initializationFailed;
-  $('schedule-hours').textContent = `${settings.start || '—'}–${settings.end || '—'}`;
-  $('schedule-details').textContent = [settings.useBreak ? `${t('Pause')} ${settings.breakStart}–${settings.breakEnd}` : t('Ohne Pause'), settings.variable ? t('±{minutes} Min.', { minutes: settings.variationMinutes }) : t('feste Zeiten'), t(GERMAN_STATES.find(item => item.code === settings.state)?.name || settings.state), settings.excludedDates.length ? t('{count} manuell ausgeschlossene Tage', { count: settings.excludedDates.length }) : ''].filter(Boolean).join(' · ');
+  $<HTMLTextAreaElement>('excludedDates').disabled = locked || initializing || initializationFailed;
+  $<HTMLButtonElement>('settings-toggle').disabled = initializing || initializationFailed;
+  input('month').disabled = locked || initializing || initializationFailed;
+  $<HTMLButtonElement>('tool-check-plan').disabled = !approved() || locked || !plan || !writableDays(plan).length;
+  $('schedule-hours').textContent = `${settings.start || '—'}–${settings.end || '—'} · ${settings.variable ? t('±{minutes} Min.', { minutes: settings.variationMinutes }) : t('feste Zeiten')}`;
+  $('schedule-details').textContent = [settings.useBreak ? `${t('Pause')} ${settings.breakStart}–${settings.breakEnd}` : t('Ohne Pause'), t(GERMAN_STATES.find(item => item.code === settings.state)?.name || settings.state), settings.excludedDates.length ? t('{count} manuell ausgeschlossene Tage', { count: settings.excludedDates.length }) : ''].filter(Boolean).join(' · ');
   $<HTMLButtonElement>('scan').disabled = locked || initializing || initializationFailed || rebuilding || (!isDemo && !bound);
   $<HTMLButtonElement>('refresh-month').disabled = $<HTMLButtonElement>('scan').disabled;
   $('refresh-month').hidden = !state.snapshot;
-  $('scan-toolbar').hidden = !bound || scanned;
-  $('scan').textContent = busy || activeJob()?.kind === 'scan' ? t('Vorschau wird geprüft …') : scanned ? t('Monat erneut einlesen') : t('Vorschau erstellen');
+  $('scan').hidden = !bound || Boolean(plan) || Boolean(state.snapshot && scanned) || running || paused;
+  $('connect').hidden = isDemo || bound;
+  $('scan').textContent = t('Vorschau erstellen');
   const progress = state.progress;
   $('scan-progress').hidden = !running || !progress;
   if (progress && running) {
@@ -761,11 +782,20 @@ function renderState(): void {
   $('cancel-run').hidden = (!running && !paused) || connecting;
   $('cancel-run').textContent = paused || state.run?.status === 'running' ? t('Restliche Tage stoppen') : t('Abbrechen');
   $<HTMLButtonElement>('cancel-run').disabled = hasExtension && (!activeJob() && !pausedJob() || activeJob()?.status === 'cancelling');
-  $('booking-footer').hidden = (!plan || !state.snapshot) && !running && !paused;
-  $('apply').hidden = paused;
+  $('booking-footer').hidden = false;
+  $('apply').hidden = !plan || paused || running || !state.snapshot;
   const finished = state.run?.status === 'complete' && state.run.planId === plan?.id;
   const noChanges = Boolean(plan && !plan.errors.length && !writableDays(plan).length);
+  const unresolved = plan?.days.some(day => day.action === 'conflict') ?? false;
+  $('apply').hidden ||= noChanges || finished || unresolved || Boolean(plan?.errors.length);
   $<HTMLButtonElement>('apply').disabled = !approved() || locked || rebuilding || finished || noChanges;
+  $('refresh-month').hidden = !bound || running || paused || (!state.snapshot && !state.run && !preflightNeedsScan);
+  $('footer-hint').hidden = !plan || noChanges || running || paused || finished;
+  renderViews();
+  const attention = state.run?.results.some(result => result.status === 'uncertain' || result.status === 'failed') && (!state.snapshot || !plan || state.run.planId === plan.id);
+  $('operation-controls').hidden = connecting || (!running && !paused && (!attention || panelView === 'month'));
+  $('return-to-run').hidden = panelView === 'month';
+  $('booking-footer').hidden = [...$('booking-footer').querySelectorAll<HTMLButtonElement>('button')].every(button => button.hidden);
   $('apply').textContent = rebuilding ? t('Vorschau wird geprüft …') : running ? t('Bitte warten …') : finished ? t('Buchungen abgeschlossen') : noChanges ? t('Keine Buchung nötig') : canWrite() ? t('{count} Tage prüfen', { count: plan ? writableDays(plan).length : 0 }) : t('Plan prüfen');
   $('paused-card').hidden = !paused;
   $('paused-description').textContent = paused ? t('{date} ist gespeichert und geprüft. {verified} Tage geprüft, {remaining} noch offen. Prüfe die Buchung und bestätige anschließend das Fortsetzen.', { date: dateLabel(state.run?.checkpointDate ?? ''), verified: state.run?.results.filter(item => item.status === 'verified').length ?? 0, remaining: state.run?.results.filter(item => item.status !== 'verified' && item.status !== 'skipped').length ?? 0 }) : '';
@@ -785,82 +815,90 @@ function renderState(): void {
 }
 
 function renderPreview(): void {
-  const running = isRunning();
-  const locked = running || isPaused() || updating();
-  const expanded = new Set([...document.querySelectorAll<HTMLDetailsElement>('details[data-day-details]')].filter(item => item.open).map(item => item.dataset.dayDetails));
-  const skippedOpen = document.querySelector<HTMLDetailsElement>('#skipped-days')?.open ?? false;
-  document.querySelector<HTMLElement>('.preview')!.hidden = !plan && !state.snapshot;
-  $('preview-empty').hidden = Boolean(plan);
-  $('preview-empty').querySelector('p')!.textContent = !plan && state.snapshot?.month === settings.month ? t('Der Monat ist eingelesen. Erstelle jetzt die prüfbare Vorschau.') : t('Lies zuerst den Monat aus HiBob ein. Feiertage, Abwesenheiten und bestehende Einträge werden berücksichtigt.');
-  $('build-preview').hidden = Boolean(plan || pendingDraft || running || updating() || initializing || initializationFailed || state.snapshot?.month !== settings.month);
-  $('preview-summary').hidden = !plan;
+  const locked = isRunning() || isPaused() || updating();
+  $('preview-empty').hidden = Boolean(plan) || Boolean(state.run);
+  $('build-preview').hidden = Boolean(plan || pendingDraft || isRunning() || updating() || initializing || initializationFailed || state.snapshot?.month !== settings.month);
+  $('preview-summary').hidden = !plan || Boolean(isRunning() || isPaused() || state.run?.planId === plan?.id);
   $('redistribute').hidden = !plan || !settings.variable;
   $<HTMLButtonElement>('redistribute').disabled = locked;
-  $('weeks').replaceChildren();
   $('plan-errors').replaceChildren();
   $('plan-errors').hidden = !plan?.errors.length;
   $('conflicts').hidden = true;
-  $('preview-subtitle').textContent = plan ? `${monthLabel(plan.settings.month)} · ${plan.settings.variable ? t('variable Zeiten ±{minutes} Min.', { minutes: plan.settings.variationMinutes }) : t('feste Zeiten')}` : t('Vor dem Buchen alle Änderungen prüfen.');
+  $('edit-conflicts').hidden = true;
+  $('preview-subtitle').textContent = monthLabel(settings.month);
+  const matchingRun = plan && state.run?.planId === plan.id ? state.run : undefined;
+  renderMonthCalendar($('calendar'), { month: settings.month, days: plan?.days, run: matchingRun, focusDate: calendarFocusDate, onOpenDate: openDay, onFocusDate: date => { calendarFocusDate = date; } });
   if (!plan) return;
-  const changed = plan.days.filter((day) => day.action === 'create' || day.action === 'overwrite');
-  const excluded = plan.days.filter((day) => !day.eligible);
-  const conflictDays = plan.days.filter((day) => day.eligible && day.existing.length > 0 && day.action !== 'unchanged');
+  const changed = writableDays(plan);
+  const retained = plan.days.filter(day => day.action === 'unchanged');
+  const considered = plan.days.filter(day => day.eligible);
+  const conflictDays = plan.days.filter(day => day.eligible && day.existing.length > 0 && day.action !== 'unchanged');
   const total = plan.weeks.some(week => week.plannedMinutes === null) ? null : plan.weeks.reduce((minutes, week) => minutes + (week.plannedMinutes ?? 0), 0);
-  const summaryItems = [[String(changed.length), isPaused() ? t('Tage im Monatsplan') : t('Tage zum Buchen')], [formatMinutes(total), t('Netto im Plan')], [String(excluded.length), t('ausgelassene Tage')]];
-  $('preview-summary').replaceChildren(...summaryItems.map(([value, label]) => {
-    const item = node('div'); item.append(node('strong', value), node('span', label)); return item;
-  }));
-  if (!changed.length && !plan.errors.length) $('preview-summary').append(node('p', t('Alles passt – keine Buchung nötig'), 'no-changes'));
+  const totals = node('div', undefined, 'month-totals');
+  totals.append(node('strong', total === null ? t('Stunden noch nicht berechenbar') : t('{time} im Monatsplan', { time: formatMinutes(total) })), node('span', t('{count} berücksichtigte Tage', { count: considered.length })));
+  const counts = node('div', undefined, 'month-change-counts');
+  counts.append(node('span', t('{count} neu', { count: changed.filter(day => day.action === 'create').length })), node('span', t('{count} bereits passend', { count: retained.length })));
+  const overwriteCount = changed.filter(day => day.action === 'overwrite').length;
+  if (overwriteCount) counts.append(node('span', t('{count} ersetzen', { count: overwriteCount })));
+  $('preview-summary').replaceChildren(totals, counts);
+  const unresolved = conflictDays.filter(day => !choices[day.date]).length;
+  if (!changed.length && !plan.errors.length && !unresolved) {
+    const message = !considered.length ? t('Keine Arbeitstage ausgewählt') : considered.every(day => day.action === 'unchanged') ? t('Alles passt – keine Buchung nötig') : t('Keine Änderungen ausgewählt – vorhandene Buchungen bleiben erhalten');
+    $('preview-summary').append(node('p', message, 'no-changes'));
+  }
   if (conflictDays.length) {
-    $('conflicts').hidden = false;
-    const unresolved = conflictDays.filter((day) => !choices[day.date]).length;
-    $('conflicts').textContent = unresolved ? unresolved === 1 ? t('1 vorhandene Buchung prüfen') : t('{count} vorhandene Buchungen prüfen', { count: unresolved }) : t('Entscheidungen zu vorhandenen Buchungen ändern');
-    $('conflicts').classList.toggle('primary', unresolved > 0);
-    if (unresolved) $('preview-summary').after($('conflicts'));
-    else $('more-options').append($('conflicts'));
+    $('edit-conflicts').hidden = false;
+    $('conflicts').hidden = !unresolved;
+    $('conflicts').textContent = t('{count} Buchungen prüfen', { count: unresolved });
     $<HTMLButtonElement>('conflicts').disabled = locked || rebuilding || Boolean(pendingDraft);
+    $<HTMLButtonElement>('edit-conflicts').disabled = locked || rebuilding || Boolean(pendingDraft);
   }
   if (plan.errors.length) {
+    // Keep the blocking reason visible, including weekly feasibility failures.
     const list = node('ul');
     for (const error of [...new Set(plan.errors)]) list.append(node('li', localizeText(error)));
     $('plan-errors').append(node('div', t('Der Plan kann noch nicht gebucht werden.'), 'error-heading'), list);
   }
-  const shown = new Set<string>();
-  const skipped: DayPlan[] = [];
-  for (const week of plan.weeks) {
-    const section = node('section', undefined, 'week');
-    const header = node('div', undefined, 'week-header');
-    const date = /^\d{4}-\d{2}-\d{2}$/.test(week.week) ? dateLabel(week.week, false) : week.week;
-    header.append(node('h3', t('Woche {date}', { date })));
-    const totals = node('div', undefined, 'totals');
-    totals.append(node('strong', t('{time} geplant', { time: formatMinutes(week.plannedMinutes) })), node('div', t('{time} Ziel', { time: formatMinutes(week.targetMinutes) })));
-    header.append(totals);
-    section.append(header);
-    for (const day of plan.days.filter((item) => week.dates.includes(item.date))) {
-      if (!day.eligible && !settings.excludedDates.includes(day.date)) skipped.push(day);
-      else section.append(renderDay(day, expanded.has(day.date)));
-      shown.add(day.date);
-    }
-    for (const error of week.errors) section.append(node('p', localizeText(error), 'weekly-error'));
-    if (section.querySelector('article') || week.errors.length) $('weeks').append(section);
-  }
-  // Include every date even if a planner only groups eligible dates into weeks.
-  const remaining = plan.days.filter((day) => !shown.has(day.date));
-  if (remaining.length) {
-    const section = node('section', undefined, 'week');
-    section.append(node('h3', t('Weitere Tage')));
-    for (const day of remaining) section.append(renderDay(day, expanded.has(day.date)));
-    $('weeks').append(section);
-  }
-  if (skipped.length) {
-    const disclosure = node('details', undefined, 'skipped-days'); disclosure.id = 'skipped-days'; disclosure.open = skippedOpen;
-    disclosure.append(node('summary', t('{count} arbeitsfreie Tage', { count: skipped.length })));
-    for (const day of skipped) disclosure.append(renderDay(day, expanded.has(day.date)));
-    $('weeks').append(disclosure);
-  }
 }
 
-function renderDay(day: DayPlan, expanded = false): HTMLElement {
+function renderDayView(): void {
+  if (panelView !== 'day') return;
+  const days = plan?.days ?? [];
+  const day = days.find(item => item.date === selectedDate);
+  $('day-title').textContent = dateLabel(selectedDate);
+  const index = days.findIndex(item => item.date === selectedDate);
+  $<HTMLButtonElement>('previous-day').disabled = index <= 0;
+  $<HTMLButtonElement>('next-day').disabled = index < 0 || index >= days.length - 1;
+  $('day-content').replaceChildren();
+  $('day-week').replaceChildren();
+  if (!day) {
+    $('day-content').append(node('p', t('Diesen Monat zuerst einlesen, um die Tagesdetails zu sehen.'), 'hint'));
+    return;
+  }
+  $('day-content').append(renderDay(day, true));
+  const date = new Date(`${day.date}T12:00:00Z`); date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7);
+  const monday = date.toISOString().slice(0, 10);
+  const week = plan!.weeks.find(item => item.week === monday);
+  if (!week) return;
+  const weekSection = node('section', undefined, 'week');
+  const header = node('div', undefined, 'week-header');
+  header.append(node('h3', t('Woche {date}', { date: dateLabel(week.week, false) })));
+  const totals = node('div', undefined, 'totals');
+  totals.append(node('strong', t('{time} geplant', { time: formatMinutes(week.plannedMinutes) })), node('div', t('{time} Ziel', { time: formatMinutes(week.targetMinutes) })));
+  header.append(totals); weekSection.append(header);
+  const list = node('ul', undefined, 'week-days');
+  for (const item of days.filter(item => week.dates.includes(item.date))) {
+    const row = node('li'); const button = node('button', dateLabel(item.date), 'text-button'); button.type = 'button';
+    button.addEventListener('click', () => openDay(item.date));
+    row.append(button, entriesElement(item.action === 'skip' || item.action === 'unchanged' ? item.existing : item.proposed), node('span', formatMinutes(item.netMinutes), 'week-net'));
+    list.append(row);
+  }
+  weekSection.append(list);
+  for (const error of week.errors) weekSection.append(node('p', localizeText(error), 'weekly-error'));
+  $('day-week').append(weekSection);
+}
+
+function renderDay(day: DayPlan, _expanded = false): HTMLElement {
   const article = node('article', undefined, `day${!day.eligible ? ' inactive' : ''}`);
   article.dataset.date = day.date;
   const head = node('div', undefined, 'day-head');
@@ -887,8 +925,7 @@ function renderDay(day: DayPlan, expanded = false): HTMLElement {
   const entries = (day.action === 'skip' || day.action === 'unchanged' ? day.existing : day.proposed).filter(entry => entry.type === 'work').sort((a, b) => a.start.localeCompare(b.start));
   head.append(label, node('span', entries.length ? `${entries[0].start}–${entries[entries.length - 1].end}` : '—', 'day-time'), node('span', day.eligible ? formatMinutes(day.netMinutes) : '', 'day-net'));
   article.append(head);
-  const disclosure = node('details', undefined, 'day-details'); disclosure.dataset.dayDetails = day.date; disclosure.open = expanded;
-  const toggle = node('summary', '⌄'); toggle.setAttribute('aria-label', t('Einträge für {date} anzeigen', { date: dateLabel(day.date) })); disclosure.append(toggle);
+  const disclosure = node('div', undefined, 'day-details'); disclosure.dataset.dayDetails = day.date;
   const list = node('dl', undefined, 'day-lines');
   if (day.existing.length) detailsLine(list, t('Bisher'), entriesElement(day.existing));
   if (day.proposed.length && (day.action === 'create' || day.action === 'overwrite' || day.action === 'conflict')) detailsLine(list, t('Geplant'), entriesElement(day.proposed));
@@ -904,18 +941,24 @@ function renderDay(day: DayPlan, expanded = false): HTMLElement {
 
 function renderRun(): void {
   const run = state.run;
-  $('run-panel').hidden = !run;
-  if (!run) return;
+  $('run-panel').hidden = !run || Boolean(plan && state.snapshot && run.planId !== plan.id);
+  $('view-history').hidden = !run;
+  if (!run) { $('run-uncertain').hidden = true; $('run-impact').hidden = true; return; }
+  const relevant = !plan || !state.snapshot || run.planId === plan.id;
   const verified = run.results.filter((item) => item.status === 'verified').length;
   const status = { running: t('Buchungen laufen'), paused: t('Für Kontrolle pausiert'), complete: t('Lauf abgeschlossen'), stopped: t('Lauf angehalten'), failed: t('Lauf mit Fehler angehalten') }[run.status];
   $('run-status').textContent = t('{status} · {verified} von {total} Tagen verifiziert', { status, verified, total: run.results.filter((item) => item.status !== 'skipped').length });
   const duration = run.timings?.totalMs;
   $('run-timing').hidden = typeof duration !== 'number' || !Number.isFinite(duration) || run.status === 'running';
   $('run-timing').textContent = typeof duration === 'number' && Number.isFinite(duration) ? t('Tatsächliche Laufzeit: {seconds} s', { seconds: new Intl.NumberFormat(locale(), { maximumFractionDigits: 1 }).format(duration / 1000) }) : '';
-  $('run-uncertain').hidden = !run.results.some(result => result.status === 'uncertain');
+  $('run-uncertain').hidden = !relevant || !run.results.some(result => result.status === 'uncertain');
   const uncertainNotice = t('Als unklar markierte Buchungen können bereits in HiBob gespeichert sein. Vor einem neuen Lauf den Monat einlesen und die betroffenen Tage prüfen.');
   if ($('run-uncertain').textContent !== uncertainNotice) $('run-uncertain').textContent = uncertainNotice;
-  if (run.status === 'failed') $<HTMLDetailsElement>('run-history').open = true;
+  const affected = run.results.find(result => result.status === 'failed' || result.status === 'uncertain');
+  $('run-impact').hidden = !affected || !relevant;
+  const remaining = run.results.filter(result => result.status !== 'verified' && result.status !== 'skipped').length;
+  $('run-impact').textContent = affected ? `${dateLabel(affected.date)} · ${t('{verified} geprüft · {remaining} offen', { verified, remaining })} · ${localizeText(affected.message)}` : '';
+  $('view-history').hidden = false;
   $('run-results').replaceChildren(...run.results.map((result) => {
     const item = node('li'); item.dataset.status = result.status;
     const description = node('div');
@@ -1004,6 +1047,7 @@ async function saveChoices(): Promise<void> {
   }
   choices = next;
   conflictDialog.close();
+  panelView = 'month';
   seed = freshSeed(); await rebuild();
 }
 
@@ -1063,21 +1107,23 @@ function openApply(resume = false): void {
   const options = selectedExecutionOptions(plan, resume);
   confirmed = { plan: structuredClone(plan), planRevision: planRevision(), contextFingerprint: contextFingerprint(plan.snapshot.context), executionFingerprint: executionScope(options, resume), options, preflightDate: days[0]?.date ?? '', ...(resume ? { resumeJobId: pausedJob()!.id, checkpointId: pausedJob()!.checkpointId } : {}) };
   const reviewed = confirmed.plan;
-  $('apply-title').textContent = resume ? t('Restliche Buchungen fortsetzen?') : canWrite() ? t('Buchungen jetzt speichern?') : t('Plan prüfen');
+  $('apply-title').textContent = resume ? t('Restliche Buchungen fortsetzen?') : canWrite() ? t('Buchung bestätigen') : t('Plan prüfen');
   const manual = needsAccountConfirmation(reviewed);
   $('account-confirmation-field').hidden = !manual;
   input('account-confirmation').checked = false;
   input('account-confirmation').required = manual;
   input('account-confirmation').disabled = !manual;
-  $('account-confirmation-label').textContent = t('Ich bestätige, dass die Anwesenheiten für {month} zu meinem angezeigten HiBob-Konto im richtigen Firmenkonto gehören.', { month: monthLabel(reviewed.settings.month) });
+  $('account-confirmation-label').textContent = t('Ich bestätige das richtige HiBob-Konto und die Firma für {month}.', { month: monthLabel(reviewed.settings.month) });
   const dateSelect = select('draft-check-date');
   dateSelect.replaceChildren(...days.map(day => { const option = node('option', `${dateLabel(day.date)} · ${formatMinutes(day.netMinutes)}`); option.value = day.date; return option; }));
   dateSelect.value = confirmed.preflightDate;
   input('pause-verification').checked = false;
   $('checkpoint-field').hidden = resume || !canWrite();
   $('preflight-controls').hidden = resume;
-  $('additional-checks').hidden = resume;
-  $<HTMLDetailsElement>('additional-checks').open = !canWrite();
+  reviewChecksOpen = !canWrite();
+  $('additional-checks').hidden = resume || !reviewChecksOpen;
+  $('review-checks').hidden = resume;
+  $('review-checks').setAttribute('aria-expanded', String(reviewChecksOpen));
   $('checkpoint-description').textContent = t('Nach dem ersten gebuchten Tag und dem ersten zukünftigen Tag anhalten. Danach nur mit neuer Bestätigung fortsetzen.');
   $('execution-consent-reset').hidden = true;
   renderExecutionDisclosure();
@@ -1087,15 +1133,20 @@ function openApply(resume = false): void {
   $('apply-description').textContent = isDemo ? t('Du startest eine lokale Simulation. Dein echtes HiBob-Konto wird nicht verändert.') : manual ? t('Prüfe das angezeigte Mitarbeiter- und Firmenkonto. Diese Bestätigung gilt nur für diesen Plan.') : t('Die folgenden Änderungen werden in deinem HiBob-Konto „{employee}“ gespeichert.', { employee: reviewed.snapshot.employeeLabel });
   const list = $('apply-details'); list.replaceChildren();
   detailsLine(list, t('Monat'), monthLabel(reviewed.settings.month));
-  detailsLine(list, t('Buchungsmodus'), options.executionProfile === 'strict' ? t('Streng – jeden Tag einzeln prüfen') : t('Schnell – monatlich prüfen'));
-  list.lastElementChild!.id = 'apply-execution-mode';
   if (!isDemo) detailsLine(list, t('HiBob-Konto'), accountLabel());
-  detailsLine(list, t('Tage zum Buchen'), String(days.length));
-  detailsLine(list, t('Netto'), formatMinutes(days.reduce((total, day) => total + (day.netMinutes ?? 0), 0)));
-  detailsLine(list, t('Geplant'), [reviewed.settings.start + '–' + reviewed.settings.end, reviewed.settings.useBreak ? `${t('Pause')} ${reviewed.settings.breakStart}–${reviewed.settings.breakEnd}` : t('Ohne Pause'), reviewed.settings.variable ? t('±{minutes} Min.', { minutes: reviewed.settings.variationMinutes }) : t('feste Zeiten')].join(' · '));
+  detailsLine(list, t('Neue Tage'), String(days.filter(day => day.action === 'create').length));
+  detailsLine(list, t('Zu ersetzen'), String(overwriteCount));
+  detailsLine(list, t('Nettozeit zum Speichern'), formatMinutes(days.reduce((total, day) => total + (day.netMinutes ?? 0), 0)));
+  detailsLine(list, t('Arbeitszeit'), `${reviewed.settings.start}–${reviewed.settings.end}${reviewed.settings.variable ? ` · ${t('±{minutes} Min.', { minutes: reviewed.settings.variationMinutes })}` : ''}`);
+  detailsLine(list, t('Pause'), reviewed.settings.useBreak ? `${reviewed.settings.breakStart}–${reviewed.settings.breakEnd}` : t('Ohne Pause'));
+  const mode = node('span', options.executionProfile === 'strict' ? t('Streng – jeden Tag einzeln prüfen') : t('Schnell – monatlich prüfen'));
+  mode.id = 'apply-execution-mode';
+  detailsLine(list, t('Buchungsmodus'), mode);
+  const modeDescription = mode.parentElement!; modeDescription.id = 'apply-mode-description';
+  const modeTerm = modeDescription.previousElementSibling as HTMLElement; modeTerm.id = 'apply-mode-term';
+  modeDescription.hidden = modeTerm.hidden = options.executionProfile !== 'strict';
   if (resume) detailsLine(list, t('Bereits gespeichert und geprüft'), String(writableDays(reviewed).length - days.length));
-  detailsLine(list, t('Davon überschreiben'), String(overwriteCount));
-  detailsLine(list, t('Bundesland'), t(GERMAN_STATES.find((item) => item.code === reviewed.settings.state)?.name || reviewed.settings.state));
+
   applyDialog.showModal();
   updateConfirmationButton();
 }
@@ -1132,6 +1183,7 @@ async function checkPreflight(): Promise<void> {
   const revision = state.revision ?? 0;
   const version = buildVersion;
   closeConfirmation();
+  panelView = 'month';
   approvedPlanRevision = undefined;
   checkingPreflight = true; preflightNeedsScan = true; preflightResult = undefined; localError = ''; renderState();
   try {
@@ -1204,6 +1256,7 @@ async function applyPlan(): Promise<void> {
   const confirmation = accountConfirmation(review);
   closeConfirmation();
   const activePlan = review.plan;
+  panelView = 'month';
   approvedPlanRevision = undefined;
   applying = true; localError = ''; renderState();
   try {
@@ -1389,8 +1442,27 @@ $('settings-form').addEventListener('input', settingsInput);
 $('settings-form').addEventListener('change', settingsInput);
 $('scan').addEventListener('click', () => { void scanMonth(); });
 $('refresh-month').addEventListener('click', () => { void scanMonth(); });
-$('settings-toggle').addEventListener('click', () => setSettingsOpen($('settings-options').hidden));
-$('schedule-summary').addEventListener('click', () => setSettingsOpen($('settings-options').hidden));
+$('settings-toggle').addEventListener('click', () => navigate('settings'));
+$('return-to-run').addEventListener('click', () => navigate('month'));
+$('settings-back').addEventListener('click', () => navigate('month', 'settings-toggle'));
+$('view-back').addEventListener('click', () => navigate(panelView === 'tools' ? 'settings' : 'month'));
+$('booking-options-link').addEventListener('click', () => openTool('booking'));
+$('transfer-link').addEventListener('click', () => openTool('transfer'));
+$('connection-link').addEventListener('click', () => openTool('connection'));
+$('tools-back').addEventListener('click', () => navigate('settings'));
+$('day-back').addEventListener('click', () => navigate('month'));
+$('run-details-back').addEventListener('click', () => navigate('month', 'run-details'));
+for (const id of ['run-details', 'view-history']) $(id).addEventListener('click', () => navigate('run-details'));
+for (const [id, offset] of [['previous-day', -1], ['next-day', 1]] as const) $(id).addEventListener('click', () => { const days = plan?.days ?? []; const index = days.findIndex(day => day.date === selectedDate); const day = days[index + offset]; if (day) openDay(day.date); });
+$('review-days').addEventListener('click', () => { const date = writableDays(plan!)[0]?.date; closeConfirmation(); if (date) openDay(date); });
+$('review-checks').addEventListener('click', () => { reviewChecksOpen = !reviewChecksOpen; $('additional-checks').hidden = !reviewChecksOpen; $('review-checks').setAttribute('aria-expanded', String(reviewChecksOpen)); });
+$('tool-check-plan').addEventListener('click', () => { openApply(); if (applyDialog.open) { reviewChecksOpen = true; $('additional-checks').hidden = false; $('review-checks').setAttribute('aria-expanded', 'true'); select('draft-check-date').focus(); } });
+$('edit-conflicts').addEventListener('click', openConflicts);
+$('excludedDates').addEventListener('input', settingsInput);
+$('excludedDates').addEventListener('change', settingsInput);
+input('month').addEventListener('input', settingsInput);
+input('month').addEventListener('change', settingsInput);
+
 $('redistribute').addEventListener('click', () => { void rebuild(true); });
 $('conflicts').addEventListener('click', openConflicts);
 $('close-conflicts').addEventListener('click', () => conflictDialog.close());

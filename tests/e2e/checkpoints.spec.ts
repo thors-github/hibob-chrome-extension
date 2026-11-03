@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { checks, day, home, tools } from './ui';
 import { readFile } from 'node:fs/promises';
 import type { BookingPlan, DayPlan, MonthSnapshot, SessionState, Settings } from '../../src/shared/types';
 
@@ -45,7 +46,7 @@ for (const language of ['de-DE', 'en-GB']) {
     }, { settings, initial, language });
     await page.goto('/sidepanel.html');
     await expect(page.locator('#apply')).toBeEnabled();
-    await page.locator('#more-options > summary').click();
+    await tools(page, 'transfer');
     await expect(page.locator('#export-plan-hint')).toBeVisible();
     const firstDownload = page.waitForEvent('download');
     await page.locator('#export-plan').click();
@@ -60,11 +61,11 @@ for (const language of ['de-DE', 'en-GB']) {
     const downloadState = await page.evaluate(() => (window as unknown as { __checkpointFixture: { commands: Array<{ type: string }>; preferences: unknown[]; state: SessionState } }).__checkpointFixture);
     expect(downloadState.state.plan).toEqual(plan); expect(downloadState.preferences).toEqual([]);
     expect(downloadState.commands.every(command => command.type === 'PANEL_GET_STATE')).toBe(true);
-    await page.locator('#more-options > summary').click();
+    await home(page);
     await page.locator('#apply').click();
     expect(await page.locator('#apply-dialog').evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
-    await expect(page.locator('#additional-checks')).not.toHaveAttribute('open');
-    await page.locator('#additional-checks > summary').click();
+    await expect(page.locator('#additional-checks')).not.toBeVisible();
+    await checks(page);
     await page.locator('#account-confirmation').check();
     await page.locator('#pause-verification').check();
     await expect(page.locator('#account-confirmation')).not.toBeChecked();
@@ -73,21 +74,23 @@ for (const language of ['de-DE', 'en-GB']) {
     await page.locator('#account-confirmation').check();
     await page.locator('#confirm-apply').click();
     await expect(page.locator('#paused-card')).toBeVisible();
-    await expect(page.locator('#preview-summary')).toContainText(language.startsWith('en') ? 'Days in monthly plan' : 'Tage im Monatsplan');
+    await expect(page.locator('#preview-summary')).toContainText(language.startsWith('en') ? 'included days' : 'berücksichtigte Tage');
     await page.screenshot({ path: testInfo.outputPath(`paused-${language}.png`), fullPage: false });
     await expect(page.locator('#paused-description')).toContainText(language.startsWith('en') ? '20 remaining' : '20 noch offen');
     await expect(page.locator('#continue-run')).toBeFocused();
     await expect(page.locator('#month')).toBeDisabled();
-    await expect(page.locator('#settings-toggle')).toBeDisabled();
+    await expect(page.locator('#settings-toggle')).toBeEnabled();
+    await day(page, '2026-11-07');
     await expect(page.locator('#include-2026-11-07')).not.toBeChecked();
+    await home(page);
     await expect(page.locator('#apply')).not.toBeVisible();
-    await page.locator('#more-options > summary').click();
+    await tools(page, 'transfer');
     await expect(page.locator('#export-plan')).toBeEnabled();
     const pausedDownload = page.waitForEvent('download'); await page.locator('#export-plan').click();
     const pausedExport = JSON.parse(await readFile((await (await pausedDownload).path())!, 'utf8'));
     expect(pausedExport.run).toMatchObject({ status: 'paused', checkpointDate: '2026-11-02', planId: plan.id });
     expect(pausedExport.plan.snapshot.context).toBeUndefined(); expect(pausedExport.plan.days).toEqual(plan.days);
-    await page.locator('#more-options > summary').click();
+    await home(page);
     await page.locator('#continue-run').click();
     await expect(page.locator('#account-confirmation')).not.toBeChecked();
     await expect(page.locator('#confirm-apply')).toBeDisabled();

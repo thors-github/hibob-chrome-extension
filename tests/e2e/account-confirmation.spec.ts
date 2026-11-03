@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { home, tools } from './ui';
 import type { BookingPlan, DayPlan, MonthSnapshot, SessionState, Settings } from '../../src/shared/types';
 
 for (const language of ['de-DE', 'en-GB']) {
@@ -41,11 +42,11 @@ for (const language of ['de-DE', 'en-GB']) {
     await page.goto('/sidepanel.html');
     await expect(page.locator('html')).toHaveAttribute('lang', language.startsWith('de') ? 'de' : 'en');
     await expect(page.locator('#apply')).toBeEnabled();
-    await expect(page.locator('#account-context-notice')).toBeVisible();
+    await expect(page.locator('#connection-title')).toHaveText('Local Employee · Local Company');
     await expect(page.locator('#main-error')).not.toBeVisible();
     await expect(page.locator('#execution-profile')).toHaveValue('fast-serial');
     await page.locator('#apply').click();
-    await expect(page.locator('#execution-disclosure')).toContainText(language.startsWith('en') ? 'not one transaction' : 'keine gemeinsame Transaktion');
+    await expect(page.locator('#execution-disclosure')).toContainText(language.startsWith('en') ? 'not a single transaction' : 'keine gemeinsame Transaktion');
     const checkbox = page.getByRole('checkbox', { name: /November 2026/ });
     await expect(checkbox).not.toBeChecked();
     if (language.startsWith('en')) await expect(checkbox).toHaveAccessibleName(/I confirm/);
@@ -56,8 +57,9 @@ for (const language of ['de-DE', 'en-GB']) {
     await checkbox.check();
     await expect(page.locator('#confirm-apply')).toBeEnabled();
     await page.locator('#close-apply').click();
-    await page.locator('#more-options > summary').click();
+    await tools(page, 'booking');
     await page.locator('#execution-profile').selectOption('strict');
+    await home(page);
     await page.locator('#apply').click();
     await expect(page.locator('#apply-execution-mode')).toContainText(language.startsWith('en') ? 'Strict' : 'Streng');
     await expect(page.locator('#execution-disclosure')).toContainText(language.startsWith('en') ? 'each saved day' : 'jeden gespeicherten Tag');
