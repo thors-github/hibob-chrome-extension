@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6.0-beta.1
+
+- Replace the expanded monthly day list with a compact Monday-first calendar. The ordinary month flow fits 360×640 and 380×720 CSS pixels without scrolling; short windows and enlarged text retain accessible overflow.
+- Show one action for the current step, explicit monthly totals and separate change counts. Retain existing suitable entries, and distinguish a genuinely matching month from deliberately skipped changes.
+- Add complete day/week inspection and flat settings, booking checks, import/export and connection screens. Preserve all existing controls, metadata acknowledgements and account-consent invalidation rules.
+- Add arrow-key calendar navigation, stable date focus, text-and-symbol status labels and German/English copy. Keep unverified writes pending and unclear outcomes visible across screens.
+- Keep the API transport, calculations, permissions, session schema and adapter protocols unchanged. This UI candidate adds no native write-acceptance claim; Stable and Store publication remain blocked.
+
 ## 1.5.0-beta.1
 
 - Add a fast serial month runner with one complete preflight and one independent final readback: 34 requests for 21 changed dates, without an unconditional delay. Keep the strict per-day runner and server cooldowns.

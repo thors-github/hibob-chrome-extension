@@ -1,13 +1,14 @@
 {
   "schemaVersion": 1,
-  "version": "1.5.0",
+  "version": "1.6.0",
   "stableReleaseReady": false,
-  "bootstrapTag": "v1.5.0-beta.1",
+  "bootstrapTag": "v1.6.0-beta.1",
   "blockers": [
     "The internal HiBob API is unsupported. The fast 1.5.0 monthly writer has not received native write acceptance; shared final verification is not atomic and may detect changes after several accepted writes. Live overwrite, interactive SSO and temporary-tab fallback remain unverified."
   ],
   "validationEvidence": [
     "Production-transport fixtures check one month preflight, serial date writes and independent whole-month readback, exact weekly totals, minimum changed dates, execution consent, durable journals, cancellation, cooldowns and uncertain outcomes. Latency-injected fixtures measure 100/200/250/500 ms response budgets; native acceptance does not create or overwrite attendance.",
-    "Earlier 1.4.0 native acceptance covered current and future creation and saved-data reconciliation; this does not validate the new monthly writer. Personal reports and native evidence stay outside Git."
+    "Earlier 1.4.0 native acceptance covered current and future creation and saved-data reconciliation; this does not validate the new monthly writer. Personal reports and native evidence stay outside Git.",
+    "The 1.6.0 compact calendar and flat views passed 687 unit tests, 34 isolated browser checks, TypeScript and translation validation. German/English standard states fit 360x640 and 380x720 without scrolling. Native Chrome update verified the loaded version, calendar startup and preserved preferences. Independent comparison matched all 20 installed files to the tested ZIP; a fresh native month scan was not completed because concurrent Chrome control changed windows. No real attendance was written during UI acceptance."
   ]
 }

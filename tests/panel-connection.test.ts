@@ -142,8 +142,8 @@ describe('actual extension panel connection states', () => {
     await mount();
     await vi.waitFor(() => expect(button('connect').disabled).toBe(false));
     button('connect').click();
-    await vi.waitFor(() => expect(title()).toBe('Mit HiBob verbunden'));
-    expect(detail()).toContain('Thorsten Test · Test Company');
+    await vi.waitFor(() => expect(title()).toBe('Thorsten Test · Test Company'));
+    expect(document.getElementById('connection-account')!.textContent).toContain('Thorsten Test · Test Company');
     expect(document.getElementById('connection-technical')?.textContent).toContain('Direkte API-Verbindung');
     expect(button('scan').disabled).toBe(false);
     button('disconnect').click();
@@ -195,7 +195,7 @@ describe('actual extension panel connection states', () => {
   it('shows a selected tab before a month is read and enables only scanning', async () => {
     mockChrome({ state: { connection: connection() } });
     await mount();
-    await vi.waitFor(() => expect(title()).toBe('Mit HiBob verbunden'));
+    await vi.waitFor(() => expect(title()).toBe('Thorsten Test · Test Company'));
     expect(button('scan').disabled).toBe(false);
     expect(button('apply').disabled).toBe(true);
     expect(document.getElementById('preview-empty')?.hidden).toBe(false);
@@ -204,10 +204,11 @@ describe('actual extension panel connection states', () => {
   it('shows employee, local scan time, and period only after a snapshot exists', async () => {
     mockChrome({ state: { connection: connection(), snapshot: snapshot() } });
     await mount();
-    await vi.waitFor(() => expect(title()).toBe('Monat eingelesen'));
-    expect(detail()).toContain('Thorsten Test');
-    expect(detail()).toContain('Eingelesen: 09:30 Uhr');
-    expect(detail()).toContain('01/11/2026–30/11/2026 (Running)');
+    await vi.waitFor(() => expect(title()).toBe('Thorsten Test · Test Company'));
+    button('settings-toggle').click(); button('connection-link').click();
+    expect(document.getElementById('connection-account')!.textContent).toContain('Thorsten Test');
+    expect(document.getElementById('connection-scan-detail')!.textContent).toContain('Eingelesen: 09:30 Uhr');
+    expect(document.getElementById('connection-scan-detail')!.textContent).toContain('01/11/2026–30/11/2026 (Running)');
     expect(button('scan').disabled).toBe(false);
   });
 
@@ -218,12 +219,12 @@ describe('actual extension panel connection states', () => {
     expect(chrome.addListener).toHaveBeenCalledTimes(1);
     expect(chrome.sendMessage).not.toHaveBeenCalled();
     chrome.emit({ connection: connection() });
-    expect(title()).toBe('Mit HiBob verbunden');
+    expect(title()).toBe('Thorsten Test · Test Company');
     loading.resolve({ settings });
     await vi.waitFor(() => expect(chrome.sendMessage).toHaveBeenCalledWith({ type: 'PANEL_GET_STATE' }));
     await settleStartup();
     await vi.waitFor(() => expect(button('scan').disabled).toBe(false));
-    expect(title()).toBe('Mit HiBob verbunden');
+    expect(title()).toBe('Thorsten Test · Test Company');
   });
 
   it('does not let an older deferred GET_STATE erase a newer tab-binding event', async () => {
@@ -232,11 +233,11 @@ describe('actual extension panel connection states', () => {
     await mount();
     await vi.waitFor(() => expect(chrome.sendMessage).toHaveBeenCalledWith({ type: 'PANEL_GET_STATE' }));
     chrome.emit({ connection: connection() });
-    expect(title()).toBe('Mit HiBob verbunden');
+    expect(title()).toBe('Thorsten Test · Test Company');
     loading.resolve({});
     // Flush the entire response/initialize microtask chain, rather than asserting an intermediate event render.
     await settleStartup();
-    expect(title()).toBe('Mit HiBob verbunden');
+    expect(title()).toBe('Thorsten Test · Test Company');
     expect(button('scan').disabled).toBe(false);
   });
 
@@ -251,14 +252,14 @@ describe('actual extension panel connection states', () => {
     await vi.waitFor(() => expect(title()).toBe('Mit HiBob verbinden'));
     expect(button('scan').disabled).toBe(true);
     expect(button('apply').disabled).toBe(true);
-    expect(document.querySelectorAll('#weeks article.day')).toHaveLength(0);
+    expect(document.querySelectorAll('#calendar button[data-date]:not([data-state="unread"])')).toHaveLength(0);
   });
 
   it.each(['apply', 'conflicts'])('clears a reviewed plan and open %s dialog when the tab binding resets', async (control) => {
     const chrome = mockChrome({ state: reviewedState() });
     await mount();
     await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
-    expect(document.querySelectorAll('#weeks article.day')).toHaveLength(30);
+    expect(document.querySelectorAll('#calendar button[data-date]:not([data-state="unread"])')).toHaveLength(30);
     button(control).click();
     expect(dialog(control === 'apply' ? 'apply-dialog' : 'conflict-dialog').open).toBe(true);
     chrome.emit({});
@@ -267,19 +268,19 @@ describe('actual extension panel connection states', () => {
     expect(button('apply').disabled).toBe(true);
     expect(dialog('apply-dialog').open).toBe(false);
     expect(dialog('conflict-dialog').open).toBe(false);
-    expect(document.querySelectorAll('#weeks article.day')).toHaveLength(0);
+    expect(document.querySelectorAll('#calendar button[data-date]:not([data-state="unread"])')).toHaveLength(0);
   });
 
   it('restores an existing cold binding when the side panel is reopened', async () => {
     mockChrome({ state: { connection: connection() } });
     await mount();
-    await vi.waitFor(() => expect(title()).toBe('Mit HiBob verbunden'));
+    await vi.waitFor(() => expect(title()).toBe('Thorsten Test · Test Company'));
     // A new side-panel document has no prior listener or local module state.
     vi.resetModules();
     document.body.innerHTML = '<div id="app"></div>';
     const reopened = mockChrome({ state: { connection: connection() } });
     await mount();
-    await vi.waitFor(() => expect(title()).toBe('Mit HiBob verbunden'));
+    await vi.waitFor(() => expect(title()).toBe('Thorsten Test · Test Company'));
     expect(reopened.sendMessage).toHaveBeenCalledWith({ type: 'PANEL_GET_STATE' });
     expect(button('scan').disabled).toBe(false);
     expect(button('apply').disabled).toBe(true);
@@ -443,7 +444,7 @@ describe('actual extension panel connection states', () => {
     const chrome = mockChrome({ state });
     await mount();
     await vi.waitFor(() => expect(button('cancel-run').hidden).toBe(false));
-    if (kind === 'scan') expect(button('scan').textContent).toBe('Vorschau wird geprüft …');
+    if (kind === 'scan') expect(button('scan').hidden).toBe(true);
     expect(button('scan').disabled).toBe(true);
     expect((document.getElementById('settings-fieldset') as HTMLFieldSetElement).disabled).toBe(true);
     expect(document.getElementById('scan-progress')?.hidden).toBe(false);
@@ -457,9 +458,9 @@ describe('actual extension panel connection states', () => {
     await mount();
     await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
     change('month', '2026-12');
-    expect(title()).toBe('Mit HiBob verbunden');
+    expect(title()).toBe('Thorsten Test · Test Company');
     expect(field('month').value).toBe('2026-12');
-    expect(document.querySelectorAll('#weeks article.day')).toHaveLength(0);
+    expect(document.querySelectorAll('#calendar button[data-date]:not([data-state="unread"])')).toHaveLength(0);
     expect(button('apply').disabled).toBe(true);
     await vi.waitFor(() => expect(button('scan').disabled).toBe(false));
     expect(button('scan').textContent).toBe('Vorschau erstellen');
@@ -472,7 +473,7 @@ describe('actual extension panel connection states', () => {
     expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_INVALIDATE_PLAN')).toBe(false);
     button('build-preview').click();
     await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
-    expect(document.querySelectorAll('#weeks article.day')).toHaveLength(30);
+    expect(document.querySelectorAll('#calendar button[data-date]:not([data-state="unread"])')).toHaveLength(30);
     expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_SCAN')).toBe(false);
   });
 
@@ -517,7 +518,7 @@ describe('actual extension panel connection states', () => {
     const chrome = mockChrome({ state: initial });
     await mount();
     await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
-    expect(document.getElementById('account-context-notice')?.hidden).toBe(false);
+    expect(title()).toContain('Thorsten Test');
     expect(document.getElementById('account-context-notice')?.classList.contains('error')).toBe(false);
     expect(document.getElementById('main-error')?.hidden).toBe(true);
     expect(document.getElementById('plan-errors')?.hidden).toBe(true);
@@ -645,7 +646,7 @@ describe('actual extension panel connection states', () => {
     const checkedDay = initial.plan.days.find(day => day.date === '2026-11-04')!;
     const resultText = document.getElementById('draft-check-result')!.textContent!;
     expect(resultText).toContain('nicht gespeichert');
-    expect(resultText).toContain('Speicherung wurde nicht getestet');
+    expect(resultText).toContain('keine serverseitige Speicherbestätigung');
     expect(resultText).toContain('04.11.');
     expect(resultText).toContain(formatMinutes(checkedDay.netMinutes));
     expect(resultText).toContain('keine serverseitige Speicherbestätigung');
@@ -877,7 +878,9 @@ describe('compact monthly flow and verification checkpoints', () => {
     await vi.waitFor(() => expect(document.getElementById('run-uncertain')?.hidden).toBe(false));
     expect(document.getElementById('run-uncertain')?.textContent).toContain('können bereits in HiBob gespeichert sein');
     expect(document.getElementById('run-status')?.textContent).toContain('0 von 21 Tagen verifiziert');
-    expect((document.getElementById('run-history') as HTMLDetailsElement).open).toBe(true);
+    expect(document.getElementById('run-details-view')!.hidden).toBe(true);
+    button('run-details').click();
+    expect(document.getElementById('run-details-view')!.hidden).toBe(false);
     expect(document.querySelector('[data-status="uncertain"] .run-outcome')?.textContent).toBe('Speicherstatus unklar');
     expect(document.querySelector('[data-status="uncertain"]')?.textContent).toContain(first.message);
     expect(document.querySelector('[data-status="pending"]')?.textContent).toContain('Noch nicht ausgeführt');
@@ -927,16 +930,21 @@ describe('compact monthly flow and verification checkpoints', () => {
   it('opens configuration and details without changing settings, plan or allocation', async () => {
     const initial = reviewedState('api-session'); const chrome = mockChrome({ state: initial });
     await mount(); await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
-    expect(document.getElementById('settings-options')?.hidden).toBe(true);
+    expect(document.getElementById('settings-view')?.hidden).toBe(true);
     expect(button('schedule-summary').textContent).toContain('08:00–16:30');
     const before = structuredClone(chrome.state.plan);
     button('settings-toggle').click();
-    expect(document.getElementById('settings-options')?.hidden).toBe(false);
-    expect(button('settings-toggle').getAttribute('aria-expanded')).toBe('true');
-    button('schedule-summary').click();
-    expect(document.getElementById('settings-options')?.hidden).toBe(true);
-    const details = document.querySelector<HTMLDetailsElement>('[data-day-details="2026-11-03"]')!; details.open = true;
-    document.getElementById('more-options')!.dispatchEvent(new Event('toggle'));
+    expect(document.getElementById('settings-view')?.hidden).toBe(false);
+    expect(document.getElementById('month-view')!.hidden).toBe(true);
+    button('settings-back').click();
+    expect(document.getElementById('settings-view')?.hidden).toBe(true);
+    button('calendar-2026-11-03').click();
+    expect(document.getElementById('day-view')!.hidden).toBe(false);
+    button('day-back').click();
+    button('settings-toggle').click();
+    button('booking-options-link').click();
+    button('tools-back').click();
+    button('settings-back').click();
     expect(chrome.state.plan).toEqual(before);
     expect(chrome.setSettings).not.toHaveBeenCalled();
     expect(chrome.sendMessage.mock.calls.every(([message]) => message.type === 'PANEL_GET_STATE')).toBe(true);
@@ -948,18 +956,44 @@ describe('compact monthly flow and verification checkpoints', () => {
     change('start', '');
     await vi.waitFor(() => expect(button('scan').disabled).toBe(false));
     button('scan').click();
-    expect(document.getElementById('settings-options')?.hidden).toBe(false);
+    expect(document.getElementById('settings-view')?.hidden).toBe(false);
     expect(document.activeElement).toBe(field('start'));
     expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_SCAN')).toBe(false);
+  });
+
+  it('applies flat booking-tool exclusions once and keeps them locked during a run', async () => {
+    const chrome = mockChrome({ state: reviewedState('api-session') });
+    await mount(); await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    button('settings-toggle').click(); button('booking-options-link').click();
+    const exclusions = document.getElementById('excludedDates') as HTMLTextAreaElement;
+    expect(document.getElementById('booking-options')!.contains(exclusions)).toBe(true);
+    expect(exclusions.form?.id).toBe('settings-form');
+    const before = chrome.state.planRevision!;
+    change('excludedDates', '2026-11-03');
+    await vi.waitFor(() => expect(chrome.state.plan?.settings.excludedDates).toEqual(['2026-11-03']));
+    expect(chrome.state.planRevision).toBe(before + 1);
+    expect(chrome.sendMessage.mock.calls.filter(([message]) => message.type === 'PANEL_INVALIDATE_PLAN')).toHaveLength(1);
+    expect(chrome.sendMessage.mock.calls.filter(([message]) => message.type === 'PANEL_SAVE_PLAN')).toHaveLength(1);
+    expect(chrome.state.plan!.days.find(day => day.date === '2026-11-03')!.action).toBe('skip');
+    expect(chrome.state.plan!.weeks.find(week => week.week === '2026-11-02')!.targetMinutes).toBe(1920);
+    const current = structuredClone(chrome.state);
+    chrome.emit({ ...current, revision: current.revision! + 1, job: { id: 'running-job', kind: 'apply', status: 'running', connectionId: 'test-connection', month: settings.month, startedAt: 'now', updatedAt: 'now' } });
+    expect(exclusions.disabled).toBe(true);
+    change('excludedDates', '2026-11-04');
+    expect(chrome.state.plan!.settings.excludedDates).toEqual(['2026-11-03']);
+    expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_APPLY')).toBe(false);
   });
 
   it('keeps automatic skipped dates unchecked while progress disables every control', async () => {
     const initial = reviewedState('api-session'); const chrome = mockChrome({ state: initial });
     await mount(); await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
+    button('calendar-2026-11-07').click();
     expect(field('include-2026-11-07').checked).toBe(false);
     chrome.emit({ ...initial, revision: 3, job: { id: 'running-job', kind: 'apply', status: 'running', connectionId: 'test-connection', month: settings.month, startedAt: '2026-11-02T10:00:00Z', updatedAt: '2026-11-02T10:00:00Z' } });
+    button('calendar-2026-11-07').click();
     expect(field('include-2026-11-07').checked).toBe(false);
     expect(field('include-2026-11-07').disabled).toBe(true);
+    button('calendar-2026-11-03').click();
     expect(field('include-2026-11-03').checked).toBe(true);
     expect(field('include-2026-11-03').disabled).toBe(true);
   });
@@ -970,6 +1004,7 @@ describe('compact monthly flow and verification checkpoints', () => {
     const initial: SessionState = { schemaVersion: 6, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan: buildMonthPlan(settings, scanned, {}, 123) };
     const chrome = mockChrome({ state: initial }); await mount();
     await vi.waitFor(() => expect(document.querySelector('[data-date="2026-11-03"]')).not.toBeNull());
+    button('calendar-2026-11-03').click();
     expect(field('include-2026-11-03').checked).toBe(true);
     expect(field('include-2026-11-03').disabled).toBe(false);
     expect(chrome.state.plan!.weeks.find(week => week.week === '2026-11-02')!.targetMinutes).toBe(2400);
@@ -1004,8 +1039,9 @@ describe('compact monthly flow and verification checkpoints', () => {
     const initial = checkpointState(); const chrome = mockChrome({ state: initial }); await mount();
     await vi.waitFor(() => expect(document.getElementById('paused-card')?.hidden).toBe(false));
     expect(button('apply').hidden).toBe(true);
-    expect(document.getElementById('preview-summary')?.textContent).toContain('21Tage im Monatsplan');
+    expect(document.getElementById('preview-summary')?.textContent).toContain('21 berücksichtigte Tage');
     expect((document.getElementById('settings-fieldset') as HTMLFieldSetElement).disabled).toBe(true); expect(button('scan').disabled).toBe(true); expect(button('disconnect').disabled).toBe(true);
+    button('calendar-2026-11-07').click();
     expect(field('include-2026-11-07').checked).toBe(false);
     button('continue-run').click(); await vi.waitFor(() => expect(dialog('apply-dialog').open).toBe(true));
     expect(field('account-confirmation').checked).toBe(false); expect(button('confirm-apply').disabled).toBe(true);
@@ -1060,7 +1096,7 @@ describe('monthly execution profiles and idempotent preview', () => {
     const initial = reviewedState('api-session'); const chrome = mockChrome({ state: initial }); await mount();
     await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
     expect(field('execution-profile').value).toBe('fast-serial');
-    expect(document.getElementById('more-options')!.contains(field('execution-profile'))).toBe(true);
+    expect(document.getElementById('booking-options')!.contains(field('execution-profile'))).toBe(true);
     button('apply').click();
     expect(document.getElementById('execution-disclosure')!.textContent).toContain('keine gemeinsame Transaktion');
     field('account-confirmation').click();
@@ -1092,7 +1128,7 @@ describe('monthly execution profiles and idempotent preview', () => {
     expect(initial.plan!.days.filter(day => day.action === 'unchanged')).toHaveLength(21);
     expect(document.getElementById('conflicts')!.hidden).toBe(true); expect(button('apply').disabled).toBe(true);
     expect(button('apply').textContent).toBe('Keine Buchung nötig');
-    expect(document.querySelector('[data-date="2026-11-03"]')!.textContent).toContain('Passt bereits');
+    expect(document.getElementById('calendar-2026-11-03')!.getAttribute('aria-label')).toContain('Bereits passend');
     button('refresh-month').click();
     await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_SCAN')).toBe(true));
     await vi.waitFor(() => expect(chrome.state.plan?.days.filter(day => day.action === 'unchanged')).toHaveLength(21));
@@ -1105,11 +1141,11 @@ describe('monthly execution profiles and idempotent preview', () => {
   it('redistributes compatible entries only through the explicit advanced action, then resets on a settings edit', async () => {
     const initial = matchingState(); const chrome = mockChrome({ state: initial }); await mount();
     await vi.waitFor(() => expect(document.getElementById('preview-summary')!.textContent).toContain('Alles passt'));
-    expect(document.getElementById('more-options')!.contains(button('redistribute'))).toBe(true);
+    expect(document.getElementById('booking-options')!.contains(button('redistribute'))).toBe(true);
     expect(button('redistribute').textContent).toBe('Alles neu verteilen'); button('redistribute').click();
     await vi.waitFor(() => expect(chrome.state.plan?.redistributeAll).toBe(true));
     expect(chrome.state.plan!.days.filter(day => day.action === 'conflict')).toHaveLength(21);
-    expect(document.getElementById('conflicts')!.textContent).toContain('21 vorhandene');
+    expect(document.getElementById('conflicts')!.textContent).toContain('21 Buchungen prüfen');
     change('variationMinutes', '14');
     await vi.waitFor(() => expect(chrome.state.plan?.redistributeAll).toBeUndefined());
     expect(chrome.state.plan!.days.filter(day => day.action === 'unchanged')).toHaveLength(21);
