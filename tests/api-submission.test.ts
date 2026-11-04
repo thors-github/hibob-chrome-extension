@@ -199,6 +199,25 @@ describe('explicit own-account month submission', () => {
     const f = await fixture(); f.server.writeError = new SessionClientError(code, true); f.server.acceptBeforeError = true;
     await expect(f.adapter.submitMonth(f.connection, f.review, consent(f.review), hooks())).resolves.toHaveProperty('status', 'verified'); expect(f.server.writes).toHaveLength(1);
   });
+  it.each(['TIMEOUT', 'NETWORK_UNAVAILABLE'] as const)('keeps dispatched %s uncertain when immediate readback is still nonterminal', async code => {
+    const f = await fixture(); const journal = hooks(); f.server.writeError = new SessionClientError(code, true);
+    await expect(f.adapter.submitMonth(f.connection, f.review, consent(f.review), journal)).resolves.toMatchObject({ status: 'uncertain', periodStatus: 'WaitingForSubmission' });
+    expect(f.server.writes).toHaveLength(1); expect(f.server.requests.filter(request => request.path === reportPath)).toHaveLength(2);
+    expect(journal.beforeDispatch).toHaveBeenCalledOnce(); expect(journal.acknowledged).not.toHaveBeenCalled(); expect(f.server.opens).toHaveLength(2);
+  });
+  it('leaves a lost-response outcome uncertain until a later explicit review observes the late server commit', async () => {
+    const f = await fixture(); f.server.writeError = new SessionClientError('TIMEOUT', true);
+    // The server completes only after the first independent readback, rather
+    // than treating a browser timeout as cancellation of server-side work.
+    const commitLater = () => { f.server.submitted = true; f.server.period.timesheetState.timeSheetStatus = 'Submitted'; f.server.period.timesheetState.locked = true; };
+    const result = await f.adapter.submitMonth(f.connection, f.review, consent(f.review), hooks());
+    expect(result).toMatchObject({ status: 'uncertain', periodStatus: 'WaitingForSubmission' });
+    expect(f.server.writes).toHaveLength(1);
+    commitLater();
+    const checked = await f.adapter.reviewSubmission(f.connection, '2026-11');
+    expect(checked).toMatchObject({ period: { status: 'Submitted' }, netMinutes: 168 * 60, canSubmit: false });
+    expect(result.status).toBe('uncertain'); expect(f.server.writes).toHaveLength(1);
+  });
   it('marks failed, unchanged, mismatched and unreadable outcomes correctly without retries', async () => {
     const f = await fixture(); f.server.ignore = true;
     await expect(f.adapter.submitMonth(f.connection, f.review, consent(f.review), hooks())).resolves.toHaveProperty('status', 'failed'); expect(f.server.writes).toHaveLength(1);

@@ -256,6 +256,9 @@ export class HiBobApiAdapter {
             progress?.({ phase: 'submission', stage: 'verify', completed: 1, total: 1, message: t('Monatsabschluss und unveränderte Anwesenheiten bestätigt') });
             return result = { month: review.month, status: 'verified', periodStatus: after.period.status, message: t('Monat eingereicht und unabhängig geprüft.'), submittedAt: this.now().toISOString() };
           }
+          // A lost response does not prove the server stopped processing. An
+          // immediate nonterminal read can precede its late commit.
+          if (failure?.uncertain) return result = { month: review.month, status: 'uncertain', periodStatus: after.period.status, message: t('Der Abgabestatus ist unklar. Bitte unabhängig prüfen; nicht erneut einreichen.') };
           return result = { month: review.month, status: 'failed', periodStatus: after.period.status, message: failure?.message ?? t('HiBob zeigt den Monat weiterhin als nicht eingereicht. Es wurde kein zweiter Versuch gestartet.') };
         } catch (error) {
           return result = { month: review.month, status: 'uncertain', message: t('Der Abgabestatus ist unklar. Bitte unabhängig prüfen; nicht erneut einreichen.') };
