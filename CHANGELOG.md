@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.0-beta.1
+
+- Remind during the last seven Berlin calendar days with a red badge count and compact calendar notice. Retain overdue months until verified submitted; support a separate reminder preference, hourly alarms, startup recovery and account-scoped status caching.
+- Add a separate review and explicit confirmation to submit saved own-account attendance. Block pending plans, missing/incomplete data, unknown eligibility, break violations and unverified early submission. Never create additional time entries as part of Submit.
+- Journal before one query-free, body-free Submit request, then independently verify status and unchanged attendance. Preserve unknown outcomes across restart without retries; require reconciliation before another month can be submitted.
+- Show submitted, project approval pending and approved states with read-only calendar details. Preserve compact DE/EN layouts and existing booking controls.
+- Add only the alarms permission and migrate to session format 7, retaining preferences/backups and completed booking history. Live Submit, early-submit capability and existing unverified write paths remain release blockers; Stable and Store publication remain disabled.
+
 ## 1.6.0-beta.1
 
 - Replace the expanded monthly day list with a compact Monday-first calendar. The ordinary month flow fits 360×640 and 380×720 CSS pixels without scrolling; short windows and enlarged text retain accessible overflow.

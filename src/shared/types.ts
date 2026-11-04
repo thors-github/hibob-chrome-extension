@@ -57,7 +57,7 @@ export interface PlanEditLease {
 
 export interface JobState {
   id: string;
-  kind: 'scan' | 'apply';
+  kind: 'scan' | 'apply' | 'review-submission' | 'submit' | 'reminder-check';
   status: 'running' | 'cancelling' | 'paused' | 'interrupted';
   connectionId?: string;
   checkpointId?: string;
@@ -103,6 +103,7 @@ export interface MonthSnapshot {
   periodLabel: string;
   scannedAt: string;
   source: 'hibob' | 'demo';
+  submission?: SubmissionPeriod;
   context?: AttendanceContext;
   days: DaySnapshot[];
 }
@@ -201,7 +202,7 @@ export interface MonthApplyResult {
 
 export interface AdapterProgress {
   jobId?: string;
-  phase: 'scan' | 'apply';
+  phase: 'scan' | 'apply' | 'submission';
   date?: LocalDate;
   completed: number;
   total: number;
@@ -227,7 +228,7 @@ export interface UpdateStatus {
 
 export interface SessionState {
   /** Optional on input only, for migration from older sessions. */
-  schemaVersion?: 2 | 3 | 4 | 5 | 6;
+  schemaVersion?: 2 | 3 | 4 | 5 | 6 | 7;
   connection?: ApiConnection;
   revision?: number;
   planRevision?: number;
@@ -240,5 +241,65 @@ export interface SessionState {
   progress?: AdapterProgress;
   update?: UpdateStatus;
   updateApplying?: boolean;
+  reminder?: ReminderState;
+  submissionRevision?: number;
+  submissionReview?: SubmissionReview;
+  submissionResult?: SubmissionResult;
+  submissionJournal?: SubmissionJournal;
   error?: string;
+}
+
+
+/** Exact statuses observed in HiBob's own timesheet client; unknown is never eligibility. */
+export type TimesheetStatus = 'Open' | 'WaitingForSubmission' | 'Rejected' | 'Submitted' | 'PendingProjectApproval' | 'Approved' | 'Locked' | 'unknown';
+export interface SubmissionPeriod { id: string | number; start: LocalDate; end: LocalDate; status: TimesheetStatus; locked: boolean }
+export interface SubmissionReview {
+  id: string;
+  month: string;
+  connectionId: string;
+  accountKey: string;
+  employeeLabel: string;
+  companyLabel: string;
+  period: SubmissionPeriod;
+  contentFingerprint: string;
+  eligibilityFingerprint: string;
+  netMinutes: number | null;
+  issues: string[];
+  canSubmit: boolean;
+  early: boolean;
+  checkedAt: string;
+}
+/** Submission consent is distinct from attendance-plan approval and never restored. */
+export interface SubmissionConsent {
+  reviewId: string;
+  reviewRevision: number;
+  connectionId: string;
+  accountKey: string;
+  contentFingerprint: string;
+  eligibilityFingerprint: string;
+  confirmed: true;
+}
+export interface SubmissionHooks { beforeDispatch(): Promise<void>; acknowledged(): Promise<void> }
+export interface SubmissionResult {
+  month: string;
+  status: 'verified' | 'failed' | 'uncertain';
+  periodStatus?: TimesheetStatus;
+  message: string;
+  submittedAt?: string;
+}
+export interface SubmissionStatusRead { accountKey: string; periods: Array<{ month: string; status: TimesheetStatus }>; checkedAt: string }
+export interface ReminderState {
+  enabled: boolean;
+  due: Array<{ month: string; status: TimesheetStatus; needsCheck: boolean }>;
+  accountKey?: string;
+  checkedAt?: string;
+  error?: string;
+}
+export interface SubmissionJournal {
+  jobId: string;
+  month: string;
+  reviewId: string;
+  accountKey: string;
+  status: 'dispatching' | 'awaiting-verification' | 'verified' | 'failed' | 'uncertain';
+  updatedAt: string;
 }

@@ -1,11 +1,14 @@
 import { t } from '../i18n';
+import { getMonthDates as getMonthDatesForPeriod } from '../domain/calendar';
 import { assertApplyAuthorization, contextFingerprint, executionFingerprint } from '../shared/context';
 import { netMinutes, parseTime } from '../shared/entries';
 import { canonicalJson } from '../shared/json';
-import type { AdapterProgress, ApiConnection, ApplyAuthorization, AttendanceContext, AttendanceEntry, BookingPlan, DayPlan, DaySnapshot, ExecutionProfile, MonthApplyHooks, MonthApplyResult, MonthSnapshot, PreflightResult, RunTimings } from '../shared/types';
+import { isSubmittedStatus, submissionAccountKey } from '../shared/submission';
+import type { AdapterProgress, ApiConnection, ApplyAuthorization, AttendanceContext, AttendanceEntry, BookingPlan, DayPlan, DaySnapshot, ExecutionProfile, MonthApplyHooks, MonthApplyResult, MonthSnapshot, PreflightResult, RunTimings, SubmissionConsent, SubmissionHooks, SubmissionPeriod, SubmissionResult, SubmissionReview, SubmissionStatusRead } from '../shared/types';
 import { assertWritablePlan } from '../shared/validation';
 import { SessionClient, SessionClientError, type ApiEndpointRule, type ApiHttpRequest, type SessionConnection, type SessionRequest } from './session-client';
 import { ApiModelError, parseIdentity, parsePeriods, parseReport, type ApiIdentity, type ApiPeriod, type ApiDay } from './api-model';
+import { parseSubmissionPeriods, selectSubmissionPeriod, submissionFacts } from './submission-model';
 
 /** Exact routes observed in HiBob's shipped client; POST report searches are read-only. */
 export const ATTENDANCE_API_RULES: readonly ApiEndpointRule[] = [
@@ -13,6 +16,8 @@ export const ATTENDANCE_API_RULES: readonly ApiEndpointRule[] = [
   { method: 'GET', path: '/api/company', mutation: false },
   { method: 'GET', path: '/api/permissions/authorizations/domains/timeAttendance', mutation: false },
   { method: 'GET', path: /^\/api\/attendance\/employees\/[A-Za-z0-9_-]{1,128}\/timesheets$/, mutation: false },
+  { method: 'GET', path: /^\/api\/attendance\/employees\/[A-Za-z0-9_-]{1,128}\/timesheets\/[A-Za-z0-9_-]{1,128}\/summary$/, mutation: false },
+  { method: 'PUT', path: /^\/api\/attendance\/employees\/[A-Za-z0-9_-]{1,128}\/sheets\/[A-Za-z0-9_-]{1,128}\/submit$/, mutation: true },
   { method: 'POST', path: /^\/api\/attendance\/employees\/[A-Za-z0-9_-]{1,128}\/timesheets\/[A-Za-z0-9_-]{1,128}\/details$/, mutation: false },
   { method: 'POST', path: '/api/company/views/search?idsOnly=false', mutation: false },
   { method: 'POST', path: /^\/api\/attendance\/employees\/[A-Za-z0-9_-]{1,128}\/attendance\/entries\?forDate=\d{4}-\d{2}-\d{2}$/, mutation: true },
@@ -29,19 +34,19 @@ export const reportRequest = (employeeId: string, timesheetId: string | number):
 interface Client {
   connect(signal?: AbortSignal): Promise<SessionConnection>;
   disconnect(): Promise<void>;
-  openOperation(signal?: AbortSignal, profile?: ExecutionProfile): Promise<SessionConnection>;
+  openOperation(signal?: AbortSignal, profile?: ExecutionProfile, options?: { directOnly?: boolean }): Promise<SessionConnection>;
   closeOperation(): Promise<void>;
   request<T = unknown>(request: ApiHttpRequest, signal?: AbortSignal): Promise<T>;
   cancel(): void;
   requestCounts?(): { requests: number; writes: number };
 }
 interface Options { client?: Client; now?: () => Date }
-interface MonthRead { days: ApiDay[]; period: ApiPeriod; policy: Record<string, unknown>; identity: ApiIdentity }
+interface MonthRead { days: ApiDay[]; period: ApiPeriod; submissionPeriod: SubmissionPeriod; policy: Record<string, unknown>; identity: ApiIdentity; raw: unknown }
 export class ApiAdapterError extends Error { constructor(message: string, public readonly uncertain = false, public readonly connectionStatus?: 'expired' | 'unsupported') { super(message); } }
 const obj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const accountChanged = () => new ApiAdapterError(t('Das HiBob-Konto oder die Sitzung hat sich geändert. Bitte erneut verbinden und den Monat einlesen.'), false, 'expired');
 
-/** HTTP-only adapter. No path to HiBob's DOM writer, Save, Submit, or attendance deletion. */
+/** HTTP-only adapter. Submission is separately reviewed; no DOM writer or deletion path. */
 export class HiBobApiAdapter {
   private readonly client: Client;
   private readonly now: () => Date;
@@ -75,10 +80,10 @@ export class HiBobApiAdapter {
     this.check(signal);
     return parseIdentity(user, company);
   }
-  private async openOperation(signal?: AbortSignal, profile: ExecutionProfile = 'strict'): Promise<SessionConnection> {
+  private async openOperation(signal?: AbortSignal, profile: ExecutionProfile = 'strict', options?: { directOnly?: boolean }): Promise<SessionConnection> {
     this.openingIdentity = undefined;
     try {
-      const connection = await this.client.openOperation(signal, profile);
+      const connection = await this.client.openOperation(signal, profile, options);
       this.check(signal);
       return connection;
     } catch (error) {
@@ -137,18 +142,20 @@ export class HiBobApiAdapter {
   private async read(connection: ApiConnection, month: string, signal?: AbortSignal): Promise<MonthRead> {
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new ApiAdapterError(t('Ungültiger Monat.'));
     const identity = await this.openingOrFreshIdentity(signal); this.verifyIdentity(connection, identity);
-    const periods = parsePeriods(await this.request({ method: 'GET', path: `${this.path(identity)}/timesheets` }, signal));
+    const rawPeriods = await this.request({ method: 'GET', path: `${this.path(identity)}/timesheets` }, signal);
+    const periods = parsePeriods(rawPeriods);
     const last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5)), 0)).getUTCDate();
     const candidates = periods.filter(p => p.start === `${month}-01` && p.end === `${month}-${last}`);
     if (candidates.length !== 1) throw new ApiAdapterError(t('HiBob bietet keinen eindeutig zugeordneten Monatszeitraum an.'));
     const period = candidates[0];
+    const submissionPeriod = selectSubmissionPeriod(parseSubmissionPeriods(rawPeriods), month);
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(String(period.id))) throw new ApiAdapterError(t('Der HiBob-Monatszeitraum ist nicht unterstützt.'));
     const details = await this.request({ method: 'POST', path: `${this.path(identity)}/timesheets/${period.id}/details`, body: { fields: ['policyDetails'] } }, signal);
     if (!obj(details) || !obj(details.policyDetails)) throw new ApiAdapterError(t('Die HiBob-Anwesenheitsrichtlinie ist nicht vollständig lesbar.'));
     const policy = { ...details.policyDetails, __timezone: identity.timezone };
     const raw = await this.request(reportRequest(identity.employeeId, period.id), signal);
     this.check(signal);
-    return { days: parseReport(month, raw, period, policy, identity.employeeId), policy, period, identity };
+    return { days: parseReport(month, raw, period, policy, identity.employeeId), policy, period, submissionPeriod, identity, raw };
   }
   async scanMonth(connection: ApiConnection, month: string, progress?: (p: AdapterProgress) => void, signal?: AbortSignal): Promise<MonthSnapshot> {
     return this.operation(signal, async () => {
@@ -156,8 +163,113 @@ export class HiBobApiAdapter {
       const read = await this.read(connection, month, signal);
       this.verifyIdentity(connection, await this.identity(undefined, signal));
       progress?.({ phase: 'scan', completed: 1, total: 1, message: t('HiBob-Monat über die API eingelesen') });
-      return { month, employeeLabel: read.identity.employeeLabel, periodLabel: `${read.period.start}–${read.period.end}`, scannedAt: this.now().toISOString(), source: 'hibob', context: this.context(connection), days: read.days.map(d => d.snapshot) };
+      return { month, employeeLabel: read.identity.employeeLabel, periodLabel: `${read.period.start}–${read.period.end}`, scannedAt: this.now().toISOString(), source: 'hibob', submission: read.submissionPeriod, context: this.context(connection), days: read.days.map(d => d.snapshot) };
     });
+  }
+  private async readSubmission(connection: ApiConnection, month: string, signal?: AbortSignal): Promise<SubmissionReview> {
+    const read = await this.read(connection, month, signal);
+    const summary = await this.request({ method: 'GET', path: `${this.path(read.identity)}/timesheets/${read.period.id}/summary` }, signal);
+    const editable = connection.capabilities?.write === true && await this.permissions(signal);
+    this.verifyIdentity(connection, await this.identity(undefined, signal));
+    const facts = await submissionFacts({ period: read.submissionPeriod, policy: read.policy, summary, raw: read.raw, days: read.days, editable, now: this.now() });
+    return {
+      id: crypto.randomUUID(), month, connectionId: connection.generation,
+      accountKey: await submissionAccountKey(read.identity.employeeId, read.identity.companyId),
+      employeeLabel: read.identity.employeeLabel, companyLabel: read.identity.companyLabel,
+      period: read.submissionPeriod, ...facts, canSubmit: facts.issues.length === 0, checkedAt: this.now().toISOString(),
+    };
+  }
+  async reviewSubmission(connection: ApiConnection, month: string, progress?: (p: AdapterProgress) => void, signal?: AbortSignal): Promise<SubmissionReview> {
+    return this.operation(signal, async () => {
+      progress?.({ phase: 'submission', stage: 'prepare', completed: 0, total: 1, message: t('Monatsabschluss und gespeicherte Anwesenheiten prüfen …') });
+      const review = await this.readSubmission(connection, month, signal);
+      progress?.({ phase: 'submission', stage: 'prepare', completed: 1, total: 1, message: t('Monatsabschluss geprüft – noch nicht eingereicht') });
+      return review;
+    }, 'fast-serial');
+  }
+  /** Passive reminder reads never create login windows or a fallback tab. */
+  async listSubmissionStatuses(expectedAccountKey?: string, signal?: AbortSignal): Promise<SubmissionStatusRead> {
+    if (this.busy) throw new ApiAdapterError(t('Ein Vorgang läuft bereits. Bitte zuerst abbrechen.'));
+    this.busy = true;
+    try {
+      const transport = await this.openOperation(signal, 'fast-serial', { directOnly: true });
+      if (transport.mode !== 'direct') throw new ApiAdapterError(t('Die Erinnerungsprüfung benötigt eine direkte HiBob-Verbindung.'));
+      const identity = await this.openingOrFreshIdentity(signal);
+      const accountKey = await submissionAccountKey(identity.employeeId, identity.companyId);
+      if (expectedAccountKey !== undefined && accountKey !== expectedAccountKey) return { accountKey, periods: [], checkedAt: this.now().toISOString() };
+      const raw = await this.request({ method: 'GET', path: `${this.path(identity)}/timesheets` }, signal);
+      const periods = parseSubmissionPeriods(raw).filter(period => {
+        const dates = getMonthDatesForPeriod(period.start.slice(0, 7));
+        return period.start === dates[0] && period.end === dates.at(-1);
+      });
+      if (new Set(periods.map(period => period.start)).size !== periods.length) throw new ApiAdapterError(t('HiBob hat mehrdeutige Monatszeiträume für die Erinnerungsprüfung zurückgegeben.'));
+      const second = await this.identity(undefined, signal);
+      const finalKey = await submissionAccountKey(second.employeeId, second.companyId);
+      if (finalKey !== accountKey) return { accountKey: finalKey, periods: [], checkedAt: this.now().toISOString() };
+      return { accountKey, periods: periods.map(period => ({ month: period.start.slice(0, 7), status: period.status })), checkedAt: this.now().toISOString() };
+    } catch (error) { throw this.localized(error); }
+    finally { this.openingIdentity = undefined; try { await this.client.closeOperation(); } finally { this.busy = false; } }
+  }
+  async submitMonth(connection: ApiConnection, input: SubmissionReview, inputConsent: SubmissionConsent, hooks: SubmissionHooks, progress?: (p: AdapterProgress) => void, signal?: AbortSignal): Promise<SubmissionResult> {
+    const review = structuredClone(input), consent = structuredClone(inputConsent);
+    if (!review.canSubmit || review.issues.length || !review.id || consent.confirmed !== true || !Number.isSafeInteger(consent.reviewRevision) || consent.reviewRevision < 1
+      || consent.reviewId !== review.id || consent.connectionId !== review.connectionId || consent.accountKey !== review.accountKey
+      || consent.contentFingerprint !== review.contentFingerprint || consent.eligibilityFingerprint !== review.eligibilityFingerprint
+      || review.connectionId !== connection.generation) throw new ApiAdapterError(t('Der Monatsabschluss muss für dieses Konto und diesen Stand ausdrücklich bestätigt werden.'));
+    this.check(signal);
+    let attempted = false;
+    let result: SubmissionResult | undefined;
+    const cancelled = () => signal?.aborted === true || this.softCancelled;
+    try {
+      result = await this.operation(undefined, async () => {
+        progress?.({ phase: 'submission', stage: 'prepare', completed: 0, total: 1, message: t('Freigabe vor dem Einreichen erneut prüfen …') });
+        const fresh = await this.readSubmission(connection, review.month, signal);
+        if (fresh.accountKey !== review.accountKey || fresh.connectionId !== review.connectionId || fresh.employeeLabel !== review.employeeLabel || fresh.companyLabel !== review.companyLabel
+          || fresh.period.id !== review.period.id || fresh.period.start !== review.period.start || fresh.period.end !== review.period.end || fresh.contentFingerprint !== review.contentFingerprint || fresh.netMinutes !== review.netMinutes) throw new ApiAdapterError(t('Der Monatsstand oder das HiBob-Konto hat sich geändert. Bitte den Abschluss erneut prüfen.'));
+        if (isSubmittedStatus(fresh.period.status)) return result = { month: review.month, status: 'verified', periodStatus: fresh.period.status, message: t('Der Monat ist bereits eingereicht und wurde erneut geprüft.') };
+        if (!fresh.canSubmit || fresh.eligibilityFingerprint !== review.eligibilityFingerprint) throw new ApiAdapterError(t('Die Bedingungen für das Einreichen haben sich geändert. Bitte den Abschluss erneut prüfen.'));
+        this.check(signal);
+        this.softWriting = true;
+        await hooks.beforeDispatch();
+        if (cancelled()) return result = { month: review.month, status: 'failed', message: t('Monatsabschluss vor dem Versand abgebrochen. Es wurde nicht eingereicht.') };
+        try {
+          this.verifyIdentity(connection, await this.identity(undefined, signal));
+          this.check(signal);
+        } catch (error) { return result = { month: review.month, status: 'failed', message: this.localized(error).message }; }
+        let failure: ApiAdapterError | undefined;
+        try {
+          attempted = true;
+          progress?.({ phase: 'submission', stage: 'write', completed: 0, total: 1, message: t('Monat einmalig bei HiBob einreichen …') });
+          // Angular's null-body PUT is sent without an entity, never as JSON "null".
+          await this.request({ method: 'PUT', path: `/api/attendance/employees/${connection.employeeId}/sheets/${fresh.period.id}/submit` });
+          await hooks.acknowledged();
+        } catch (error) { failure = this.localized(error); }
+        this.softWriting = false;
+        this.verifying = true;
+        try {
+          progress?.({ phase: 'submission', stage: 'verify', completed: 0, total: 1, message: t('Monatsabschluss unabhängig aus HiBob zurücklesen …') });
+          await this.client.closeOperation();
+          await this.openOperation(undefined, 'fast-serial');
+          const after = await this.readSubmission(connection, review.month);
+          if (after.accountKey !== review.accountKey || after.period.id !== review.period.id || after.period.start !== review.period.start || after.period.end !== review.period.end || after.contentFingerprint !== review.contentFingerprint || after.netMinutes !== review.netMinutes) return result = { month: review.month, status: 'uncertain', periodStatus: after.period.status, message: t('Der Monatsabschluss oder seine Anwesenheitsdaten weichen vom bestätigten Stand ab. Bitte den Status prüfen.') };
+          if (isSubmittedStatus(after.period.status)) {
+            progress?.({ phase: 'submission', stage: 'verify', completed: 1, total: 1, message: t('Monatsabschluss und unveränderte Anwesenheiten bestätigt') });
+            return result = { month: review.month, status: 'verified', periodStatus: after.period.status, message: t('Monat eingereicht und unabhängig geprüft.'), submittedAt: this.now().toISOString() };
+          }
+          // A lost response does not prove the server stopped processing. An
+          // immediate nonterminal read can precede its late commit.
+          if (failure?.uncertain) return result = { month: review.month, status: 'uncertain', periodStatus: after.period.status, message: t('Der Abgabestatus ist unklar. Bitte unabhängig prüfen; nicht erneut einreichen.') };
+          return result = { month: review.month, status: 'failed', periodStatus: after.period.status, message: failure?.message ?? t('HiBob zeigt den Monat weiterhin als nicht eingereicht. Es wurde kein zweiter Versuch gestartet.') };
+        } catch (error) {
+          return result = { month: review.month, status: 'uncertain', message: t('Der Abgabestatus ist unklar. Bitte unabhängig prüfen; nicht erneut einreichen.') };
+        }
+      }, 'fast-serial');
+    } catch (error) {
+      if (!attempted && result?.status !== 'verified') throw this.localized(error);
+      // Do not erase a known readback result because cleanup failed afterwards.
+      result ??= { month: review.month, status: 'uncertain', message: t('Der Abgabestatus ist unklar. Bitte unabhängig prüfen; nicht erneut einreichen.') };
+    }
+    return result!;
   }
   private validateDay(connection: ApiConnection, day: DayPlan, context: AttendanceContext | undefined, authorization: ApplyAuthorization, read: MonthRead, signal?: AbortSignal): ApiDay {
     this.check(signal); this.verifyIdentity(connection, read.identity);

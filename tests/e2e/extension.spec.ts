@@ -3,7 +3,7 @@ import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-test('the packaged API-first MV3 extension starts with narrow permissions and a schema6 connection', async () => {
+test('the packaged API-first MV3 extension starts with narrow permissions and a schema7 connection', async () => {
   const expectedManifest = JSON.parse(await readFile(resolve('public/manifest.json'), 'utf8')) as { version: string; version_name?: string };
   const profile = await mkdtemp(join(tmpdir(), 'hibob-extension-test-'));
   const extension = resolve('dist');
@@ -37,7 +37,7 @@ test('the packaged API-first MV3 extension starts with narrow permissions and a 
     expect(manifest.icons?.['128']).toBe('icons/icon-128.png');
     expect(manifest.version).toBe(expectedManifest.version);
     expect(manifest.version_name).toBe(expectedManifest.version_name);
-    expect(manifest.permissions).toEqual(['sidePanel', 'storage', 'activeTab', 'scripting']);
+    expect(manifest.permissions).toEqual(['sidePanel', 'storage', 'activeTab', 'scripting', 'alarms']);
     expect(manifest.host_permissions).toEqual(['https://app.hibob.com/*']);
     expect(manifest.optional_host_permissions).toBeUndefined();
     expect(manifest.content_scripts).toBeUndefined();
@@ -49,7 +49,7 @@ test('the packaged API-first MV3 extension starts with narrow permissions and a 
     await expect(page.locator('#scan')).toBeDisabled();
     await expect(page.locator('#apply')).toBeDisabled();
     const readSession = () => worker.evaluate(async () => (await chrome.storage.session.get('sessionState')).sessionState as Record<string, unknown> | undefined);
-    await expect.poll(async () => (await readSession())?.schemaVersion).toBe(6);
+    await expect.poll(async () => (await readSession())?.schemaVersion).toBe(7);
     const initial = await readSession();
     expect(initial).toBeDefined();
     expect(initial?.tabId).toBeUndefined();
@@ -63,13 +63,13 @@ test('the packaged API-first MV3 extension starts with narrow permissions and a 
     const onlyPanel = german ? 'Diese Aktion ist nur im Extension-Seitenpanel verfügbar.' : 'This action is only available in the extension’s side panel.';
     await expect(page.locator('#main-error')).toHaveText(onlyPanel);
     await expect(page.locator('#retry-connection')).toBeVisible();
-    await worker.evaluate(async () => { await chrome.storage.session.set({ sessionState: { schemaVersion: 6, revision: 100, planRevision: 100, tabId: 9 } }); });
+    await worker.evaluate(async () => { await chrome.storage.session.set({ sessionState: { schemaVersion: 7, revision: 100, planRevision: 100, tabId: 9 } }); });
     await expect(page.locator('#connection-title')).toHaveText(labels.disconnected);
     await expect(page.locator('#scan')).toBeDisabled();
     const month = await page.locator('#month').inputValue();
     await worker.evaluate(async currentMonth => {
       await chrome.storage.session.set({ sessionState: {
-        schemaVersion: 6, revision: 101, planRevision: 101,
+        schemaVersion: 7, revision: 101, planRevision: 101,
         connection: { status: 'connected', generation: 'isolated-fixture-session', employeeId: 'fixture-employee', companyId: 'fixture-company', employeeLabel: 'Local API fixture', companyLabel: 'Local company', transport: 'direct', capabilities: { read: true, write: false, overwrite: false } },
         snapshot: { month: currentMonth, employeeLabel: 'Local API fixture', periodLabel: currentMonth, scannedAt: '2026-11-02T09:00:00Z', source: 'hibob', context: { mode: 'api-session', connectionId: 'isolated-fixture-session', employeeKey: 'fixture-employee', tenantKey: 'fixture-company' }, days: [] },
       } });
@@ -81,7 +81,7 @@ test('the packaged API-first MV3 extension starts with narrow permissions and a 
     await expect(page.locator('#main-error')).toHaveText(onlyPanel);
     await expect(page.locator('#scan')).toBeDisabled();
     await expect(page.locator('#apply')).toBeDisabled();
-    await worker.evaluate(async () => { await chrome.storage.session.set({ sessionState: { schemaVersion: 6, revision: 102, planRevision: 102 } }); });
+    await worker.evaluate(async () => { await chrome.storage.session.set({ sessionState: { schemaVersion: 7, revision: 102, planRevision: 102 } }); });
     await expect(page.locator('#connection-title')).toHaveText(labels.disconnected);
     await page.reload();
     await expect(page.locator('#connection-title')).toHaveText(labels.disconnected);

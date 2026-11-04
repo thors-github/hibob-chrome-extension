@@ -230,11 +230,11 @@ dialog::backdrop { background: #20333e66; }
 .confirm-details { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); gap: 9px 10px; margin: 17px 0; font-size: 13px; }
 .confirm-details dd { margin: 0; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
 .confirm-details dt { color: var(--muted); }
-#apply-dialog { width: 100%; max-width: none; max-height: 100dvh; min-height: 100dvh; margin: 0; border: 0; border-radius: 0; box-shadow: none; }
-#apply-dialog[open] { display: flex; flex-direction: column; }
-#apply-dialog .dialog-body { flex: 1; }
-#apply-dialog .dialog-footer { flex-wrap: wrap; }
-#apply-dialog .dialog-footer .primary { flex: 1; }
+#apply-dialog, #submission-dialog { width: 100%; max-width: none; max-height: 100dvh; min-height: 100dvh; margin: 0; border: 0; border-radius: 0; box-shadow: none; }
+#apply-dialog[open], #submission-dialog[open] { display: flex; flex-direction: column; }
+#apply-dialog .dialog-body, #submission-dialog .dialog-body { flex: 1; }
+#apply-dialog .dialog-footer, #submission-dialog .dialog-footer { flex-wrap: wrap; }
+#apply-dialog .dialog-footer .primary, #submission-dialog .dialog-footer .primary { flex: 1; }
 #apply-dialog .confirm-details { gap: 8px 12px; }
 #apply-dialog .account-confirmation { padding: 0; background: transparent; border: 0; }
 #apply-dialog #execution-disclosure { margin-top: 14px; }
@@ -267,4 +267,19 @@ dialog::backdrop { background: #20333e66; }
 }
 @media (prefers-reduced-motion: no-preference) {
   button { transition: background-color .15s ease; }
+}
+
+/* The reminder shares the status area and never adds a second primary action. */
+.submission-notice { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 1px 8px; border-left: 3px solid #cc4a40; padding: 4px 7px; margin: 0 0 6px; background: #fff3e9; color: #783b20; font-size: 12px; line-height: 1.35; }
+.submission-notice > span { flex: 1 1 auto; font-weight: 600; }
+.submission-notice .text-button { min-height: 24px; font-size: 11px; padding: 2px 0; text-align: left; }
+.reminder-preference { margin-top: 0; }
+.reminder-description { margin: 5px 0 10px; }
+#submit-month { margin-bottom: 16px; }
+#submission-dialog .dialog-body { overflow: visible; }
+#submission-dialog .notice { margin-top: 12px; }
+#submission-dialog .ack-label { margin-top: 18px; line-height: 1.5; }
+@media (max-height: 700px) {
+  .has-submission-notice .connection { padding-bottom: 3px; margin-bottom: 2px; }
+  .has-submission-notice .preview-summary { padding-block: 5px; margin-bottom: 6px; }
 }

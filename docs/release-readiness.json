@@ -1,14 +1,17 @@
 {
   "schemaVersion": 1,
-  "version": "1.6.0",
+  "version": "1.7.0",
   "stableReleaseReady": false,
-  "bootstrapTag": "v1.6.0-beta.1",
+  "bootstrapTag": "v1.7.0-beta.1",
   "blockers": [
-    "The internal HiBob API is unsupported. The fast 1.5.0 monthly writer has not received native write acceptance; shared final verification is not atomic and may detect changes after several accepted writes. Live overwrite, interactive SSO and temporary-tab fallback remain unverified."
+    "The internal HiBob API is unsupported. The fast 1.5.0 monthly writer has not received native write acceptance; shared final verification is not atomic and may detect changes after several accepted writes. Live overwrite, interactive SSO and temporary-tab fallback remain unverified.",
+    "Real month submission has not been executed during acceptance. The current authenticated early-submit feature-toggle contract is unverified and Open-state submission remains blocked. Incomplete summary flags, break violations and onBehalf paths are unsupported."
   ],
   "validationEvidence": [
     "Production-transport fixtures check one month preflight, serial date writes and independent whole-month readback, exact weekly totals, minimum changed dates, execution consent, durable journals, cancellation, cooldowns and uncertain outcomes. Latency-injected fixtures measure 100/200/250/500 ms response budgets; native acceptance does not create or overwrite attendance.",
     "Earlier 1.4.0 native acceptance covered current and future creation and saved-data reconciliation; this does not validate the new monthly writer. Personal reports and native evidence stay outside Git.",
-    "The 1.6.0 compact calendar and flat views passed 687 unit tests, 34 isolated browser checks, TypeScript and translation validation. German/English standard states fit 360x640 and 380x720 without scrolling. Native Chrome update verified the loaded version, calendar startup and preserved preferences. Independent comparison matched all 20 installed files to the tested ZIP; a fresh native month scan was not completed because concurrent Chrome control changed windows. No real attendance was written during UI acceptance."
+    "The 1.6.0 compact calendar and flat views passed 687 unit tests, 34 isolated browser checks, TypeScript and translation validation. German/English standard states fit 360x640 and 380x720 without scrolling. Native Chrome update verified the loaded version, calendar startup and preserved preferences. Independent comparison matched all 20 installed files to the tested ZIP; a fresh native month scan was not completed because concurrent Chrome control changed windows. No real attendance was written during UI acceptance.",
+    "Version 1.7.0 adds only the alarms permission, Berlin last-seven-day reminders, account-scoped cache and submission journals, separate ephemeral consent, one query-free body-free Submit and independent content/status readback. Automated tests cover exact dispatch counts, refusal paths, unknown outcomes, account changes, restart recovery and DE/EN compact layouts. Native acceptance is strictly read-only; private reports remain outside Git.",
+    "Native Chrome acceptance on 4 November 2026 verified 1.7.0-beta.1 loaded from the existing permanent folder, retained work/break/region settings, connected through the existing login without a HiBob tab, read November and opened the fresh submission review with actual saved hours. The current summary satisfied all required field checks. Open-state early submission and pending preview conflicts correctly disabled both consent and Submit; the review was closed without mutation. No real attendance or month was submitted."
   ]
 }

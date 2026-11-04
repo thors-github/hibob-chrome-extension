@@ -24,11 +24,11 @@ describe('local translation assets', () => {
     expect(localizeText('Thorsten · eigene Notiz / Urlaub')).toBe('Thorsten · eigene Notiz / Urlaub');
   });
 
-  it('provides both Chrome metadata locales and valid raster icons without new permissions', () => {
+  it('provides both Chrome metadata locales and valid raster icons with only the explicit reminder alarm permission', () => {
     const manifest = JSON.parse(readFileSync('public/manifest.json', 'utf8'));
     expect(manifest.default_locale).toBe('en');
     expect(manifest.name).toBe('__MSG_appName__');
-    expect(manifest.permissions).toEqual(['sidePanel', 'storage', 'activeTab', 'scripting']);
+    expect(manifest.permissions).toEqual(['sidePanel', 'storage', 'activeTab', 'scripting', 'alarms']);
     for (const lang of ['de', 'en']) {
       const messages = JSON.parse(readFileSync(`public/_locales/${lang}/messages.json`, 'utf8'));
       for (const key of ['appName', 'appDescription', 'actionTitle']) expect(messages[key].message.length).toBeGreaterThan(0);

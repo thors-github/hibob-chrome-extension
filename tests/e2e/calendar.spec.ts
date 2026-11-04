@@ -17,7 +17,7 @@ function calendarFixture(month = '2026-11') {
   const weeks = new Map<string, DayPlan[]>();
   for (const date of days) { const start = new Date(`${date.date}T12:00:00Z`); start.setUTCDate(start.getUTCDate() - (start.getUTCDay() + 6) % 7); const week = start.toISOString().slice(0, 10); weeks.set(week, [...(weeks.get(week) ?? []), date]); }
   const plan: BookingPlan = { id: `calendar-plan-${month}`, seed: 123, settings, snapshot, choices: {}, days, canReview: true, errors: [], weeks: [...weeks].map(([week, dates]) => ({ week, dates: dates.map(day => day.date), plannedMinutes: dates.reduce((sum, day) => sum + day.netMinutes!, 0), targetMinutes: dates.reduce((sum, day) => sum + day.netMinutes!, 0), errors: [] })) };
-  const state: SessionState = { schemaVersion: 6, revision: 1, planRevision: 1, connection: { status: 'connected', generation: 'calendar-session', employeeId: 'calendar-self', companyId: 'calendar-company', employeeLabel: 'Local Employee', companyLabel: 'Local Company', transport: 'direct', capabilities: { read: true, write: true, overwrite: true } }, snapshot, plan };
+  const state: SessionState = { schemaVersion: 7, revision: 1, planRevision: 1, connection: { status: 'connected', generation: 'calendar-session', employeeId: 'calendar-self', companyId: 'calendar-company', employeeLabel: 'Local Employee', companyLabel: 'Local Company', transport: 'direct', capabilities: { read: true, write: true, overwrite: true } }, snapshot, plan };
   const retainedSnapshot = structuredClone(snapshot);
   for (const date of retainedSnapshot.days) {
     const planned = plan.days.find(item => item.date === date.date)!;

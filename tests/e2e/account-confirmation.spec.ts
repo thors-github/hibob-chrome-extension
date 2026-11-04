@@ -24,7 +24,7 @@ for (const language of ['de-DE', 'en-GB']) {
         return { week, dates: included.map(day => day.date), targetMinutes: minutes, plannedMinutes: minutes, errors: [] };
       }),
     };
-    const state: SessionState = { schemaVersion: 6, revision: 1, planRevision: 7, connection: { status: 'connected', generation: 'local-session', employeeId: 'local-employee', companyId: 'local-company', employeeLabel: 'Local Employee', companyLabel: 'Local Company', transport: 'direct', capabilities: { read: true, write: true, overwrite: true } }, snapshot, plan };
+    const state: SessionState = { schemaVersion: 7, revision: 1, planRevision: 7, connection: { status: 'connected', generation: 'local-session', employeeId: 'local-employee', companyId: 'local-company', employeeLabel: 'Local Employee', companyLabel: 'Local Company', transport: 'direct', capabilities: { read: true, write: true, overwrite: true } }, snapshot, plan };
     const destinations: string[] = [];
     page.on('request', request => destinations.push(request.url()));
     // This isolated page owns a local RPC fixture. No real extension runtime or

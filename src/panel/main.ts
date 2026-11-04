@@ -1,7 +1,7 @@
 import './styles.css';
 import { renderMonthCalendar } from './calendar';
 import { buildMonthPlan, defaultSettings, formatMinutes, GERMAN_STATES, netMinutes } from '../domain/index';
-import type { AccountConfirmation, AttendanceEntry, BookingPlan, ConflictChoices, DayPlan, ExecutionProfile, PreflightResult, MonthSnapshot, PlanEditLease, RunOptions, SessionState, Settings } from '../shared/types';
+import type { AccountConfirmation, AttendanceEntry, BookingPlan, ConflictChoices, DayPlan, ExecutionProfile, PreflightResult, MonthSnapshot, PlanEditLease, RunOptions, SessionState, Settings, SubmissionConsent, SubmissionReview, TimesheetStatus } from '../shared/types';
 import { sameJsonValue } from '../shared/json';
 import { contextFingerprint, executionFingerprint } from '../shared/context';
 import { createDemoSnapshot, demoFingerprint } from './demo';
@@ -59,6 +59,10 @@ let toolPage: 'booking' | 'transfer' | 'connection' = 'booking';
 let selectedDate = '';
 let calendarFocusDate = '';
 let reviewChecksOpen = false;
+let checkingSubmission = false;
+let submittingMonth = false;
+let approvedSubmission: { review: SubmissionReview; revision: number; planRevision: number } | undefined;
+let submissionRequestVersion = 0;
 
 interface Draft {
   version: number;
@@ -71,7 +75,7 @@ interface Draft {
   preferencesSaved: boolean;
 }
 
-type PanelMessage = { type: string; month?: string; date?: string; plan?: BookingPlan; planId?: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation; options?: RunOptions };
+type PanelMessage = { type: string; month?: string; date?: string; plan?: BookingPlan; planId?: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; jobId?: string; confirmation?: AccountConfirmation; options?: RunOptions; reviewId?: string; expectedSubmissionRevision?: number; submissionConsent?: SubmissionConsent; enabled?: boolean };
 type PanelResponse = { ok: boolean; state?: SessionState; error?: string; preflight?: PreflightResult };
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -87,12 +91,14 @@ app.innerHTML = `
     <div id="demo-banner" class="demo-banner" hidden>${t('Testmodus · keine echten Buchungen')}</div>
     <div id="operation-controls" hidden><button id="return-to-run" class="text-button" type="button">${t('Zur Buchung')}</button><button id="cancel-run" class="button danger" hidden>${t('Restliche Tage stoppen')}</button></div>
     <div id="main-error" class="notice error" role="alert" hidden></div>
+    <div id="submission-result" class="notice" role="status" hidden></div>
     <button id="retry-plan" class="button wide" hidden>${t('Vorschau erneut prüfen')}</button>
     <button id="retry-connection" class="button wide" hidden>${t('Verbindung erneut prüfen')}</button>
     <main id="month-view">
       <div id="connection" class="connection"><span class="connection-dot" aria-hidden="true"></span><div><p id="connection-title">${t('Mit HiBob verbinden')}</p><p id="connection-detail" class="muted"></p></div></div>
       <div id="api-capability-notice" class="notice" role="status" hidden></div>
       <div id="account-context-notice" hidden></div>
+      <div id="submission-notice" class="submission-notice" role="status" hidden><span id="submission-notice-text"></span></div>
       <div class="field month-field"><label for="month" class="visually-hidden">${t('Monat')}</label><input id="month" name="month" type="month" required /></div>
       <div id="schedule-summary" class="schedule-summary"><strong id="schedule-hours"></strong><span id="schedule-details"></span></div>
       <section class="preview" aria-label="${t('Monatsvorschau')}">
@@ -112,6 +118,7 @@ app.innerHTML = `
         <button id="build-preview" class="button primary wide" hidden>${t('Vorschau erstellen')}</button>
         <button id="conflicts" class="button primary wide" hidden></button>
         <button id="apply" class="button primary wide" disabled hidden>${t('Jetzt buchen')}</button>
+        <button id="review-submission" class="button primary wide" type="button" hidden>${t('Monatsabschluss prüfen')}</button>
       </div><p id="footer-hint" class="hint">${t('Es wird erst nach deiner Bestätigung gespeichert.')}</p></footer>
       <button id="refresh-month" class="text-button refresh-month" type="button" hidden>${t('Monat neu einlesen')}</button>
     </main>
@@ -134,7 +141,7 @@ app.innerHTML = `
       <button id="settings-back" class="button primary wide view-return" type="button">${t('Zur Monatsübersicht')}</button>
     </section>
     <section id="tools-view" class="view-body" hidden>
-      <div id="booking-options"><div id="profile-field" class="field"><label for="execution-profile">${t('Buchungsmodus')}</label><select id="execution-profile"><option value="fast-serial">${t('Schnell – monatlich prüfen')}</option><option value="strict">${t('Streng – jeden Tag einzeln prüfen')}</option></select><p class="hint">${t('Im schnellen Modus werden nur nötige Änderungen nacheinander gespeichert. Für eine Prüfung nach jedem Tag den strengen Modus wählen.')}</p></div><button id="redistribute" class="button wide" hidden>${t('Alles neu verteilen')}</button><button id="tool-check-plan" class="button wide" disabled>${t('Plan prüfen – ohne Speichern')}</button><button id="edit-conflicts" class="button wide" hidden>${t('Entscheidungen zu vorhandenen Buchungen ändern')}</button><button id="view-history" class="button wide" hidden>${t('Buchungsverlauf ansehen')}</button></div>
+      <div id="booking-options"><div class="reminder-preference toggle-row"><label for="reminders-enabled"><input id="reminders-enabled" type="checkbox" />${t('An Monatsabschluss erinnern')}</label></div><p class="hint reminder-description">${t('Rote Zahl ab den letzten sieben Monatstagen, bis der Abschluss bestätigt ist.')}</p><button id="submit-month" class="button wide" type="button" disabled>${t('Monat einreichen (Submit)')}</button><div id="profile-field" class="field"><label for="execution-profile">${t('Buchungsmodus')}</label><select id="execution-profile"><option value="fast-serial">${t('Schnell – monatlich prüfen')}</option><option value="strict">${t('Streng – jeden Tag einzeln prüfen')}</option></select><p class="hint">${t('Im schnellen Modus werden nur nötige Änderungen nacheinander gespeichert. Für eine Prüfung nach jedem Tag den strengen Modus wählen.')}</p></div><button id="redistribute" class="button wide" hidden>${t('Alles neu verteilen')}</button><button id="tool-check-plan" class="button wide" disabled>${t('Plan prüfen – ohne Speichern')}</button><button id="edit-conflicts" class="button wide" hidden>${t('Entscheidungen zu vorhandenen Buchungen ändern')}</button><button id="view-history" class="button wide" hidden>${t('Buchungsverlauf ansehen')}</button></div>
       <div id="transfer-options" hidden><p class="hint">${t('Übertrage deine Vorgaben zwischen Installationen. HiBob-Daten und Buchungsverläufe werden nicht exportiert.')}</p><div class="transfer-actions"><button id="export-settings" class="button">${t('Einstellungen exportieren')}</button><button id="import-settings" class="button">${t('Einstellungen importieren')}</button></div><input id="settings-file" type="file" accept="application/json,.json" hidden /><p id="transfer-status" class="hint" role="status" hidden></p><button id="export-plan" class="button wide" hidden>${t('Buchungsplan herunterladen')}</button><p id="export-plan-hint" class="hint" hidden>${t('Enthält private Anwesenheitsdaten. Nur lokal und vertraulich verwenden.')}</p><p id="export-plan-status" class="hint" role="status" hidden></p></div>
       <div id="connection-options" hidden><div class="version-bar"><span id="installed-version"></span><button id="activate-update" class="button subtle" hidden>${t('Jetzt aktualisieren')}</button></div><p id="connection-technical" class="hint"></p><p id="connection-account" class="hint"></p><p id="connection-scan-detail" class="hint"></p><button id="disconnect" class="button wide" hidden>${t('Verbindung trennen')}</button></div>
       <button id="tools-back" class="button wide view-return" type="button">${t('Zurück zu Einstellungen')}</button>
@@ -144,6 +151,7 @@ app.innerHTML = `
   </div>
   <dialog id="conflict-dialog" aria-labelledby="conflict-title"><div class="dialog-body"><h2 id="conflict-title">${t('Vorhandene Buchungen prüfen')}</h2><p class="hint">${t('Entscheide für jeden Tag. Beim Überschreiben werden die bisherigen Arbeits- und Pauseneinträge durch die Vorschau ersetzt.')}</p><div class="dialog-toolbar"><button id="overwrite-all" class="button">${t('Alle überschreiben')}</button><button id="skip-all" class="button">${t('Alle überspringen')}</button></div><div id="conflict-error" class="notice error" role="alert" hidden></div><div id="conflict-items"></div></div><div class="dialog-footer"><button id="close-conflicts" class="button">${t('Zurück')}</button><button id="save-conflicts" class="button primary">${t('Entscheidungen übernehmen')}</button></div></dialog>
   <dialog id="apply-dialog" aria-labelledby="apply-title"><div class="dialog-body"><h2 id="apply-title">${t('Buchung bestätigen')}</h2><p id="apply-description" class="hint"></p><dl id="apply-details" class="confirm-details"></dl><button id="review-days" class="text-button" type="button">${t('Tage ansehen')}</button><div id="account-confirmation-field" class="notice account-confirmation" hidden><label class="ack-label" for="account-confirmation"><input id="account-confirmation" type="checkbox" /><span id="account-confirmation-label"></span></label></div><button id="review-checks" class="text-button" type="button">${t('Zusätzliche Prüfungen')}</button><section id="additional-checks" class="additional-checks" hidden><div id="checkpoint-field" class="checkpoint-field"><label class="ack-label" for="pause-verification"><input id="pause-verification" type="checkbox" /><span>${t('Für Kontrolle pausieren')}</span></label><p id="checkpoint-description" class="hint"></p></div><div id="preflight-controls" class="draft-check-controls field"><label for="draft-check-date">${t('Tag für Planprüfung')}</label><select id="draft-check-date" disabled></select><p class="hint">${t('Der ausgewählte Tag und die geplanten Daten werden ohne Änderungen geprüft. Das bestätigt keine serverseitige Speicherung. Danach den Monat erneut einlesen.')}</p><button id="check-draft" class="button wide" disabled>${t('Plan prüfen – ohne Speichern')}</button></div></section><p id="execution-disclosure" class="hint"></p><p id="execution-consent-reset" class="hint" role="status" hidden></p></div><div class="dialog-footer"><button id="close-apply" class="button">${t('Zurück')}</button><button id="confirm-apply" class="button primary" disabled>${t('Buchungen starten')}</button></div></dialog>
+  <dialog id="submission-dialog" aria-labelledby="submission-title"><div class="dialog-body"><h2 id="submission-title">${t('Monatsabschluss prüfen')}</h2><p id="submission-description" class="hint"></p><dl id="submission-details" class="confirm-details"></dl><div id="submission-issues" class="notice error" role="alert" hidden></div><p id="submission-early" class="notice" hidden>${t('Du reichst den Monat vor seinem Ende ein. Es zählen nur die bereits gespeicherten Zeiten.')}</p><p class="hint">${t('Nach dem Einreichen können Änderungen eine Wiederöffnung oder Freigabe in HiBob benötigen.')}</p><label id="submission-confirmation-field" class="ack-label" for="submission-confirmation"><input id="submission-confirmation" type="checkbox" /><span id="submission-confirmation-label"></span></label></div><div class="dialog-footer"><button id="close-submission" class="button" type="button">${t('Zurück')}</button><button id="confirm-submission" class="button primary" type="button" disabled>${t('Monat jetzt einreichen')}</button></div></dialog>
   <dialog id="import-dialog" aria-labelledby="import-title"><div class="dialog-body"><h2 id="import-title">${t('Einstellungen importieren?')}</h2><p class="hint">${t('Diese Vorgaben ersetzen deine aktuellen Einstellungen. Der Import startet keine Buchungen; prüfe danach die Monatsvorschau.')}</p><dl id="import-details" class="confirm-details"></dl></div><div class="dialog-footer"><button id="cancel-import" class="button">${t('Abbrechen')}</button><button id="confirm-import" class="button primary">${t('Einstellungen übernehmen')}</button></div></dialog>
 `;
 
@@ -153,6 +161,7 @@ const select = (id: string) => $<HTMLSelectElement>(id);
 const conflictDialog = $<HTMLDialogElement>('conflict-dialog');
 const applyDialog = $<HTMLDialogElement>('apply-dialog');
 const importDialog = $<HTMLDialogElement>('import-dialog');
+const submissionDialog = $<HTMLDialogElement>('submission-dialog');
 const exclusionField = document.querySelector<HTMLElement>('.excluded-field')!;
 $('booking-options').prepend(exclusionField);
 $('main-error').after($('run-uncertain'), $('run-impact'));
@@ -161,6 +170,7 @@ function setSettingsOpen(open: boolean): void { navigate(open ? 'settings' : 'mo
 
 function navigate(view: PanelView, focusId?: string): void {
   if (applyDialog.open) closeConfirmation();
+  if (submissionDialog.open || checkingSubmission) closeSubmissionReview();
   panelView = view;
   renderState();
   const scrolling = document.scrollingElement ?? document.documentElement; scrolling.scrollTop = 0; scrolling.scrollLeft = 0;
@@ -249,7 +259,7 @@ function activeJob(): SessionState['job'] | undefined {
 function pausedJob(): SessionState['job'] | undefined { return state.job?.status === 'paused' && state.run?.status === 'paused' ? state.job : undefined; }
 function isPaused(): boolean { return Boolean(pausedJob()); }
 
-function isRunning(): boolean { return busy || applying || checkingPreflight || connecting || Boolean(activeJob()) || (!state.job && state.run?.status === 'running'); }
+function isRunning(): boolean { return busy || applying || checkingPreflight || checkingSubmission || submittingMonth || connecting || Boolean(activeJob()) || (!state.job && state.run?.status === 'running'); }
 
 function shouldPollState(): boolean {
   return hasExtension && !panelClosed && app.isConnected && document.visibilityState !== 'hidden' && !initializing && !initializationFailed
@@ -284,6 +294,7 @@ const statePollingVisibility = () => synchronizeStatePolling(true);
 document.addEventListener('visibilitychange', statePollingVisibility);
 window.addEventListener('pagehide', () => {
   panelClosed = true;
+  closeSubmissionReview();
   synchronizeStatePolling();
   document.removeEventListener('visibilitychange', statePollingVisibility);
 }, { once: true });
@@ -310,6 +321,7 @@ function closeConfirmation(): void {
 function revokeApproval(): void {
   approvedPlanRevision = undefined;
   closeConfirmation();
+  if (submissionDialog.open) closeSubmissionReview();
 }
 
 function approved(): boolean {
@@ -436,6 +448,7 @@ function receiveState(incoming: SessionState): void {
   if (typeof incoming.revision === 'number' && incoming.revision <= (state.revision ?? -1)) return;
   const previous = state;
   state = structuredClone(incoming);
+  if (approvedSubmission && (!sameJsonValue(previous.connection, state.connection) || approvedSubmission.revision !== state.submissionRevision || approvedSubmission.planRevision !== (state.planRevision ?? 0) || !sameJsonValue(approvedSubmission.review, state.submissionReview) || activeJob() || updating())) closeSubmissionReview(false);
   if (preflightResult && (!sameJsonValue(previous.connection, state.connection) || previous.planRevision !== state.planRevision || state.snapshot || activeJob())) preflightResult = undefined;
   if (state.snapshot && !activeJob()) preflightNeedsScan = false;
   if (state.plan && !renderablePlan(state.plan)) {
@@ -684,6 +697,193 @@ function storedSettings(value: unknown): Settings {
   return restored;
 }
 
+function submissionStatusLabel(status: TimesheetStatus | undefined): string {
+  switch (status) {
+    case 'Submitted': return t('Eingereicht');
+    case 'Approved': return t('Genehmigt');
+    case 'PendingProjectApproval': return t('Projektfreigabe ausstehend');
+    case 'Rejected': return t('Zurückgewiesen – erneut prüfen');
+    case 'WaitingForSubmission': return t('Bereit zum Einreichen');
+    case 'Locked': return t('In HiBob gesperrt');
+    case 'Open': return t('Noch nicht eingereicht');
+    default: return t('Abschlussstatus prüfen');
+  }
+}
+
+function isClosedStatus(status: TimesheetStatus | undefined): boolean {
+  return status === 'Submitted' || status === 'Approved' || status === 'PendingProjectApproval';
+}
+
+function displayedSubmissionStatus(): TimesheetStatus | undefined {
+  const result = state.submissionResult;
+  if (result?.month === settings.month && result.status === 'verified' && isClosedStatus(result.periodStatus)) return result.periodStatus;
+  const review = state.submissionReview;
+  if (review?.month === settings.month && review.connectionId === state.connection?.generation) return review.period.status;
+  const snapshot = state.snapshot?.month === settings.month ? state.snapshot : plan?.snapshot.month === settings.month ? plan.snapshot : undefined;
+  return snapshot?.submission?.status;
+}
+
+function submissionIsClosed(): boolean { return isClosedStatus(displayedSubmissionStatus()); }
+
+function visibleDayPlans(): DayPlan[] {
+  if (!submissionIsClosed()) return plan?.days ?? [];
+  const snapshot = state.snapshot?.month === settings.month ? state.snapshot : plan?.snapshot;
+  if (!snapshot) return [];
+  return snapshot.days.map(day => ({ date: day.date, existing: day.entries, proposed: [], action: day.entries.length ? 'unchanged' : 'skip', eligible: day.entries.length > 0, fingerprint: day.fingerprint, netMinutes: day.reportedMinutes === null ? null : day.reportedMinutes ?? netMinutes(day.entries), existingNetMinutes: day.reportedMinutes === null ? null : day.reportedMinutes ?? netMinutes(day.entries), reason: day.nonWorking ?? day.absence }));
+}
+
+function reminderMonth(): string | undefined {
+  const due = state.reminder?.enabled ? state.reminder.due : [];
+  return due?.find(item => item.month === settings.month)?.month ?? due?.map(item => item.month).sort()[0];
+}
+
+function submissionActionMonth(): string | undefined {
+  return (state.submissionResult?.status === 'uncertain' ? state.submissionResult.month : undefined) ?? reminderMonth()
+    ?? (state.run?.status === 'complete' && state.run.planId === plan?.id || submissionIsClosed() ? settings.month : undefined);
+}
+
+function submissionNoticeMonth(month: string): string {
+  return month === settings.month ? new Intl.DateTimeFormat(locale(), { month: 'long', timeZone: 'Europe/Berlin' }).format(new Date(`${month}-01T12:00:00Z`)) : monthLabel(month);
+}
+
+function submissionLocalIssues(month: string): string[] {
+  if (pendingDraft || rebuilding) return [t('Die Vorschau wird noch geprüft. Bitte danach erneut prüfen.')];
+  if (preflightNeedsScan) return [t('Lies den Monat nach der Planprüfung erneut ein.')];
+  if (plan?.settings.month !== month || submissionIsClosed()) return [];
+  const applied = state.run?.planId === plan.id && state.run.status === 'complete'
+    && writableDays(plan).every(day => state.run!.results.some(result => result.date === day.date && result.status === 'verified'));
+  if (applied) return [];
+  if (writableDays(plan).length || plan.days.some(day => day.action === 'conflict') || plan.errors.length) return [t('Erst vollständig buchen: Kläre offene Änderungen und Lücken in der Monatsvorschau.')];
+  return [];
+}
+
+function closeSubmissionReview(notify = true): void {
+  const reviewId = approvedSubmission?.review.id;
+  approvedSubmission = undefined;
+  submissionRequestVersion++;
+  input('submission-confirmation').checked = false;
+  input('submission-confirmation').disabled = true;
+  $<HTMLButtonElement>('confirm-submission').disabled = true;
+  if (submissionDialog.open) submissionDialog.close();
+  if (notify && hasExtension && (reviewId || checkingSubmission)) void message({ type: 'PANEL_DISMISS_SUBMISSION', ...(reviewId ? { reviewId } : { expectedSubmissionRevision: state.submissionRevision ?? 0 }) }).catch(() => {});
+}
+
+function currentSubmissionReview(): boolean {
+  const approved = approvedSubmission;
+  return Boolean(approved && submissionDialog.open && hasExtension && connected() && !isRunning() && !isPaused() && !updating()
+    && !pendingDraft && !rebuilding && !initializing && !initializationFailed
+    && approved.revision === state.submissionRevision && approved.planRevision === (state.planRevision ?? 0)
+    && state.connection?.generation === approved.review.connectionId
+    && sameJsonValue(approved.review, state.submissionReview)
+    && !submissionLocalIssues(approved.review.month).length
+    && !(state.submissionResult?.month === approved.review.month && state.submissionResult.status === 'uncertain'));
+}
+
+function updateSubmissionButton(): void {
+  const review = approvedSubmission?.review;
+  const ready = currentSubmissionReview() && Boolean(review?.canSubmit) && !review?.issues.length && !isClosedStatus(review?.period.status);
+  input('submission-confirmation').disabled = !ready;
+  $<HTMLButtonElement>('confirm-submission').disabled = !ready || !input('submission-confirmation').checked;
+}
+
+async function openSubmissionReview(month: string): Promise<void> {
+  if (!hasExtension || !connected() || isRunning() || isPaused() || updating() || rebuilding || pendingDraft || initializing || initializationFailed || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return;
+  closeConfirmation();
+  closeSubmissionReview(false);
+  const version = ++submissionRequestVersion;
+  const generation = state.connection?.generation;
+  checkingSubmission = true; localError = ''; renderState();
+  try {
+    await message({ type: 'PANEL_REVIEW_SUBMISSION', month });
+    const review = state.submissionReview;
+    if (version !== submissionRequestVersion || state.connection?.generation !== generation || !review || review.month !== month || review.connectionId !== generation || activeJob() || typeof state.submissionRevision !== 'number') return;
+    approvedSubmission = { review: structuredClone(review), revision: state.submissionRevision, planRevision: state.planRevision ?? 0 };
+    const list = $('submission-details'); list.replaceChildren();
+    detailsLine(list, t('Monat'), monthLabel(review.month));
+    detailsLine(list, t('HiBob-Konto'), `${review.employeeLabel} · ${review.companyLabel}`);
+    detailsLine(list, t('Gespeicherte Nettozeit'), review.netMinutes === null ? t('Stunden noch nicht berechenbar') : formatMinutes(review.netMinutes));
+    detailsLine(list, t('Status'), submissionStatusLabel(review.period.status));
+    const issues = [...new Set([...review.issues, ...submissionLocalIssues(month)])];
+    $('submission-issues').replaceChildren();
+    if (issues.length) { const ul = node('ul'); for (const issue of issues) ul.append(node('li', localizeText(issue))); $('submission-issues').append(ul); }
+    $('submission-issues').hidden = !issues.length;
+    $('submission-early').hidden = !review.early || !review.canSubmit;
+    $('submission-title').textContent = t('Monatsabschluss prüfen');
+    $('submission-description').textContent = t('Nur bereits in HiBob gespeicherte Zeiten werden eingereicht. Es werden keine weiteren Zeiten gebucht.');
+    $('submission-confirmation-label').textContent = t('Ich bestätige das angezeigte Konto, die Firma und die gespeicherten Zeiten für {month}.', { month: monthLabel(month) });
+    $('submission-confirmation-field').hidden = isClosedStatus(review.period.status);
+    $('confirm-submission').hidden = isClosedStatus(review.period.status);
+    $('confirm-submission').textContent = t('{month} jetzt einreichen', { month: monthLabel(month) });
+    input('submission-confirmation').checked = false;
+    submissionDialog.showModal();
+  } catch (error) { if (version === submissionRequestVersion) showError(errorText(error)); }
+  finally { checkingSubmission = false; renderState(); updateSubmissionButton(); }
+}
+
+async function submitReviewedMonth(): Promise<void> {
+  const approved = approvedSubmission;
+  if (!approved || !currentSubmissionReview() || !approved.review.canSubmit || approved.review.issues.length || !input('submission-confirmation').checked || $<HTMLButtonElement>('confirm-submission').disabled) return;
+  const review = approved.review;
+  const consent: SubmissionConsent = { reviewId: review.id, reviewRevision: approved.revision, connectionId: review.connectionId, accountKey: review.accountKey, contentFingerprint: review.contentFingerprint, eligibilityFingerprint: review.eligibilityFingerprint, confirmed: true };
+  closeSubmissionReview(false);
+  revokeApproval();
+  panelView = 'month'; submittingMonth = true; localError = ''; renderState();
+  try { await message({ type: 'PANEL_SUBMIT_MONTH', reviewId: review.id, expectedSubmissionRevision: approved.revision, submissionConsent: consent }); }
+  catch (error) { showError(errorText(error)); }
+  finally { submittingMonth = false; renderState(); }
+}
+
+function renderSubmission(): void {
+  const dueMonth = submissionActionMonth();
+  const due = state.reminder?.due.find(item => item.month === dueMonth);
+  const closed = submissionIsClosed();
+  const locked = isRunning() || isPaused() || updating() || initializing || initializationFailed || rebuilding || Boolean(pendingDraft);
+  const notice = $('submission-notice');
+  notice.hidden = !dueMonth;
+  document.querySelector('.shell')!.classList.toggle('has-submission-notice', !notice.hidden);
+  const needsCheck = due?.needsCheck || state.submissionResult?.status === 'uncertain' && state.submissionResult.month === dueMonth;
+  const periodStatus = displayedSubmissionStatus() ?? due?.status;
+  $('submission-notice-text').textContent = !dueMonth ? '' : needsCheck
+    ? t('{month}: Abschlussstatus prüfen', { month: submissionNoticeMonth(dueMonth) })
+    : closed && dueMonth === settings.month
+      ? t('{month}: {status}', { month: submissionNoticeMonth(dueMonth), status: submissionStatusLabel(periodStatus) })
+      : t('{month} noch einreichen', { month: submissionNoticeMonth(dueMonth) });
+  if (state.reminder?.due.length && state.reminder.due.length > 1) $('submission-notice-text').append(document.createTextNode(t(' · +{count} weitere', { count: state.reminder.due.length - 1 })));
+  input('reminders-enabled').checked = state.reminder?.enabled ?? true;
+  input('reminders-enabled').disabled = locked || !hasExtension;
+  $<HTMLButtonElement>('submit-month').disabled = locked || !connected() || !hasExtension;
+  const button = $<HTMLButtonElement>('review-submission');
+  button.hidden = !dueMonth || !connected() || !hasExtension;
+  button.disabled = locked;
+  const hasBookingAction = [...$('booking-footer').querySelectorAll<HTMLButtonElement>('.footer-buttons > button')].some(item => item !== button && !item.hidden);
+  button.className = hasBookingAction ? 'text-button' : 'button primary wide';
+  (hasBookingAction ? notice : $('booking-footer').querySelector('.footer-buttons')!).append(button);
+  if (dueMonth) button.setAttribute('aria-label', t('Monatsabschluss für {month} prüfen', { month: monthLabel(dueMonth) }));
+  if (closed) {
+    $('apply').hidden = true;
+    $('build-preview').hidden = true;
+    $('scan').hidden = true;
+    $('conflicts').hidden = true;
+    $('edit-conflicts').hidden = true;
+    $('redistribute').hidden = true;
+    $('tool-check-plan').hidden = true;
+    $('footer-hint').hidden = true;
+  } else $('tool-check-plan').hidden = false;
+  const result = state.submissionResult;
+  const resultBox = $('submission-result');
+  resultBox.hidden = !result || result.status === 'verified' && closed && result.month === settings.month;
+  resultBox.className = `notice ${result?.status === 'verified' ? 'success' : 'error'}`;
+  resultBox.setAttribute('role', result?.status === 'uncertain' ? 'alert' : 'status');
+  resultBox.textContent = result ? `${monthLabel(result.month)} · ${result.status === 'uncertain' ? t('Einreichungsstatus unklar – zuerst erneut lesend prüfen.') : result.status === 'verified' ? submissionStatusLabel(result.periodStatus) : t('Nicht eingereicht')} · ${localizeText(result.message)}` : '';
+  if (result?.status === 'uncertain') {
+    const retry = node('button', t('Abschlussstatus prüfen'), 'text-button');
+    retry.id = 'review-uncertain-submission'; retry.type = 'button'; retry.disabled = locked || !connected() || !hasExtension;
+    retry.addEventListener('click', () => { void openSubmissionReview(result.month); });
+    resultBox.append(document.createElement('br'), retry);
+  }
+  updateSubmissionButton();
+}
+
 function renderState(): void {
   if (!app.isConnected || panelClosed) return;
   const focused = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
@@ -773,7 +973,7 @@ function renderState(): void {
     const bar = node('progress');
     bar.max = progress.total || 1;
     bar.value = progress.completed;
-    bar.setAttribute('aria-label', progress.phase === 'scan' ? t('Monat einlesen') : checkingPreflight ? t('Planprüfung') : t('Buchungsfortschritt'));
+    bar.setAttribute('aria-label', progress.phase === 'scan' ? t('Monat einlesen') : progress.phase === 'submission' ? t('Monatsabschluss') : checkingPreflight ? t('Planprüfung') : t('Buchungsfortschritt'));
     $('scan-progress').replaceChildren(label, bar);
   }
   renderPreview();
@@ -787,11 +987,12 @@ function renderState(): void {
   const finished = state.run?.status === 'complete' && state.run.planId === plan?.id;
   const noChanges = Boolean(plan && !plan.errors.length && !writableDays(plan).length);
   const unresolved = plan?.days.some(day => day.action === 'conflict') ?? false;
-  $('apply').hidden ||= noChanges || finished || unresolved || Boolean(plan?.errors.length);
+  $('apply').hidden ||= noChanges || finished || unresolved || Boolean(plan?.errors.length) || submissionIsClosed();
   $<HTMLButtonElement>('apply').disabled = !approved() || locked || rebuilding || finished || noChanges;
-  $('refresh-month').hidden = !bound || running || paused || (!state.snapshot && !state.run && !preflightNeedsScan);
+  $('refresh-month').hidden = !bound || running || paused || (!state.snapshot && !state.run && !preflightNeedsScan && !submissionIsClosed());
   $('footer-hint').hidden = !plan || noChanges || running || paused || finished;
   renderViews();
+  renderSubmission();
   const attention = state.run?.results.some(result => result.status === 'uncertain' || result.status === 'failed') && (!state.snapshot || !plan || state.run.planId === plan.id);
   $('operation-controls').hidden = connecting || (!running && !paused && (!attention || panelView === 'month'));
   $('return-to-run').hidden = panelView === 'month';
@@ -827,7 +1028,19 @@ function renderPreview(): void {
   $('edit-conflicts').hidden = true;
   $('preview-subtitle').textContent = monthLabel(settings.month);
   const matchingRun = plan && state.run?.planId === plan.id ? state.run : undefined;
-  renderMonthCalendar($('calendar'), { month: settings.month, days: plan?.days, run: matchingRun, focusDate: calendarFocusDate, onOpenDate: openDay, onFocusDate: date => { calendarFocusDate = date; } });
+  renderMonthCalendar($('calendar'), { month: settings.month, days: visibleDayPlans(), run: matchingRun, focusDate: calendarFocusDate, onOpenDate: openDay, onFocusDate: date => { calendarFocusDate = date; } });
+  if (submissionIsClosed()) {
+    $('preview-empty').hidden = true;
+    $('preview-summary').hidden = locked;
+    const stored = (state.snapshot?.month === settings.month ? state.snapshot : plan?.snapshot)?.days;
+    const knownMinutes = stored?.every(day => day.reportedMinutes !== null && (day.reportedMinutes !== undefined || netMinutes(day.entries) !== null));
+    const total = knownMinutes ? stored!.reduce((sum, day) => sum + (day.reportedMinutes ?? netMinutes(day.entries) ?? 0), 0) : null;
+    const totalNode = node('div', undefined, 'month-totals');
+    totalNode.append(node('strong', total === null ? t('Stunden noch nicht berechenbar') : t('{time} gespeichert', { time: formatMinutes(total) })));
+    $('preview-summary').replaceChildren(totalNode, node('p', submissionStatusLabel(displayedSubmissionStatus()), 'no-changes'));
+    $('plan-errors').hidden = true;
+    return;
+  }
   if (!plan) return;
   const changed = writableDays(plan);
   const retained = plan.days.filter(day => day.action === 'unchanged');
@@ -863,7 +1076,7 @@ function renderPreview(): void {
 
 function renderDayView(): void {
   if (panelView !== 'day') return;
-  const days = plan?.days ?? [];
+  const days = visibleDayPlans();
   const day = days.find(item => item.date === selectedDate);
   $('day-title').textContent = dateLabel(selectedDate);
   const index = days.findIndex(item => item.date === selectedDate);
@@ -878,7 +1091,7 @@ function renderDayView(): void {
   $('day-content').append(renderDay(day, true));
   const date = new Date(`${day.date}T12:00:00Z`); date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7);
   const monday = date.toISOString().slice(0, 10);
-  const week = plan!.weeks.find(item => item.week === monday);
+  const week = plan?.weeks.find(item => item.week === monday);
   if (!week) return;
   const weekSection = node('section', undefined, 'week');
   const header = node('div', undefined, 'week-header');
@@ -910,10 +1123,10 @@ function renderDay(day: DayPlan, _expanded = false): HTMLElement {
   const weekday = new Date(`${day.date}T12:00:00Z`).getUTCDay();
   const unavailable = weekday === 0 || weekday === 6 || Boolean(day.holiday || snapshot?.absence || snapshot?.nonWorking || (!snapshot?.editable && !snapshot?.unsupportedReason && day.action !== 'blocked'));
   checkbox.checked = !unavailable && !settings.excludedDates.includes(day.date);
-  checkbox.disabled = isRunning() || isPaused() || updating() || unavailable;
+  checkbox.disabled = isRunning() || isPaused() || updating() || unavailable || submissionIsClosed();
   checkbox.setAttribute('aria-label', t('{date} berücksichtigen', { date: dateLabel(day.date) }));
   checkbox.addEventListener('change', () => {
-    if (isRunning() || isPaused() || updating()) return;
+    if (isRunning() || isPaused() || updating() || submissionIsClosed()) return;
     settings.excludedDates = checkbox.checked ? settings.excludedDates.filter((date) => date !== day.date) : [...new Set([...settings.excludedDates, day.date])].sort();
     $<HTMLTextAreaElement>('excludedDates').value = settings.excludedDates.join('\n');
     settingsChanged();
@@ -1190,7 +1403,7 @@ async function checkPreflight(): Promise<void> {
     const response = isDemo ? undefined : await request({ type: 'PANEL_PREFLIGHT', plan: review.plan, expectedPlanRevision: review.planRevision, date: day.date, ...(confirmation ? { confirmation } : {}) });
     const result = isDemo ? await demoPreflight(day) : response?.preflight;
     const completedState = response?.state;
-    const invalidated = isDemo || Boolean(completedState && completedState.schemaVersion === 6 && completedState.connection?.generation === connectionGeneration
+    const invalidated = isDemo || Boolean(completedState && completedState.schemaVersion === 7 && completedState.connection?.generation === connectionGeneration
       && sameJsonValue(completedState.connection, reviewedConnection)
       && typeof completedState.revision === 'number' && completedState.revision > revision
       && typeof completedState.planRevision === 'number' && completedState.planRevision > review.planRevision
@@ -1435,6 +1648,7 @@ function settingsInput(): void {
   if (isRunning() || isPaused() || updating()) return;
   const next = readSettings();
   if (sameJsonValue(next, settings)) return;
+  if (submissionDialog.open) closeSubmissionReview();
   settings = next; updateConditionalFields();
   settingsChanged();
 }
@@ -1472,6 +1686,16 @@ $('save-conflicts').addEventListener('click', () => { void saveChoices(); });
 $('apply').addEventListener('click', () => openApply());
 $('continue-run').addEventListener('click', () => { void (async () => { if (!isPaused() || isRunning()) return; if (hasExtension) await refreshApproval(); else approvedPlanRevision = planRevision(); openApply(true); })(); });
 $('close-apply').addEventListener('click', closeConfirmation);
+$('review-submission').addEventListener('click', () => { void openSubmissionReview(submissionActionMonth() ?? settings.month); });
+$('submit-month').addEventListener('click', () => { void openSubmissionReview(settings.month); });
+$('close-submission').addEventListener('click', () => closeSubmissionReview());
+submissionDialog.addEventListener('cancel', () => closeSubmissionReview());
+input('submission-confirmation').addEventListener('change', updateSubmissionButton);
+$('confirm-submission').addEventListener('click', () => { void submitReviewedMonth(); });
+input('reminders-enabled').addEventListener('change', () => {
+  if (transferBlocked() || !hasExtension) { input('reminders-enabled').checked = state.reminder?.enabled ?? true; return; }
+  void message({ type: 'PANEL_SET_REMINDERS', enabled: input('reminders-enabled').checked }).catch(error => { showError(errorText(error)); input('reminders-enabled').checked = state.reminder?.enabled ?? true; });
+});
 applyDialog.addEventListener('cancel', closeConfirmation);
 input('account-confirmation').addEventListener('change', updateConfirmationButton);
 input('pause-verification').addEventListener('change', () => changeExecutionOptions(true));

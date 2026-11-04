@@ -307,10 +307,10 @@ export class SessionClient {
   // request() never changes transport or retries after dispatch.
   private fallback(error: unknown) { return error instanceof SessionClientError && ['AUTH_REQUIRED', 'NETWORK_UNAVAILABLE', 'FORBIDDEN'].includes(error.code); }
   private connectionFor(mode: SessionConnection['mode']): SessionConnection { return { mode, id: this.connection?.id ?? crypto.randomUUID() }; }
-  private async select(signal: AbortSignal, allowAuthFallback = true): Promise<{ connection: SessionConnection; tab?: OwnedTab }> {
+  private async select(signal: AbortSignal, allowAuthFallback = true, directOnly = false): Promise<{ connection: SessionConnection; tab?: OwnedTab }> {
     try { await this.probe(signal); return { connection: this.connectionFor('direct') }; }
     catch (error) {
-      if (!this.options.allowBackgroundTab || !this.fallback(error) || (!allowAuthFallback && error instanceof SessionClientError && error.code === 'AUTH_REQUIRED')) throw error;
+      if (directOnly || !this.options.allowBackgroundTab || !this.fallback(error) || (!allowAuthFallback && error instanceof SessionClientError && error.code === 'AUTH_REQUIRED')) throw error;
       const tab = await this.createOwned(signal);
       try { await this.probe(signal, tab); return { connection: this.connectionFor('tab'), tab }; }
       catch (failure) { await this.closeOwned(tab); throw failure; }
@@ -365,14 +365,14 @@ export class SessionClient {
       unlink(); if (this.opening === controller) this.opening = undefined;
     }
   }
-  async openOperation(signal?: AbortSignal, profile: ExecutionProfile = 'strict'): Promise<SessionConnection> {
+  async openOperation(signal?: AbortSignal, profile: ExecutionProfile = 'strict', options: { directOnly?: boolean } = {}): Promise<SessionConnection> {
     if (this.operation || this.opening) throw new SessionClientError('BUSY');
     if (profile !== 'strict' && profile !== 'fast-serial') throw new SessionClientError('REQUEST_DENIED');
     this.profile = profile;
     const controller = new AbortController(); this.opening = controller; const unlink = this.link(signal, controller);
     let selected: { connection: SessionConnection; tab?: OwnedTab } | undefined;
     try {
-      selected = await this.select(controller.signal);
+      selected = await this.select(controller.signal, true, options.directOnly === true);
       this.check(controller.signal);
       this.connection = selected.connection;
       this.operation = { ...selected, controller, closing: false, pending: new Set(), detachSignal: unlink };
