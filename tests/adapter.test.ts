@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AdapterError, HiBobDomAdapter, isAttendanceLocation, localDateFromUi, snapshotFingerprint } from '../src/hibob/adapter';
 import { makeUiContextReader, type AttendanceContextEvidence } from '../src/hibob/context-reader';
 import { contextFingerprint } from '../src/shared/context';
@@ -244,15 +244,21 @@ describe('strict HiBob DOM boundary', () => {
 
 describe('month scanning and conflict snapshots', () => {
   it('joins split rows by id, scans all virtual pages, and never saves a preview', async () => {
-    const app = fixture({ entries: [{ ...work(), note: 'Behalten', reason: 'Home office' }] });
-    const snapshot = await app.adapter.scanMonth('2026-02');
-    expect(snapshot.days).toHaveLength(28);
-    expect(snapshot.days[0].nonWorking).toBe('Non working day');
-    expect(snapshot.days[1].entries[0]).toMatchObject({ start: '08:00', end: '16:00', note: 'Behalten', reason: 'Home office' });
-    expect(snapshot.days[1].editable).toBe(true);
-    expect(app.saves()).toBe(0);
-    expect(app.panel.getAttribute('aria-hidden')).toBe('true');
+    // Virtual page stability is governed by the fixture clock, not shared CI CPU
+    // availability. Preserve the adapter's readiness budget and every assertion.
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    try {
+      const app = fixture({ entries: [{ ...work(), note: 'Behalten', reason: 'Home office' }] });
+      const [snapshot] = await Promise.all([app.adapter.scanMonth('2026-02'), vi.runAllTimersAsync()]);
+      expect(snapshot.days).toHaveLength(28);
+      expect(snapshot.days[0].nonWorking).toBe('Non working day');
+      expect(snapshot.days[1].entries[0]).toMatchObject({ start: '08:00', end: '16:00', note: 'Behalten', reason: 'Home office' });
+      expect(snapshot.days[1].editable).toBe(true);
+      expect(app.saves()).toBe(0);
+      expect(app.panel.getAttribute('aria-hidden')).toBe('true');
+    } finally { vi.useRealTimers(); }
   });
+
   it('skips partial absences as whole days without opening an edit dialog', async () => {
     const app = fixture({ absence: 'Vacation · 2h' });
     const snapshot = await app.adapter.scanMonth('2026-02');
