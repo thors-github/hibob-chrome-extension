@@ -32,7 +32,7 @@ function reviewedState(mode: 'stable-identity' | 'user-confirmed-ui' | 'api-sess
   scanned.days.find(day => day.date === '2026-11-02')!.reportedMinutes = 480;
   const plan = buildMonthPlan(settings, scanned, { '2026-11-02': 'skip' }, 123);
   expect(plan.canReview).toBe(true);
-  return { schemaVersion: 6, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan };
+  return { schemaVersion: 7, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan };
 }
 
 function matchingState(): SessionState {
@@ -43,7 +43,7 @@ function matchingState(): SessionState {
     day.entries = [{ type: 'work', start: '08:07', end: '12:00' }, { type: 'break', start: '12:00', end: '12:30' }, { type: 'work', start: '12:30', end: '16:37' }];
     day.reportedMinutes = 480; day.fingerprint = `retained:${day.date}`;
   }
-  return { schemaVersion: 6, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan: buildMonthPlan(variable, scanned, {}, 73191) };
+  return { schemaVersion: 7, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan: buildMonthPlan(variable, scanned, {}, 73191) };
 }
 
 type Message = { type: string; date?: string; expectedPlanRevision?: number; changeId?: string; lease?: PlanEditLease; plan?: BookingPlan; planId?: string; jobId?: string; confirmation?: AccountConfirmation; options?: RunOptions };
@@ -57,7 +57,7 @@ function mockChrome(options: {
   onMessage?: (message: Message, state: SessionState) => Promise<Reply | undefined>;
 } = {}) {
   const listeners = new Set<StorageListener>();
-  let backend: SessionState = { schemaVersion: 6, revision: 0, planRevision: 0, ...structuredClone(options.state ?? {}) };
+  let backend: SessionState = { schemaVersion: 7, revision: 0, planRevision: 0, ...structuredClone(options.state ?? {}) };
   const sendMessage = vi.fn(async (message: Message): Promise<Reply> => {
     const custom = await options.onMessage?.(message, structuredClone(backend));
     if (custom) return custom;
@@ -98,7 +98,7 @@ function mockChrome(options: {
     sendMessage, addListener, setSettings,
     get state() { return structuredClone(backend); },
     emit(state: SessionState) {
-      backend = { schemaVersion: 6, revision: (backend.revision ?? 0) + 1, planRevision: (backend.planRevision ?? 0) + 1, ...structuredClone(state) };
+      backend = { schemaVersion: 7, revision: (backend.revision ?? 0) + 1, planRevision: (backend.planRevision ?? 0) + 1, ...structuredClone(state) };
       for (const listener of listeners) listener({ sessionState: { newValue: structuredClone(backend) } }, 'session');
     },
   };
@@ -438,7 +438,7 @@ describe('actual extension panel connection states', () => {
   });
 
   it.each(['scan', 'apply'] as const)('restores an active %s job and cancels only its canonical job id', async kind => {
-    const state: SessionState = { schemaVersion: 6, revision: 2, planRevision: 2, connection: connection(),
+    const state: SessionState = { schemaVersion: 7, revision: 2, planRevision: 2, connection: connection(),
       job: { id: `${kind}-job-7`, kind, status: 'running', connectionId: 'test-connection', month: '2026-11', startedAt: '2026-11-02T09:00:00Z', updatedAt: '2026-11-02T09:00:01Z' },
       progress: { phase: kind, completed: 7, total: 30, message: 'Local job fixture' } };
     const chrome = mockChrome({ state });
@@ -697,9 +697,9 @@ describe('actual extension panel connection states', () => {
     await vi.waitFor(() => expect(button('apply').disabled).toBe(false));
     button('apply').click(); button('check-draft').click();
     await vi.waitFor(() => expect(chrome.sendMessage.mock.calls.some(([message]) => message.type === 'PANEL_PREFLIGHT')).toBe(true));
-    chrome.emit({ schemaVersion: 6, revision: 10, planRevision: 10, connection: connection('replacement-connection') });
+    chrome.emit({ schemaVersion: 7, revision: 10, planRevision: 10, connection: connection('replacement-connection') });
     const day = initial.plan!.days.find(day => day.date === '2026-11-03')!;
-    held.resolve({ ok: true, state: { schemaVersion: 6, revision: 2, planRevision: 2, connection: connection() }, preflight: { date: day.date, checked: true, netMinutes: day.netMinutes!, saved: false, serverValidated: false } });
+    held.resolve({ ok: true, state: { schemaVersion: 7, revision: 2, planRevision: 2, connection: connection() }, preflight: { date: day.date, checked: true, netMinutes: day.netMinutes!, saved: false, serverValidated: false } });
     await settleStartup();
     expect(document.getElementById('draft-check-result')?.hidden).toBe(true);
     expect(button('apply').disabled).toBe(true);
@@ -730,7 +730,7 @@ function checkpointState(checkpointId = 'checkpoint-one'): SessionState {
   const scanned = snapshot('api-session');
   const plan = buildMonthPlan(settings, scanned, {}, 123);
   const now = '2026-11-02T10:00:00Z';
-  return { schemaVersion: 6, revision: 2, planRevision: 1, connection: connection(), snapshot: scanned, plan,
+  return { schemaVersion: 7, revision: 2, planRevision: 1, connection: connection(), snapshot: scanned, plan,
     job: { id: 'paused-job', kind: 'apply', status: 'paused', connectionId: 'test-connection', checkpointId, month: settings.month, startedAt: now, updatedAt: now },
     run: { runId: 'paused-job', planId: plan.id, status: 'paused', executionProfile: 'strict', executionFingerprint: executionFingerprint({ executionProfile: 'strict', checkpointDates: ['2026-11-02', '2026-11-03'] }), checkpointDate: '2026-11-02', startedAt: now, updatedAt: now,
       results: plan.days.map(day => ({ date: day.date, status: day.date === '2026-11-02' ? 'verified' : day.eligible ? 'pending' : 'skipped', message: day.date === '2026-11-02' ? 'Saved and verified' : 'Pending' })) } };
@@ -1001,7 +1001,7 @@ describe('compact monthly flow and verification checkpoints', () => {
   it('lets an explicitly selected unreadable workday be excluded without silently dropping its target', async () => {
     const scanned = snapshot('api-session'); const broken = scanned.days.find(day => day.date === '2026-11-03')!;
     broken.editable = false; broken.unsupportedReason = 'Unsupported local fixture entry';
-    const initial: SessionState = { schemaVersion: 6, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan: buildMonthPlan(settings, scanned, {}, 123) };
+    const initial: SessionState = { schemaVersion: 7, revision: 1, planRevision: 1, connection: connection(), snapshot: scanned, plan: buildMonthPlan(settings, scanned, {}, 123) };
     const chrome = mockChrome({ state: initial }); await mount();
     await vi.waitFor(() => expect(document.querySelector('[data-date="2026-11-03"]')).not.toBeNull());
     button('calendar-2026-11-03').click();

@@ -192,8 +192,8 @@ async function backgroundFixture(options: { initial?: SessionState; heldInitial?
   vi.stubGlobal('chrome', {
     runtime: { id: 'test', getManifest: () => ({ version: '1.2.0' }), getURL: (path: string) => `chrome-extension://test/${path}`, reload,
       onUpdateAvailable: { addListener: (listener: typeof update) => { update = listener; } }, onMessage: { addListener: (listener: typeof receiver) => { receiver = listener; } } },
-    storage: { session: { get: async () => { await options.heldInitial; return { sessionState: stored }; }, set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); } } },
-    action: { onClicked: { addListener: () => {} } }, sidePanel: { open: async () => {} },
+    storage: { local: { get: async () => ({}), set: async () => {} }, session: { get: async () => { await options.heldInitial; return { sessionState: stored }; }, set: async ({ sessionState }: { sessionState: SessionState }) => { stored = structuredClone(sessionState); } } },
+    alarms: { get: async () => ({ name: 'hibob-month-submission', periodInMinutes: 60 }), create: async () => {}, onAlarm: { addListener: () => {} } }, action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {}, setBadgeTextColor: async () => {}, setTitle: async () => {}, onClicked: { addListener: () => {} } }, sidePanel: { open: async () => {} },
   });
   await import('../src/background');
   const rpc = (message: object, sender = { id: 'test', url: 'chrome-extension://test/sidepanel.html' }) => new Promise<{ ok: boolean; state?: SessionState; error?: string }>(resolve => receiver(message, sender, resolve));

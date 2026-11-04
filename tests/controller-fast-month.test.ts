@@ -49,7 +49,7 @@ describe('fast month controller and durable dispatch boundaries', () => {
     expect(a.bridge.applyMonth).toHaveBeenCalledOnce(); expect(a.bridge.applyDay).not.toHaveBeenCalled();
     expect(a.writes).toHaveLength(21); expect(new Set(a.writes).size).toBe(21);
     expect(state.run?.status).toBe('complete'); expect(state.run?.results.filter(day => day.status === 'verified')).toHaveLength(21);
-    expect(state.schemaVersion).toBe(6); expect(state.run?.executionProfile).toBe('fast-serial');
+    expect(state.schemaVersion).toBe(7); expect(state.run?.executionProfile).toBe('fast-serial');
     expect(state.snapshot).toBeUndefined(); expect(state.job).toBeUndefined();
     expect(state.run?.timings?.requests).toBe(34);
   });
@@ -122,7 +122,7 @@ describe('fast month controller and durable dispatch boundaries', () => {
     const a = await app(); const saved = a.stored()!;
     saved.schemaVersion = 5; saved.run = { planId: 'old', status: 'complete', startedAt: 'now', updatedAt: 'now', results: [{ date: '2026-11-02', status: 'verified', message: 'Read back' }] };
     const restored = new BookingController({ ...a.bridge, load: async () => saved }); await restored.init();
-    expect(restored.state.run).toEqual(saved.run); expect(restored.state.schemaVersion).toBe(6);
+    expect(restored.state.run).toEqual(saved.run); expect(restored.state.schemaVersion).toBe(7);
     expect(restored.state.plan).toBeUndefined(); expect(restored.state.snapshot).toBeUndefined();
   });
 });
